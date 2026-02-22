@@ -217,10 +217,18 @@ class AIChatApp(App):
                 await self._handle_shell_command(text[6:].strip())
                 return
             if text.startswith("/rss "):
-                topic = text[5:].strip()
-                if not topic:
+                args = text[5:].strip()
+                if not args:
                     self._write_transcript("Assistant", "RSS command requires a topic.")
                     return
+                if args.startswith("store "):
+                    topic = args[6:].strip()
+                    if not topic:
+                        self._write_transcript("Assistant", "Usage: /rss store <topic>")
+                        return
+                    await self._rss_store_topic(topic)
+                    return
+                topic = args
                 call = ToolCall(index=0, name="rss_latest", args={"topic": topic}, call_id="", label="rss_latest")
                 results = await self._run_tool_batch([call])
                 self._log_tool_results(results)
@@ -370,6 +378,18 @@ class AIChatApp(App):
                 return "researchbox_search: missing 'topic'"
             payload = await self.tools.run_researchbox(topic, self.state.approval, self._confirm_tool)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "researchbox_push":
+            feed_url = str(args.get("feed_url", "")).strip()
+            topic = str(args.get("topic", "")).strip()
+            if not feed_url or not topic:
+                return "researchbox_push: missing 'feed_url' or 'topic'"
+            payload = await self.tools.run_researchbox_push(
+                feed_url,
+                topic,
+                self.state.approval,
+                self._confirm_tool,
+            )
+            return json.dumps(payload, ensure_ascii=False)
         if name == "shell_exec":
             if not self.state.shell_enabled:
                 return "shell_exec: shell access is disabled"
@@ -518,6 +538,55 @@ class AIChatApp(App):
         self.transcript_store.clear()
         self.messages = []
         self.query_one("#transcript", Log).clear()
+
+    async def _rss_store_topic(self, topic: str) -> None:
+        search_call = ToolCall(
+            index=0,
+            name="researchbox_search",
+            args={"topic": topic},
+            call_id="",
+            label="researchbox_search",
+        )
+        search_results = await self._run_tool_batch([search_call])
+        self._log_tool_results(search_results)
+        if any(not res.ok for res in search_results):
+            self._notify_tool_failures(search_results)
+            return
+        try:
+            search_payload = json.loads(search_results[0].output)
+        except (IndexError, json.JSONDecodeError):
+            self._write_transcript("Assistant", "Search returned invalid data. See Tools panel.")
+            return
+        feeds = search_payload.get("feeds") if isinstance(search_payload, dict) else None
+        if not isinstance(feeds, list) or not feeds:
+            self._write_transcript("Assistant", "No feeds found for this topic.")
+            return
+        push_calls: list[ToolCall] = []
+        for index, feed_url in enumerate(feeds):
+            if not isinstance(feed_url, str) or not feed_url.strip():
+                continue
+            push_calls.append(
+                ToolCall(
+                    index=index,
+                    name="researchbox_push",
+                    args={"feed_url": feed_url, "topic": topic},
+                    call_id="",
+                    label="researchbox_push",
+                )
+            )
+        if not push_calls:
+            self._write_transcript("Assistant", "No valid feeds returned. See Tools panel.")
+            return
+        push_results = await self._run_tool_batch(push_calls)
+        self._log_tool_results(push_results)
+        if any(not res.ok for res in push_results):
+            self._notify_tool_failures(push_results)
+            return
+        self._write_transcript(
+            "Assistant",
+            f"Stored {len(push_calls)} feed(s) for '{topic}'. See Tools panel.",
+        )
+
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True

@@ -71,6 +71,8 @@ Commands:
 - `/clear` (clear the transcript)
 - `/copy` (copy last assistant response)
 - `/export` (export chat to markdown)
+- `/rss <topic>` (show latest stored RSS items)
+- `/rss store <topic>` (search feeds and ingest items into the RSS service)
 
 ## Tools: batching + retries
 

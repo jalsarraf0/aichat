@@ -19,6 +19,7 @@ class ToolName(str, Enum):
     SHELL = "shell"
     RSS = "rss"
     RESEARCHBOX = "researchbox"
+    RESEARCHBOX_PUSH = "researchbox_push"
 
 
 class ToolManager:
@@ -111,6 +112,16 @@ class ToolManager:
         await self._check_approval(mode, ToolName.RESEARCHBOX.value, confirmer)
         return await self.researchbox.rb_search_feeds(topic)
 
+    async def run_researchbox_push(
+        self,
+        feed_url: str,
+        topic: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.RESEARCHBOX_PUSH.value, confirmer)
+        return await self.researchbox.rb_push_feeds(feed_url, topic)
+
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
 
@@ -141,6 +152,21 @@ class ToolManager:
                             "topic": {"type": "string", "description": "Topic to search for feeds."}
                         },
                         "required": ["topic"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "researchbox_push",
+                    "description": "Fetch an RSS feed and store items in the docker rssfeed service.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "feed_url": {"type": "string", "description": "RSS feed URL to ingest."},
+                            "topic": {"type": "string", "description": "Topic label to store items under."},
+                        },
+                        "required": ["feed_url", "topic"],
                     },
                 },
             },
