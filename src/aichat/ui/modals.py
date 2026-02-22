@@ -4,25 +4,44 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
+from dataclasses import dataclass
+
 from textual.widgets import Button, Input, Label, ListItem, ListView, Select
+
+from ..model_labels import model_options
+
+
+@dataclass(frozen=True)
+class Choice:
+    label: str
+    value: str
 
 
 class ChoiceItem(ListItem):
-    def __init__(self, choice: str) -> None:
-        super().__init__(Label(choice))
-        self.choice = choice
+    def __init__(self, label: str, value: str) -> None:
+        super().__init__(Label(label))
+        self.value = value
 
 
 class ChoiceModal(ModalScreen[str]):
-    def __init__(self, title: str, choices: list[str]) -> None:
+    def __init__(self, title: str, choices: list[str | Choice]) -> None:
         super().__init__()
         self._title = title
-        self._choices = choices
+        normalized: list[Choice] = []
+        for choice in choices:
+            if isinstance(choice, Choice):
+                normalized.append(choice)
+            else:
+                normalized.append(Choice(label=str(choice), value=str(choice)))
+        self._choices = normalized
 
     def compose(self) -> ComposeResult:
         with Vertical(id="choice-modal"):
             yield Label(self._title)
-            yield ListView(*[ChoiceItem(item) for item in self._choices], id="choice-list")
+            yield ListView(
+                *[ChoiceItem(item.label, item.value) for item in self._choices],
+                id="choice-list",
+            )
             yield Button("Close", id="close")
 
     def on_mount(self) -> None:
@@ -32,11 +51,11 @@ class ChoiceModal(ModalScreen[str]):
         choice = ""
         item = getattr(event, "item", None)
         if isinstance(item, ChoiceItem):
-            choice = item.choice
+            choice = item.value
         else:
             index = event.index
             if 0 <= index < len(self._choices):
-                choice = self._choices[index]
+                choice = self._choices[index].value
         self.dismiss(choice)
 
     def on_button_pressed(self, _: Button.Pressed) -> None:
@@ -94,10 +113,16 @@ class SettingsModal(ModalScreen[dict]):
         self.themes = themes
 
     def compose(self) -> ComposeResult:
+        model_list = self.models or [self.current["model"]]
+        if self.current["model"] not in model_list:
+            model_list = [self.current["model"], *model_list]
+        options = model_options(model_list)
+        if not options:
+            options = [(self.current["model"], self.current["model"])]
         with Vertical(id="settings-modal"):
             yield Label("Settings")
             yield Label(f"Base URL: {self.current['base_url']} (fixed)")
-            yield Select.from_values(self.models or [self.current["model"]], value=self.current["model"], id="model")
+            yield Select(options, value=self.current["model"], id="model")
             yield Select.from_values(self.themes, value=self.current["theme"], id="theme")
             yield Select.from_values(["DENY", "ASK", "AUTO"], value=self.current["approval"], id="approval")
             yield Label("Host shell tool access")

@@ -34,6 +34,7 @@ class PromptInput(TextArea):
 
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
+from .model_labels import model_options
 from .sanitizer import sanitize_response
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
@@ -227,6 +228,26 @@ class AIChatApp(App):
                         self._write_transcript("Assistant", "Usage: /rss store <topic>")
                         return
                     await self._rss_store_topic(topic)
+                    return
+                if args.startswith("ingest "):
+                    remainder = args[7:].strip()
+                    if not remainder or " " not in remainder:
+                        self._write_transcript("Assistant", "Usage: /rss ingest <topic> <feed_url>")
+                        return
+                    topic, feed_url = remainder.split(maxsplit=1)
+                    call = ToolCall(
+                        index=0,
+                        name="researchbox_push",
+                        args={"feed_url": feed_url, "topic": topic},
+                        call_id="",
+                        label="researchbox_push",
+                    )
+                    results = await self._run_tool_batch([call])
+                    self._log_tool_results(results)
+                    if any(not res.ok for res in results):
+                        self._notify_tool_failures(results)
+                    else:
+                        self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
                     return
                 topic = args
                 call = ToolCall(index=0, name="rss_latest", args={"topic": topic}, call_id="", label="rss_latest")
@@ -559,7 +580,10 @@ class AIChatApp(App):
             return
         feeds = search_payload.get("feeds") if isinstance(search_payload, dict) else None
         if not isinstance(feeds, list) or not feeds:
-            self._write_transcript("Assistant", "No feeds found for this topic.")
+            self._write_transcript(
+                "Assistant",
+                "No feeds found. Try https://rssfinder.app/ or https://rss.app/rss-feed to locate a feed URL.",
+            )
             return
         push_calls: list[ToolCall] = []
         for index, feed_url in enumerate(feeds):
@@ -575,12 +599,19 @@ class AIChatApp(App):
                 )
             )
         if not push_calls:
-            self._write_transcript("Assistant", "No valid feeds returned. See Tools panel.")
+            self._write_transcript(
+                "Assistant",
+                "No valid feeds returned. Try https://rssfinder.app/ or https://rss.app/rss-feed.",
+            )
             return
         push_results = await self._run_tool_batch(push_calls)
         self._log_tool_results(push_results)
         if any(not res.ok for res in push_results):
             self._notify_tool_failures(push_results)
+            self._write_transcript(
+                "Assistant",
+                "If feeds fail to ingest, try https://rssfinder.app/ or https://rss.app/rss-feed and use /rss ingest.",
+            )
             return
         self._write_transcript(
             "Assistant",
@@ -732,13 +763,16 @@ class AIChatApp(App):
         except LLMClientError as exc:
             self.notify(str(exc), severity="error")
             return
+        options = model_options(models or [self.state.model])
+        if not options:
+            options = [(self.state.model, self.state.model)]
         def _apply(selected: object) -> asyncio.Future | None:
             if isinstance(selected, str) and selected:
                 self.state.model = selected
                 return self.update_status()
             return None
 
-        self._push_modal(ChoiceModal("Pick Model", models), _apply)
+        self._push_modal(ChoiceModal("Pick Model", options), _apply)
 
     async def action_search(self) -> None:
         def _apply(query: object) -> None:
@@ -765,6 +799,8 @@ class AIChatApp(App):
 
     async def action_settings(self) -> None:
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
+        if self.state.model not in models:
+            models = [self.state.model, *models]
         def _apply(values: object) -> asyncio.Future | None:
             if not isinstance(values, dict) or not values:
                 return None
