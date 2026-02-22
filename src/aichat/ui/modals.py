@@ -20,10 +20,7 @@ class ChoiceModal(ModalScreen[str]):
             yield Button("Close", id="close")
 
     def on_mount(self) -> None:
-        list_view = self.query_one("#choice-list", ListView)
-        if self._choices:
-            list_view.index = 0
-        self.set_focus(list_view)
+        self.set_focus(self.query_one("#choice-list", ListView))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = event.index
