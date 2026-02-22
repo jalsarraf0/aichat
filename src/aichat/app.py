@@ -222,6 +222,9 @@ class AIChatApp(App):
             if text.startswith("/export"):
                 await self.action_export_chat()
                 return
+            if text.startswith("/help"):
+                await self.action_help()
+                return
             if text.startswith("/shell"):
                 await self._handle_shell_command(text[6:].strip())
                 return
