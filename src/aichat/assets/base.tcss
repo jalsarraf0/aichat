@@ -1,0 +1,25 @@
+#topbar {
+    height: 3;
+}
+
+#status {
+    height: 1;
+}
+
+#main {
+    height: 1fr;
+}
+
+#transcript {
+    width: 60%;
+    padding: 0 1;
+}
+
+#toolpane {
+    width: 40%;
+    padding: 0 1;
+}
+
+#prompt {
+    margin: 0 0 1 0;
+}
