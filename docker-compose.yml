@@ -1,0 +1,34 @@
+services:
+  aichat-rssfeed-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: rssfeed
+      POSTGRES_USER: rss
+      POSTGRES_PASSWORD: rss
+    volumes:
+      - rssdb:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  aichat-rssfeed:
+    build: ./docker/rssfeed
+    environment:
+      DATABASE_URL: postgresql://rss:rss@aichat-rssfeed-db:5432/rssfeed
+      PURGE_INTERVAL_SECONDS: 21600
+      RETENTION_DAYS: 30
+    depends_on:
+      - aichat-rssfeed-db
+    ports:
+      - "8091:8091"
+
+  aichat-researchbox:
+    build: ./docker/researchbox
+    tty: true
+    stdin_open: true
+    volumes:
+      - /tmp/research:/tmp/research
+    ports:
+      - "8092:8092"
+
+volumes:
+  rssdb:
