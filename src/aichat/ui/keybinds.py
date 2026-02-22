@@ -28,7 +28,7 @@ KEYBINDS: list[KeybindSpec] = [
     KeybindSpec("f11", "cancel", "Cancel"),
     KeybindSpec("f12", "quit", "Quit"),
     KeybindSpec("ctrl+s", "toggle_shell", "Shell"),
-    KeybindSpec("ctrl+;", "personality", "Persona"),
+    KeybindSpec("ctrl+g", "personality", "Persona"),
 ]
 
 
@@ -44,8 +44,8 @@ def display_key(key: str) -> str:
         return key_upper(key_lower)
     if key_lower == "ctrl+s":
         return "^S"
-    if key_lower == "ctrl+;":
-        return "^:"
+    if key_lower == "ctrl+g":
+        return "^G"
     return key
 
 

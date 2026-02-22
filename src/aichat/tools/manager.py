@@ -57,12 +57,13 @@ class ToolManager:
         cwd: str | None = None,
     ) -> str:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
-        command = self._ensure_non_interactive_sudo(command)
-        session_id = await self.shell.sh_start(cwd=cwd)
-        await self.shell.sh_send(session_id, command + "\n")
-        output = await self.shell.sh_read(session_id, timeout_ms=1200)
-        await self.shell.sh_close(session_id)
-        return output.strip()
+        exit_code, output = await self._run_shell_process(command, cwd=cwd)
+        trimmed = output.strip()
+        if exit_code != 0:
+            if trimmed:
+                return f"{trimmed}\n(exit {exit_code})"
+            return f"(exit {exit_code})"
+        return trimmed
 
     async def run_shell_stream(
         self,
@@ -74,6 +75,15 @@ class ToolManager:
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
+        return await self._run_shell_process(command, cwd=cwd, on_output=on_output)
+
+    async def _run_shell_process(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        on_output: Callable[[str], None] | None = None,
+    ) -> tuple[int, str]:
         command = self._ensure_non_interactive_sudo(command)
         proc = await asyncio.create_subprocess_exec(
             "bash",

@@ -24,7 +24,7 @@ class AppConfig:
     shell_enabled: bool = True
     active_personality: str = DEFAULT_PERSONALITY_ID
     personalities: list[dict[str, str]] = field(default_factory=default_personalities)
-    config_version: int = 4
+    config_version: int = 5
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -47,7 +47,7 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["concise_mode"] = defaults["concise_mode"]
     else:
         merged["concise_mode"] = bool(merged.get("concise_mode", defaults["concise_mode"]))
-    if cfg_version < 3:
+    if cfg_version < 5:
         merged["shell_enabled"] = defaults["shell_enabled"]
     else:
         merged["shell_enabled"] = bool(
