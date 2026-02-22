@@ -46,7 +46,7 @@ docker compose down --volumes --remove-orphans
 - Shift+Enter: Newline
 - PageUp/PageDown: Scroll transcript
 - Ctrl+S: Toggle shell access
-- Ctrl+P: Help (shown after F12 in the keybind bar)
+- Ctrl+H: Help (shown after F12 in the keybind bar)
 - F1: Help
 - F2: Model picker
 - F3: Search transcript
@@ -60,7 +60,7 @@ docker compose down --volumes --remove-orphans
 - F11: Cancel streaming
 - F12: Quit
 
-Keybind bar order is always `F1..F12` then `^P`.
+Keybind bar order is always `F1..F12` then `^H`.
 
 Model picker labels include emojis that hint at capabilities (e.g., vision, code, tools).
 
