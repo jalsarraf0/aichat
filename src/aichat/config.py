@@ -15,7 +15,7 @@ CONFIG_PATH = Path.home() / ".config" / "aichat" / "config.yml"
 
 @dataclass(frozen=True)
 class AppConfig:
-    base_url: str = LM_STUDIO_BASE_URL
+    base_url: str = "http://localhost:1234"
     model: str = "local-model"
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
