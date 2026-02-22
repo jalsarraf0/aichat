@@ -6,7 +6,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from dataclasses import dataclass
 
-from textual.widgets import Button, Input, Label, ListItem, ListView, Select
+from textual.widgets import Button, Input, Label, ListItem, ListView, Select, TextArea
 
 from ..model_labels import model_options
 
@@ -135,6 +135,33 @@ class RssIngestModal(ModalScreen[dict]):
             topic = self.query_one("#rss-topic", Input).value.strip()
             feed_url = self.query_one("#rss-feed-url", Input).value.strip()
             self.dismiss({"topic": topic, "feed_url": feed_url})
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss({})
+            event.stop()
+
+
+class PersonalityAddModal(ModalScreen[dict]):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="persona-add-modal"):
+            yield Label("Add Personality")
+            yield Input(placeholder="Name", id="persona-name")
+            yield TextArea(id="persona-prompt")
+            yield Button("Save", id="save")
+            yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.set_focus(self.query_one("#persona-name", Input))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss({})
+            return
+        if event.button.id == "save":
+            name = self.query_one("#persona-name", Input).value.strip()
+            prompt = self.query_one("#persona-prompt", TextArea).text.strip()
+            self.dismiss({"name": name, "prompt": prompt})
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
