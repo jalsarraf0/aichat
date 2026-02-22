@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+import shutil
 
 from .state import Message
 
@@ -22,6 +23,22 @@ class TranscriptStore:
         }
         with self.path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def has_content(self) -> bool:
+        return self.path.exists() and self.path.stat().st_size > 0
+
+    def clear(self) -> None:
+        if self.path.exists():
+            self.path.write_text("", encoding="utf-8")
+
+    def archive_to(self, target_dir: Path) -> Path | None:
+        if not self.has_content():
+            return None
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = target_dir / f"aichat-{timestamp}.jsonl"
+        shutil.copy2(self.path, dest)
+        return dest
 
     def load_messages(self) -> list[Message]:
         if not self.path.exists():

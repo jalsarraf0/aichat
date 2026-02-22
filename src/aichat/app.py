@@ -56,7 +56,7 @@ class AIChatApp(App):
             base_url=cfg["base_url"],
             theme=cfg["theme"],
             approval=ApprovalMode(cfg["approval"]),
-            concise_mode=cfg.get("concise_mode", True),
+            concise_mode=cfg.get("concise_mode", False),
             shell_enabled=cfg.get("shell_enabled", False),
             cwd=str(Path.cwd()),
         )
@@ -94,16 +94,7 @@ class AIChatApp(App):
         self._apply_theme_with_fallback(self.state.theme)
         transcript = self.query_one("#transcript", Log)
         transcript.clear()
-        for message in self.messages[-200:]:
-            if message.role == "user":
-                self._write_transcript("You", message.content)
-            elif message.role == "assistant":
-                sanitized = sanitize_response(message.content)
-                if sanitized.structured_hidden:
-                    display = "Output contained structured data. See Tools panel for details."
-                else:
-                    display = sanitized.text or "No response."
-                self._write_transcript("Assistant", display)
+        self._start_new_chat(initial=True)
         self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
         self._refresh_sessions()
@@ -209,6 +200,18 @@ class AIChatApp(App):
                 return
             if text.startswith("/verbose"):
                 await self._set_concise(False)
+                return
+            if text.startswith("/new"):
+                await self.action_new_chat()
+                return
+            if text.startswith("/clear"):
+                await self.action_clear_transcript()
+                return
+            if text.startswith("/copy"):
+                await self.action_copy_last()
+                return
+            if text.startswith("/export"):
+                await self.action_export_chat()
                 return
             if text.startswith("/shell"):
                 await self._handle_shell_command(text[6:].strip())
@@ -401,7 +404,11 @@ class AIChatApp(App):
                 + " No <think>. No JSON/XML. Use short bullets when helpful."
                 + " Max ~8-12 lines unless the user asks for more."
             )
-        return base + " Respond with the final answer only. Avoid meta commentary. No <think>."
+        return (
+            base
+            + " Respond with the final answer only. Be clear and thorough without meta commentary."
+            + " No <think>. Use short bullets when helpful. Provide longer responses when useful."
+        )
 
     def _write_transcript(self, speaker: str, text: str) -> None:
         log = self.query_one("#transcript", Log)
@@ -421,7 +428,7 @@ class AIChatApp(App):
             if not display:
                 display = "No response."
         self._write_transcript("Assistant", display)
-        assistant = Message("assistant", display[:4000], full_content=content)
+        assistant = Message("assistant", display, full_content=content)
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
 
@@ -496,6 +503,21 @@ class AIChatApp(App):
         if len(self._session_notes) > 20:
             self._session_notes = self._session_notes[-20:]
         self._refresh_sessions()
+
+    def _start_new_chat(self, initial: bool = False) -> None:
+        archived = self.transcript_store.archive_to(Path("/tmp/context"))
+        if archived:
+            self._log_session(f"Archived chat to {archived}")
+        self.transcript_store.clear()
+        self.messages = []
+        self.query_one("#transcript", Log).clear()
+        if not initial:
+            self._write_transcript("Assistant", "New chat started.")
+
+    def _clear_transcript(self) -> None:
+        self.transcript_store.clear()
+        self.messages = []
+        self.query_one("#transcript", Log).clear()
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -663,6 +685,14 @@ class AIChatApp(App):
 
     async def action_sessions(self) -> None:
         self._refresh_sessions()
+
+    async def action_new_chat(self) -> None:
+        self._start_new_chat()
+        await self.update_status()
+
+    async def action_clear_transcript(self) -> None:
+        self._clear_transcript()
+        await self.update_status()
 
     async def action_settings(self) -> None:
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
