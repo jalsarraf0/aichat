@@ -20,7 +20,7 @@ class ToolName(str, Enum):
 
 
 class ToolManager:
-    def __init__(self, max_tool_calls_per_turn: int = 3) -> None:
+    def __init__(self, max_tool_calls_per_turn: int = 1) -> None:
         self.shell = ShellTool()
         self.rss = RSSTool()
         self.researchbox = ResearchboxTool()

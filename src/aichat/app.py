@@ -23,16 +23,18 @@ from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 class AIChatApp(App):
     BINDINGS = [
         Binding("enter", "send", "Send", priority=True),
-        Binding("escape", "cancel", "Cancel", priority=True),
-        Binding("ctrl+q", "quit", "Quit", priority=True),
-        Binding("ctrl+i", "theme_picker", "Theme", priority=True),
-        Binding("ctrl+a", "cycle_approval", "Approval", priority=True),
+        Binding("f1", "help", "Help", priority=True),
         Binding("f2", "pick_model", "Model", priority=True),
         Binding("f3", "search", "Search", priority=True),
+        Binding("f4", "cycle_approval", "Approval", priority=True),
+        Binding("f5", "theme_picker", "Theme", priority=True),
         Binding("f6", "toggle_streaming", "Streaming", priority=True),
         Binding("f7", "sessions", "Sessions", priority=True),
         Binding("f8", "settings", "Settings", priority=True),
+        Binding("f9", "copy_last", "Copy", priority=True),
         Binding("f10", "export_chat", "Export", priority=True),
+        Binding("f11", "cancel", "Cancel", priority=True),
+        Binding("f12", "quit", "Quit", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -213,6 +215,12 @@ class AIChatApp(App):
         self.state.streaming = not self.state.streaming
         await self.update_status()
 
+
+    async def action_help(self) -> None:
+        self.notify(
+            "F1 Help | F2 Model | F3 Search | F4 Approval | F5 Theme | F6 Streaming | F7 Sessions | F8 Settings | F9 Copy | F10 Export | F11 Cancel | F12 Quit"
+        )
+
     async def action_pick_model(self) -> None:
         try:
             models = await self.client.list_models()
@@ -270,6 +278,15 @@ class AIChatApp(App):
             }
         )
         await self.update_status()
+
+
+    async def action_copy_last(self) -> None:
+        for message in reversed(self.messages):
+            if message.role == "assistant":
+                self.copy_to_clipboard(message.full_content or message.content)
+                self.notify("Copied last assistant message")
+                return
+        self.notify("No assistant message to copy", severity="warning")
 
     async def action_export_chat(self) -> None:
         out = Path.home() / ".local" / "share" / "aichat" / f"export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
