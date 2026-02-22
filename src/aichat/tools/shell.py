@@ -6,9 +6,14 @@ import signal
 from dataclasses import dataclass
 
 
+class ShellToolError(RuntimeError):
+    pass
+
+
 @dataclass
 class ShellSession:
     process: asyncio.subprocess.Process
+    cwd: str
 
 
 class ShellTool:
@@ -27,32 +32,49 @@ class ShellTool:
         )
         sid = str(self._next_id)
         self._next_id += 1
-        self.sessions[sid] = ShellSession(proc)
+        self.sessions[sid] = ShellSession(process=proc, cwd=cwd or os.getcwd())
         return sid
 
-    async def sh_send(self, session_id: str, text: str) -> None:
-        s = self.sessions[session_id]
-        assert s.process.stdin is not None
-        s.process.stdin.write(text.encode())
-        await s.process.stdin.drain()
+    def _session(self, session_id: str) -> ShellSession:
+        if session_id not in self.sessions:
+            raise ShellToolError(f"Unknown shell session: {session_id}")
+        return self.sessions[session_id]
 
-    async def sh_read(self, session_id: str, max_bytes: int = 4096, timeout_ms: int = 200) -> str:
-        s = self.sessions[session_id]
-        assert s.process.stdout is not None
+    async def sh_send(self, session_id: str, text: str) -> None:
+        session = self._session(session_id)
+        if session.process.stdin is None:
+            raise ShellToolError("Shell session stdin unavailable")
+        session.process.stdin.write(text.encode())
+        await session.process.stdin.drain()
+
+    async def sh_read(self, session_id: str, max_bytes: int = 8192, timeout_ms: int = 250) -> str:
+        session = self._session(session_id)
+        if session.process.stdout is None:
+            raise ShellToolError("Shell session stdout unavailable")
         try:
-            data = await asyncio.wait_for(s.process.stdout.read(max_bytes), timeout=timeout_ms / 1000)
+            data = await asyncio.wait_for(session.process.stdout.read(max_bytes), timeout=timeout_ms / 1000)
         except asyncio.TimeoutError:
             return ""
         return data.decode(errors="replace")
 
     async def sh_interrupt(self, session_id: str) -> None:
-        s = self.sessions[session_id]
-        os.killpg(os.getpgid(s.process.pid), signal.SIGINT)
+        session = self._session(session_id)
+        if session.process.returncode is None:
+            os.killpg(os.getpgid(session.process.pid), signal.SIGINT)
 
     async def sh_close(self, session_id: str) -> None:
-        s = self.sessions.pop(session_id)
+        session = self.sessions.pop(session_id, None)
+        if session is None:
+            return
+        process = session.process
+        if process.returncode is not None:
+            return
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-            if s.process.returncode is not None:
+            if process.returncode is not None:
                 return
-            os.killpg(os.getpgid(s.process.pid), sig)
-            await asyncio.sleep(0.15)
+            os.killpg(os.getpgid(process.pid), sig)
+            await asyncio.sleep(0.2)
+
+    async def close_all(self) -> None:
+        for session_id in list(self.sessions):
+            await self.sh_close(session_id)
