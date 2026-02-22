@@ -85,7 +85,11 @@ class AIChatApp(App):
 
     def apply_theme(self, name: str) -> None:
         self.state.theme = name
-        self.stylesheet.read_all([THEMES.get(name, THEMES["cyberpunk"])])
+        self.stylesheet.add_source(
+            THEMES.get(name, THEMES["cyberpunk"]),
+            read_from=("aichat.theme", "active"),
+        )
+        self.refresh_css(animate=False)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.run_worker(self.handle_submit(event.value), exclusive=True)
