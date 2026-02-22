@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import textwrap
 import time
 from collections.abc import Callable
@@ -56,6 +57,7 @@ class AIChatApp(App):
 
     def __init__(self) -> None:
         super().__init__()
+        self._project_root = Path("~/git")
         cfg = load_config()
         self.state = AppState(
             model=cfg["model"],
@@ -222,6 +224,13 @@ class AIChatApp(App):
                 return
             if text.startswith("/shell"):
                 await self._handle_shell_command(text[6:].strip())
+                return
+            if text.startswith("/vibecode"):
+                name = text[len("/vibecode"):].strip()
+                if not name:
+                    self._write_transcript("Assistant", "Usage: /vibecode <project>")
+                    return
+                await self._create_project(name)
                 return
             if text.startswith("/rss "):
                 args = text[5:].strip()
@@ -447,6 +456,7 @@ class AIChatApp(App):
             "You are a senior ultra gigabrain Linux engineer with deep Docker, Python, Rust, "
             "and multi-language expertise."
         )
+        base += " When creating new projects, use ~/git/<project>."
         if self.state.concise_mode:
             return (
                 base
@@ -657,6 +667,32 @@ class AIChatApp(App):
             self._notify_tool_failures(results)
             return
         self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
+
+    async def _create_project(self, name: str) -> None:
+        cleaned = name.strip()
+        if not cleaned or cleaned in {".", ".."}:
+            self._write_transcript("Assistant", "Invalid project name.")
+            return
+        if re.search(r"[\\\\/]", cleaned):
+            self._write_transcript("Assistant", "Project name must not contain slashes.")
+            return
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", cleaned):
+            self._write_transcript(
+                "Assistant",
+                "Project name must use letters, numbers, dot, underscore, or dash.",
+            )
+            return
+        root = self._project_root.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        project_path = (root / cleaned).resolve()
+        if not str(project_path).startswith(str(root)):
+            self._write_transcript("Assistant", "Project path escapes the workspace.")
+            return
+        project_path.mkdir(parents=True, exist_ok=True)
+        self.state.cwd = str(project_path)
+        await self.update_status()
+        self._log_session(f"Project set to {project_path}")
+        self._write_transcript("Assistant", f"Project ready at {project_path}.")
 
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
