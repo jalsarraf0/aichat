@@ -94,6 +94,7 @@ Commands:
 - `!<cmd>` (shortcut when shell is ON)
 
 Approval mode still applies: `ASK` prompts, `AUTO` runs immediately. Output streams to the Tools panel; the Transcript shows only a short summary.
+If you run sudo commands, the shell tool uses non-interactive sudo (`sudo -n`). If your sudo policy requires a password, the command will fail and report the error.
 
 ## GitHub Repo Creation
 
