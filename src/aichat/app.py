@@ -10,6 +10,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Log, Static, TextArea
 
@@ -43,11 +44,15 @@ from .tools.manager import ToolDeniedError, ToolManager
 from .transcript import TranscriptStore
 from .ui.keybind_bar import KeybindBar
 from .ui.keybinds import binding_list, render_keybinds
-from .ui.modals import ChoiceModal, SearchModal, SettingsModal
+from .ui.modals import ChoiceModal, RssIngestModal, SearchModal, SettingsModal
 
 
 class AIChatApp(App):
-    BINDINGS = binding_list()
+    BINDINGS = binding_list() + [
+        Binding("ctrl+s", "toggle_shell", "Shell", priority=True),
+        Binding("pageup", "scroll_up", "ScrollUp", priority=True),
+        Binding("pagedown", "scroll_down", "ScrollDown", priority=True),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -99,6 +104,7 @@ class AIChatApp(App):
         self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
         self._refresh_sessions()
+        asyncio.create_task(self._load_default_model())
 
     def apply_theme(self, name: str) -> None:
         selected_name = name if name in THEMES else "cyberpunk"
@@ -248,6 +254,9 @@ class AIChatApp(App):
                         self._notify_tool_failures(results)
                     else:
                         self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
+                    return
+                if args == "ingest":
+                    await self._rss_ingest_modal()
                     return
                 topic = args
                 call = ToolCall(index=0, name="rss_latest", args={"topic": topic}, call_id="", label="rss_latest")
@@ -447,8 +456,8 @@ class AIChatApp(App):
             )
         return (
             base
-            + " Respond with the final answer only. Be clear and thorough without meta commentary."
-            + " No <think>. Use short bullets when helpful. Provide longer responses when useful."
+            + " Respond with the final answer only. Be clear, detailed, and a bit more verbose."
+            + " No <think>. Use short bullets when helpful. Include extra context and practical guidance."
         )
 
     def _write_transcript(self, speaker: str, text: str) -> None:
@@ -618,6 +627,29 @@ class AIChatApp(App):
             f"Stored {len(push_calls)} feed(s) for '{topic}'. See Tools panel.",
         )
 
+    async def _rss_ingest_modal(self) -> None:
+        values = await self._show_modal(RssIngestModal())
+        if not isinstance(values, dict) or not values:
+            return
+        topic = str(values.get("topic", "")).strip()
+        feed_url = str(values.get("feed_url", "")).strip()
+        if not topic or not feed_url:
+            self._write_transcript("Assistant", "Usage: /rss ingest <topic> <feed_url>")
+            return
+        call = ToolCall(
+            index=0,
+            name="researchbox_push",
+            args={"feed_url": feed_url, "topic": topic},
+            call_id="",
+            label="researchbox_push",
+        )
+        results = await self._run_tool_batch([call])
+        self._log_tool_results(results)
+        if any(not res.ok for res in results):
+            self._notify_tool_failures(results)
+            return
+        self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
+
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -732,6 +764,58 @@ class AIChatApp(App):
                     redacted = redacted.replace(value, "****")
         return redacted
 
+    async def _load_default_model(self) -> None:
+        try:
+            models = await self.client.list_models()
+        except LLMClientError as exc:
+            self._log_session(f"Model load failed: {exc}")
+            return
+        if not models:
+            return
+        if self.state.model not in models:
+            self.state.model = models[0]
+            save_config(
+                {
+                    "base_url": self.state.base_url,
+                    "model": self.state.model,
+                    "theme": self.state.theme,
+                    "approval": self.state.approval.value,
+                    "shell_enabled": self.state.shell_enabled,
+                    "concise_mode": self.state.concise_mode,
+                }
+            )
+            await self.update_status()
+            self._log_session(f"Default model set to {self.state.model}")
+
+    async def action_toggle_shell(self) -> None:
+        self.state.shell_enabled = not self.state.shell_enabled
+        save_config(
+            {
+                "base_url": self.state.base_url,
+                "model": self.state.model,
+                "theme": self.state.theme,
+                "approval": self.state.approval.value,
+                "shell_enabled": self.state.shell_enabled,
+                "concise_mode": self.state.concise_mode,
+            }
+        )
+        await self.update_status()
+        self._write_transcript(
+            "Assistant",
+            f"Shell {'enabled' if self.state.shell_enabled else 'disabled'}.",
+        )
+
+    async def action_scroll_up(self) -> None:
+        log = self.query_one("#transcript", Log)
+        log.auto_scroll = False
+        log.scroll_page_up()
+
+    async def action_scroll_down(self) -> None:
+        log = self.query_one("#transcript", Log)
+        log.scroll_page_down()
+        if log.is_vertical_scroll_end:
+            log.auto_scroll = True
+
     async def action_cancel(self) -> None:
         if self.active_task and not self.active_task.done():
             self.active_task.cancel()
@@ -766,11 +850,25 @@ class AIChatApp(App):
         options = model_options(models or [self.state.model])
         if not options:
             options = [(self.state.model, self.state.model)]
-        def _apply(selected: object) -> asyncio.Future | None:
+        async def _apply(selected: object) -> None:
             if isinstance(selected, str) and selected:
+                try:
+                    await self.client.ensure_model(selected)
+                except LLMClientError as exc:
+                    self.notify(str(exc), severity="error")
+                    return
                 self.state.model = selected
-                return self.update_status()
-            return None
+                save_config(
+                    {
+                        "base_url": self.state.base_url,
+                        "model": self.state.model,
+                        "theme": self.state.theme,
+                        "approval": self.state.approval.value,
+                        "shell_enabled": self.state.shell_enabled,
+                        "concise_mode": self.state.concise_mode,
+                    }
+                )
+                await self.update_status()
 
         self._push_modal(ChoiceModal("Pick Model", options), _apply)
 
@@ -801,11 +899,18 @@ class AIChatApp(App):
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
         if self.state.model not in models:
             models = [self.state.model, *models]
-        def _apply(values: object) -> asyncio.Future | None:
+        async def _apply(values: object) -> None:
             if not isinstance(values, dict) or not values:
-                return None
+                return
+            selected_model = str(values["model"])
+            if await self.client.health():
+                try:
+                    await self.client.ensure_model(selected_model)
+                except LLMClientError as exc:
+                    self.notify(str(exc), severity="error")
+                    return
             self.state.base_url = LM_STUDIO_BASE_URL
-            self.state.model = str(values["model"])
+            self.state.model = selected_model
             self.state.approval = ApprovalMode(str(values["approval"]))
             self.state.shell_enabled = bool(values.get("shell_enabled", self.state.shell_enabled))
             self.state.concise_mode = bool(values.get("concise_mode", self.state.concise_mode))
@@ -822,7 +927,7 @@ class AIChatApp(App):
                     "concise_mode": self.state.concise_mode,
                 }
             )
-            return self.update_status()
+            await self.update_status()
 
         self._push_modal(
             SettingsModal(

@@ -44,6 +44,8 @@ docker compose down --volumes --remove-orphans
 
 - Enter: Send
 - Shift+Enter: Newline
+- PageUp/PageDown: Scroll transcript
+- Ctrl+S: Toggle shell access
 - Ctrl+P: Help (shown after F12 in the keybind bar)
 - F1: Help
 - F2: Model picker
@@ -76,6 +78,7 @@ Commands:
 - `/rss <topic>` (show latest stored RSS items)
 - `/rss store <topic>` (search feeds and ingest items into the RSS service)
 - `/rss ingest <topic> <feed_url>` (ingest a specific feed URL; useful with rssfinder.app or rss.app)
+- `/rss ingest` (opens a modal to enter topic + feed URL)
 
 ## Tools: batching + retries
 
