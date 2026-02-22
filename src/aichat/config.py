@@ -19,7 +19,8 @@ class AppConfig:
     model: str = "local-model"
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
-    allow_host_shell: bool = True
+    concise_mode: bool = True
+    shell_enabled: bool = False
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -33,7 +34,10 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["theme"] = defaults["theme"]
     if merged["approval"] not in {m.value for m in ApprovalMode}:
         merged["approval"] = defaults["approval"]
-    merged["allow_host_shell"] = bool(merged.get("allow_host_shell", defaults["allow_host_shell"]))
+    merged["concise_mode"] = bool(merged.get("concise_mode", defaults["concise_mode"]))
+    merged["shell_enabled"] = bool(
+        merged.get("shell_enabled", merged.get("allow_host_shell", defaults["shell_enabled"]))
+    )
     return merged
 
 

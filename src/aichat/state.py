@@ -40,8 +40,10 @@ class AppState:
     approval: ApprovalMode = ApprovalMode.ASK
     streaming: bool = True
     theme: str = "cyberpunk"
-    allow_host_shell: bool = True
+    concise_mode: bool = True
+    shell_enabled: bool = False
     busy: bool = False
     cwd: str = "."
-    max_tool_calls_per_turn: int = 1
+    max_tool_calls_per_turn: int = 4
+    tool_concurrency: int = 1
     tool_calls_this_turn: int = 0
