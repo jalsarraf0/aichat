@@ -2,8 +2,6 @@
 
 Codex-like Textual TUI with research/operator tooling and theme switching.
 
-Default OpenAI-compatible endpoint: `http://localhost:1234`.
-
 ## Install (user-local, no sudo)
 
 ```bash
