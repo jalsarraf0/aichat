@@ -80,7 +80,7 @@ class AIChatApp(App):
         self._apply_theme_with_fallback(self.state.theme)
         transcript = self.query_one("#transcript", Log)
         for message in self.messages[-100:]:
-            transcript.write_line(f"{message.role}> {message.content}")
+            transcript.write_line(self._format_transcript_line(message))
         self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
 
@@ -135,7 +135,7 @@ class AIChatApp(App):
         user = Message("user", text)
         self.messages.append(user)
         self.transcript_store.append(user)
-        self.query_one("#transcript", Log).write_line(f"user> {text}")
+        self.query_one("#transcript", Log).write_line(self._format_transcript_line(user))
         self.active_task = asyncio.create_task(self.run_llm_turn())
         await self.active_task
 
@@ -242,9 +242,8 @@ class AIChatApp(App):
     async def _stream_with_tools(self, tools: list[dict[str, object]]) -> tuple[str, list[dict[str, object]]]:
         transcript = self.query_one("#transcript", Log)
         content = ""
-        self._stream_line = ""
+        self._stream_line = f"{self._model_tag()} "
         tool_call_state: dict[int, dict[str, object]] = {}
-        transcript.write_line("assistant> ")
         async for event in self.client.chat_stream_events(
             self.state.model,
             [m.as_chat_dict() for m in self.messages],
@@ -265,7 +264,7 @@ class AIChatApp(App):
                 if isinstance(deltas, list):
                     self._merge_tool_call_deltas(tool_call_state, deltas)
         if self._stream_line:
-            transcript.write_line(self._stream_line)
+            transcript.write_line(self._stream_line.rstrip())
             self._stream_line = ""
         tool_calls = [tool_call_state[idx] for idx in sorted(tool_call_state)]
         return content, tool_calls
@@ -317,9 +316,8 @@ class AIChatApp(App):
     async def _run_followup_response(self) -> None:
         transcript = self.query_one("#transcript", Log)
         content = ""
-        self._stream_line = ""
+        self._stream_line = f"{self._model_tag()} "
         if self.state.streaming:
-            transcript.write_line("assistant> ")
             async for chunk in self.client.chat_stream(self.state.model, [m.as_chat_dict() for m in self.messages]):
                 content += chunk
                 self._stream_line += chunk
@@ -328,14 +326,29 @@ class AIChatApp(App):
                         transcript.write_line(line)
                     self._stream_line = self._stream_line.splitlines()[-1]
             if self._stream_line:
-                transcript.write_line(self._stream_line)
+                transcript.write_line(self._stream_line.rstrip())
                 self._stream_line = ""
         else:
             content = await self.client.chat_once(self.state.model, [m.as_chat_dict() for m in self.messages])
-            transcript.write_line(f"assistant> {content}")
+            transcript.write_line(f"{self._model_tag()} {content}")
         assistant = Message("assistant", content[:4000], full_content=content)
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
+
+    def _model_tag(self) -> str:
+        name = self.state.model.strip() if self.state.model else "Model"
+        return f"<{name}>"
+
+    def _format_transcript_line(self, message: Message) -> str:
+        if message.role == "user":
+            tag = "<User>"
+        elif message.role == "assistant":
+            tag = self._model_tag()
+        elif message.role == "tool":
+            tag = "<Tool>"
+        else:
+            tag = f"<{message.role}>"
+        return f"{tag} {message.content}".rstrip()
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
