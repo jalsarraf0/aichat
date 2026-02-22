@@ -19,30 +19,10 @@ Codex-like Textual TUI with research mode, operator mode, strict tool sequencing
 
 ## Install
 
-### Simplest path
-
 ```bash
-cd aichat
-./install.sh
-```
-
-This script will:
-
-- install Python (best effort) if missing,
-- create `.venv` and install package dependencies,
-- install `aichat` launcher into `/usr/local/bin` (fallback: `$HOME/.local/bin`),
-- start Docker services needed by RSS/Researchbox.
-
-If installed to `$HOME/.local/bin`, add:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### Alternate invocations
-
-```bash
-bash scripts/install/install.sh
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 ## Run TUI
@@ -104,30 +84,3 @@ Artifacts from researchbox are expected under `/tmp/research` (bind mount).
 - [ ] Purge older than 30 days works (scheduled + manual).
 - [ ] Tool outputs never garble transcript; tool pane shows raw with paging/search.
 - [ ] Export (F10) and copy (F9) include full content.
-
-
-## Troubleshooting Install Errors
-
-If `aichat` is still not found after install, ensure you used:
-
-```bash
-./install.sh
-# or
-bash scripts/install/install.sh
-```
-
-If the installer had to fall back to `$HOME/.local/bin`, add it to PATH:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Also verify typos: `python3` (not `pyton3`).
-
-## Uninstall
-
-```bash
-./uninstall.sh
-```
-
-This tears down docker resources and removes local AIChat artifacts.

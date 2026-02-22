@@ -20,8 +20,6 @@
 From repository root:
 
 ```bash
-./install.sh
-# or
 ./scripts/bootstrap/install_aichat.sh
 ```
 

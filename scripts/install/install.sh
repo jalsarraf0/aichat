@@ -71,49 +71,20 @@ source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 
-install_launcher() {
-  local target_dir=""
-  if [[ -w /usr/local/bin ]]; then
-    target_dir="/usr/local/bin"
-  elif command -v sudo >/dev/null 2>&1 && sudo -n test -w /usr/local/bin >/dev/null 2>&1; then
-    target_dir="/usr/local/bin"
-  else
-    target_dir="$HOME/.local/bin"
-    mkdir -p "$target_dir"
-  fi
-
-  local tmp
-  tmp="$(mktemp)"
-  cat > "$tmp" <<WRAP
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/aichat" <<WRAP
 #!/usr/bin/env bash
 exec "$REPO_ROOT/.venv/bin/aichat" "\$@"
 WRAP
+chmod 0755 "$HOME/.local/bin/aichat"
 
-  if [[ "$target_dir" == "/usr/local/bin" ]]; then
-    if [[ -w /usr/local/bin ]]; then
-      install -m 0755 "$tmp" /usr/local/bin/aichat
-    elif command -v sudo >/dev/null 2>&1; then
-      sudo install -m 0755 "$tmp" /usr/local/bin/aichat
-    else
-      rm -f "$tmp"
-      fail "Need sudo/root to install launcher into /usr/local/bin"
-    fi
-    log "Installed launcher at /usr/local/bin/aichat"
-  else
-    install -m 0755 "$tmp" "$target_dir/aichat"
-    warn "Installed launcher at $target_dir/aichat"
-    if [[ ":${PATH}:" != *":$HOME/.local/bin:"* ]]; then
-      warn "~/.local/bin is not currently in PATH. Add: export PATH="$HOME/.local/bin:\$PATH""
-    fi
-  fi
-  rm -f "$tmp"
-}
-
-install_launcher
+if [[ ":${PATH}:" != *":$HOME/.local/bin:"* ]]; then
+  warn "~/.local/bin is not currently in PATH. Add: export PATH=\"$HOME/.local/bin:\$PATH\""
+fi
 
 log "Starting Docker services..."
 docker compose up -d --build
 
 log "Install complete."
-log "Run now with: aichat"
+log "Run now with: $HOME/.local/bin/aichat"
 log "Or activate venv: source .venv/bin/activate && aichat"

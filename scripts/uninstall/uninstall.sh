@@ -15,16 +15,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-
-remove_launcher() {
-  if [[ -w /usr/local/bin ]]; then
-    rm -f /usr/local/bin/aichat
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo rm -f /usr/local/bin/aichat >/dev/null 2>&1 || true
-  fi
-  rm -f "$HOME/.local/bin/aichat" "$HOME/.local/bin/aichat-cli" "$HOME/.local/bin/aichat-dev"
-}
-
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   log "Stopping/removing Docker services, volumes, and local images..."
   docker compose down --volumes --rmi local --remove-orphans || warn "docker compose down encountered an issue"
@@ -37,7 +27,9 @@ if [[ -d .venv ]]; then
   log "Removed .venv"
 fi
 
-remove_launcher
+rm -f "$HOME/.local/bin/aichat"
+rm -f "$HOME/.local/bin/aichat-cli"
+rm -f "$HOME/.local/bin/aichat-dev"
 
 rm -rf "$HOME/.config/aichat" "$HOME/.local/share/aichat" "$HOME/.cache/aichat"
 

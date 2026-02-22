@@ -6,7 +6,7 @@
 
 - Detects/installs Python (best effort via distro package manager).
 - Creates project `.venv` and installs AIChat.
-- Installs `aichat` launcher in `/usr/local/bin` when allowed, fallback to `$HOME/.local/bin`.
+- Creates `$HOME/.local/bin/aichat` launcher so command works without activating venv.
 - Starts Docker services with `docker compose up -d --build`.
 
 ## Usage
@@ -21,7 +21,7 @@ bash scripts/install/install.sh
 
 - CM-6: consistent install configuration.
 - SI-2: dependency update/install workflow.
-- AC-6: local venv with least-privilege launcher placement and fallback.
+- AC-6: local venv and user-space launcher.
 - AU-2: structured installer logs.
 - RA-5: integrates with repo security checks.
 
