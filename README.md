@@ -1,1 +1,132 @@
-Test
+# AIChat
+
+Codex-like Textual TUI with research mode, operator mode, strict tool sequencing (one tool call at a time), tri-state approvals, theme picker, and Docker-backed RSS + researchbox services.
+
+## Features Implemented
+
+- Default OpenAI-compatible endpoint: `http://localhost:1234`
+- Keybindings including required `Ctrl+O` command palette and `Ctrl+I` theme picker
+- Approval tri-state (`DENY → ASK → AUTO`) on `Ctrl+A`
+- Esc immediate cancellation for active chat and shell interruptions
+- Research mode (`/research`), operator mode (`/operator` or `/code`), and `/continue`
+- Full content persistence (JSONL transcript) and markdown export (`F10`)
+- Tool pane separate from transcript (compact transcript entries)
+- Theme system (Cyberpunk, Synth, Modern, Light, Pastel) persisted in config
+- Docker stack:
+  - Postgres
+  - RSS service with scheduled purge every 6h and manual purge endpoint
+  - Researchbox with feed discovery + feed push into RSS
+
+## Install
+
+### Simplest path
+
+```bash
+cd aichat
+./install.sh
+```
+
+This script will:
+
+- install Python (best effort) if missing,
+- create `.venv` and install package dependencies,
+- create `$HOME/.local/bin/aichat` launcher,
+- start Docker services needed by RSS/Researchbox.
+
+If `aichat` is still not found, add:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Alternate invocations
+
+```bash
+bash scripts/install/install.sh
+python3 install
+```
+
+## Run TUI
+
+```bash
+aichat
+```
+
+## Start/Stop Docker Stack
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose down
+```
+
+Artifacts from researchbox are expected under `/tmp/research` (bind mount).
+
+## Commands in chat
+
+- `/research` – enable deep research mode
+- `/operator` or `/code` – enable operator/vibe coding mode
+- `/continue` – continue prior flow
+
+## Keybindings
+
+- Enter: Send
+- Shift+Enter: Newline
+- Esc: Cancel
+- Ctrl+Q: Quit
+- Ctrl+O: Command palette
+- Ctrl+I: Theme picker
+- Ctrl+A: Cycle approval mode
+- F1: Help
+- F2: Model picker
+- F3: Search transcript
+- F4: Toggle auto-approve (legacy)
+- F5: Refresh models
+- F6: Toggle streaming
+- F7: Sessions
+- F8: Settings
+- F9: Copy last assistant full message
+- F10: Export full chat to markdown
+- F11: Focus mode toggle
+- F12: Debug overlay
+
+## Manual Test Checklist
+
+- [ ] Ctrl+O opens command palette.
+- [ ] Ctrl+I opens theme picker; switching themes persists and applies instantly.
+- [ ] Ctrl+A cycles approval modes; status updates; tool gating respected.
+- [ ] Base URL shows localhost:1234 UP/DOWN.
+- [ ] F5 models refresh; F2 model switch.
+- [ ] Enter send / Shift+Enter newline.
+- [ ] Esc cancel mid-stream and mid-tool.
+- [ ] Shell: sh_start → sh_send → sh_read; Esc cancels; sh_close.
+- [ ] Operator mode creates program and runs it.
+- [ ] Research mode uses rssfeed + feed discovery + refresh + summary.
+- [ ] Purge older than 30 days works (scheduled + manual).
+- [ ] Tool outputs never garble transcript; tool pane shows raw with paging/search.
+- [ ] Export (F10) and copy (F9) include full content.
+
+
+## Troubleshooting Install Errors
+
+If you see `python3 install` errors about `set -euo pipefail`, you are running a shell script with Python.
+Use one of:
+
+```bash
+./install
+# or
+python3 install
+# or
+bash scripts/bootstrap/install_aichat.sh
+```
+
+Also verify typos: `python3` (not `pyton3`).
+
+
+## Uninstall
+
+```bash
+./uninstall.sh
+```
+
+This tears down docker resources and removes local AIChat artifacts.
