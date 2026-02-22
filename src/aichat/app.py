@@ -12,6 +12,25 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Log, Static, TextArea
 
+
+class PromptInput(TextArea):
+    async def _on_key(self, event) -> None:
+        self._restart_blink()
+        if self.read_only:
+            return
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            asyncio.create_task(self.app.action_send())
+            return
+        if event.key == "shift+enter":
+            event.stop()
+            event.prevent_default()
+            start, end = self.selection
+            self._replace_via_keyboard("\n", start, end)
+            return
+        await super()._on_key(event)
+
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
 from .state import AppState, ApprovalMode, Message
@@ -23,8 +42,6 @@ from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 
 class AIChatApp(App):
     BINDINGS = [
-        Binding("enter", "send", "Send", priority=True),
-        Binding("shift+enter", "newline", "Newline", priority=True),
         Binding("f1", "help", "Help", priority=True),
         Binding("f2", "pick_model", "Model", priority=True),
         Binding("f3", "search", "Search", priority=True),
@@ -79,7 +96,7 @@ class AIChatApp(App):
                     yield Log(id="sessionpane", auto_scroll=True)
             with Vertical(id="input-pane"):
                 yield Static("Prompt", classes="pane-title")
-                yield TextArea(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
+                yield PromptInput(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -486,10 +503,6 @@ class AIChatApp(App):
         out = Path.home() / ".local" / "share" / "aichat" / f"export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
         self.transcript_store.export_markdown(out)
         self.notify(f"exported to {out}")
-    async def action_newline(self) -> None:
-        if self.focused and self.focused.id == "prompt":
-            prompt = self.query_one("#prompt", TextArea)
-            prompt.insert("\n")
 
 
 def main() -> None:
