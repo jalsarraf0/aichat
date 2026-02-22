@@ -49,7 +49,7 @@ class SettingsModal(ModalScreen[dict]):
     def compose(self) -> ComposeResult:
         with Vertical(id="settings-modal"):
             yield Label("Settings")
-            yield Input(value=self.current["base_url"], id="base-url")
+            yield Label(f"Base URL: {self.current['base_url']} (fixed)")
             yield Select.from_values(self.models or [self.current["model"]], value=self.current["model"], id="model")
             yield Select.from_values(self.themes, value=self.current["theme"], id="theme")
             yield Select.from_values(["DENY", "ASK", "AUTO"], value=self.current["approval"], id="approval")
@@ -63,7 +63,7 @@ class SettingsModal(ModalScreen[dict]):
         if event.button.id == "save":
             self.dismiss(
                 {
-                    "base_url": self.query_one("#base-url", Input).value.strip(),
+                    "base_url": self.current["base_url"],
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
