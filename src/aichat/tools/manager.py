@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from collections.abc import Awaitable, Callable
 from enum import Enum
 
@@ -56,6 +57,7 @@ class ToolManager:
         cwd: str | None = None,
     ) -> str:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
+        command = self._ensure_non_interactive_sudo(command)
         session_id = await self.shell.sh_start(cwd=cwd)
         await self.shell.sh_send(session_id, command + "\n")
         output = await self.shell.sh_read(session_id, timeout_ms=1200)
@@ -72,6 +74,7 @@ class ToolManager:
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
+        command = self._ensure_non_interactive_sudo(command)
         proc = await asyncio.create_subprocess_exec(
             "bash",
             "-lc",
@@ -93,6 +96,21 @@ class ToolManager:
                 on_output(text)
         exit_code = await proc.wait()
         return exit_code, "".join(output_chunks).strip()
+
+    def _ensure_non_interactive_sudo(self, command: str) -> str:
+        stripped = command.lstrip()
+        if not stripped.startswith("sudo "):
+            return command
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return command
+        if not parts or parts[0] != "sudo":
+            return command
+        if "-n" in parts or "--non-interactive" in parts:
+            return command
+        parts.insert(1, "-n")
+        return shlex.join(parts)
 
     async def run_rss(
         self,
