@@ -46,6 +46,7 @@ class AIChatApp(App):
             base_url=cfg["base_url"],
             theme=cfg["theme"],
             approval=ApprovalMode(cfg["approval"]),
+            allow_host_shell=cfg.get("allow_host_shell", True),
             cwd=str(Path.cwd()),
         )
         self.client = LLMClient(self.state.base_url)
@@ -55,6 +56,10 @@ class AIChatApp(App):
         self.active_task: asyncio.Task[None] | None = None
         self._stream_line = ""
         self._loaded_theme_sources: set[str] = set()
+        self.system_prompt = (
+            "You are a senior ultra gigabrain Linux engineer with deep Docker, Python, Rust, "
+            "and multi-language expertise. Provide concise, correct, production-grade guidance."
+        )
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -112,7 +117,11 @@ class AIChatApp(App):
             f"model={self.state.model} | base={self.state.base_url} | server={'UP' if up else 'DOWN'}"
         )
         self.query_one("#status", Static).update(
-            f"stream={'ON' if self.state.streaming else 'OFF'} | approval={self.state.approval.value} | cwd={self.state.cwd}"
+            "stream="
+            + ("ON" if self.state.streaming else "OFF")
+            + f" | approval={self.state.approval.value}"
+            + f" | shell={'ON' if self.state.allow_host_shell else 'OFF'}"
+            + f" | cwd={self.state.cwd}"
         )
 
     async def action_send(self) -> None:
@@ -143,14 +152,14 @@ class AIChatApp(App):
         self.state.busy = True
         transcript = self.query_one("#transcript", Log)
         content = ""
-        tools = self.tools.tool_definitions()
+        tools = self.tools.tool_definitions(self.state.allow_host_shell)
         try:
             if self.state.streaming:
                 content, tool_calls = await self._stream_with_tools(tools)
             else:
                 response = await self.client.chat_once_with_tools(
                     self.state.model,
-                    [m.as_chat_dict() for m in self.messages],
+                    self._llm_messages(),
                     tools=tools,
                 )
                 content = response.get("content", "")
@@ -246,7 +255,7 @@ class AIChatApp(App):
         tool_call_state: dict[int, dict[str, object]] = {}
         async for event in self.client.chat_stream_events(
             self.state.model,
-            [m.as_chat_dict() for m in self.messages],
+            self._llm_messages(),
             tools=tools,
         ):
             if event.get("type") == "content":
@@ -311,6 +320,12 @@ class AIChatApp(App):
                 return "researchbox_search: missing 'topic'"
             payload = await self.tools.run_researchbox(topic, self.state.approval, self._confirm_tool)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "shell_exec":
+            command = str(args.get("command", "")).strip()
+            if not command:
+                return "shell_exec: missing 'command'"
+            output = await self.tools.run_shell(command, self.state.approval, self._confirm_tool, cwd=self.state.cwd)
+            return output or "(no output)"
         return f"unknown tool '{name}'"
 
     async def _run_followup_response(self) -> None:
@@ -318,7 +333,7 @@ class AIChatApp(App):
         content = ""
         self._stream_line = f"{self._model_tag()} "
         if self.state.streaming:
-            async for chunk in self.client.chat_stream(self.state.model, [m.as_chat_dict() for m in self.messages]):
+            async for chunk in self.client.chat_stream(self.state.model, self._llm_messages()):
                 content += chunk
                 self._stream_line += chunk
                 if "\n" in self._stream_line:
@@ -329,7 +344,7 @@ class AIChatApp(App):
                 transcript.write_line(self._stream_line.rstrip())
                 self._stream_line = ""
         else:
-            content = await self.client.chat_once(self.state.model, [m.as_chat_dict() for m in self.messages])
+            content = await self.client.chat_once(self.state.model, self._llm_messages())
             transcript.write_line(f"{self._model_tag()} {content}")
         assistant = Message("assistant", content[:4000], full_content=content)
         self.messages.append(assistant)
@@ -344,11 +359,16 @@ class AIChatApp(App):
             tag = "<User>"
         elif message.role == "assistant":
             tag = self._model_tag()
+            if not message.content and "tool_calls" in message.metadata:
+                return f"{tag} [tool call]"
         elif message.role == "tool":
             tag = "<Tool>"
         else:
             tag = f"<{message.role}>"
         return f"{tag} {message.content}".rstrip()
+
+    def _llm_messages(self) -> list[dict[str, object]]:
+        return [{"role": "system", "content": self.system_prompt}, *[m.as_chat_dict() for m in self.messages]]
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -423,6 +443,7 @@ class AIChatApp(App):
             self.state.base_url = LM_STUDIO_BASE_URL
             self.state.model = str(values["model"])
             self.state.approval = ApprovalMode(str(values["approval"]))
+            self.state.allow_host_shell = bool(values.get("allow_host_shell", self.state.allow_host_shell))
             self.client = LLMClient(self.state.base_url)
             self._apply_theme_with_fallback(str(values["theme"]))
             save_config(
@@ -431,7 +452,7 @@ class AIChatApp(App):
                     "model": self.state.model,
                     "theme": self.state.theme,
                     "approval": self.state.approval.value,
-                    "allow_host_shell": False,
+                    "allow_host_shell": self.state.allow_host_shell,
                 }
             )
             return self.update_status()
@@ -443,6 +464,7 @@ class AIChatApp(App):
                     "model": self.state.model,
                     "theme": self.state.theme,
                     "approval": self.state.approval.value,
+                    "allow_host_shell": self.state.allow_host_shell,
                 },
                 models=models,
                 themes=list(THEMES),
