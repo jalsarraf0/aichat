@@ -103,8 +103,14 @@ class SettingsModal(ModalScreen[dict]):
             yield Label("Host shell tool access")
             yield Select.from_values(
                 ["true", "false"],
-                value="true" if self.current.get("allow_host_shell") else "false",
-                id="allow_host_shell",
+                value="true" if self.current.get("shell_enabled") else "false",
+                id="shell_enabled",
+            )
+            yield Label("Concise mode")
+            yield Select.from_values(
+                ["true", "false"],
+                value="true" if self.current.get("concise_mode") else "false",
+                id="concise_mode",
             )
             yield Button("Save", id="save")
             yield Button("Cancel", id="cancel")
@@ -123,7 +129,8 @@ class SettingsModal(ModalScreen[dict]):
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
-                    "allow_host_shell": str(self.query_one("#allow_host_shell", Select).value) == "true",
+                    "shell_enabled": str(self.query_one("#shell_enabled", Select).value) == "true",
+                    "concise_mode": str(self.query_one("#concise_mode", Select).value) == "true",
                 }
             )
 
@@ -135,7 +142,8 @@ class SettingsModal(ModalScreen[dict]):
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
-                    "allow_host_shell": str(self.query_one("#allow_host_shell", Select).value) == "true",
+                    "shell_enabled": str(self.query_one("#shell_enabled", Select).value) == "true",
+                    "concise_mode": str(self.query_one("#concise_mode", Select).value) == "true",
                 }
             )
             event.stop()

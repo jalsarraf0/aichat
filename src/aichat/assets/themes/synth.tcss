@@ -4,7 +4,8 @@ Screen {
 }
 
 Header,
-Footer {
+Footer,
+#keybind-bar {
     background: #250d40;
     color: #e8a8ff;
 }

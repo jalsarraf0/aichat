@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aichat = "aichat.app:main"
+aichat = "aichat.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

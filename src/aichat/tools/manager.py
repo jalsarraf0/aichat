@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from enum import Enum
 
@@ -59,6 +61,38 @@ class ToolManager:
         await self.shell.sh_close(session_id)
         return output.strip()
 
+    async def run_shell_stream(
+        self,
+        command: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+        *,
+        cwd: str | None = None,
+        on_output: Callable[[str], None] | None = None,
+    ) -> tuple[int, str]:
+        await self._check_approval(mode, ToolName.SHELL.value, confirmer)
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            "-lc",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+            env=os.environ.copy(),
+        )
+        output_chunks: list[str] = []
+        assert proc.stdout is not None
+        while True:
+            data = await proc.stdout.read(1024)
+            if not data:
+                break
+            text = data.decode(errors="replace")
+            output_chunks.append(text)
+            if on_output:
+                on_output(text)
+        exit_code = await proc.wait()
+        return exit_code, "".join(output_chunks).strip()
+
     async def run_rss(
         self,
         topic: str,
@@ -80,7 +114,7 @@ class ToolManager:
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
 
-    def tool_definitions(self, allow_shell: bool) -> list[dict[str, object]]:
+    def tool_definitions(self, shell_enabled: bool) -> list[dict[str, object]]:
         tools: list[dict[str, object]] = [
             {
                 "type": "function",
@@ -111,7 +145,7 @@ class ToolManager:
                 },
             },
         ]
-        if allow_shell:
+        if shell_enabled:
             tools.append(
                 {
                     "type": "function",

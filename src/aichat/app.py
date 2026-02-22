@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import as_file, files
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Log, Static, TextArea
+from textual.widgets import Header, Log, Static, TextArea
 
 
 class PromptInput(TextArea):
@@ -33,28 +34,19 @@ class PromptInput(TextArea):
 
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
+from .sanitizer import sanitize_response
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
+from .tool_scheduler import ToolCall, ToolResult, ToolScheduler
 from .tools.manager import ToolDeniedError, ToolManager
 from .transcript import TranscriptStore
+from .ui.keybind_bar import KeybindBar
+from .ui.keybinds import binding_list, render_keybinds
 from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 
 
 class AIChatApp(App):
-    BINDINGS = [
-        Binding("f1", "help", "Help", priority=True),
-        Binding("f2", "pick_model", "Model", priority=True),
-        Binding("f3", "search", "Search", priority=True),
-        Binding("f4", "cycle_approval", "Approval", priority=True),
-        Binding("f5", "theme_picker", "Theme", priority=True),
-        Binding("f6", "toggle_streaming", "Streaming", priority=True),
-        Binding("f7", "sessions", "Sessions", priority=True),
-        Binding("f8", "settings", "Settings", priority=True),
-        Binding("f9", "copy_last", "Copy", priority=True),
-        Binding("f10", "export_chat", "Export", priority=True),
-        Binding("f11", "cancel", "Cancel", priority=True),
-        Binding("f12", "quit", "Quit", priority=True),
-    ]
+    BINDINGS = binding_list()
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,7 +56,8 @@ class AIChatApp(App):
             base_url=cfg["base_url"],
             theme=cfg["theme"],
             approval=ApprovalMode(cfg["approval"]),
-            allow_host_shell=cfg.get("allow_host_shell", True),
+            concise_mode=cfg.get("concise_mode", True),
+            shell_enabled=cfg.get("shell_enabled", False),
             cwd=str(Path.cwd()),
         )
         self.client = LLMClient(self.state.base_url)
@@ -72,12 +65,10 @@ class AIChatApp(App):
         self.transcript_store = TranscriptStore()
         self.messages = self.transcript_store.load_messages()
         self.active_task: asyncio.Task[None] | None = None
-        self._stream_line = ""
         self._loaded_theme_sources: set[str] = set()
-        self.system_prompt = (
-            "You are a senior ultra gigabrain Linux engineer with deep Docker, Python, Rust, "
-            "and multi-language expertise. Provide concise, correct, production-grade guidance."
-        )
+        self.system_prompt = self._build_system_prompt()
+        self._session_notes: list[str] = []
+        self._pending_tools: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -96,16 +87,26 @@ class AIChatApp(App):
                     yield Log(id="sessionpane", auto_scroll=True)
             with Vertical(id="input-pane"):
                 yield Static("Prompt", classes="pane-title")
-                yield PromptInput(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
-        yield Footer()
+                yield PromptInput(placeholder="Ask anything.", id="prompt")
+        yield KeybindBar(id="keybind-bar")
 
     async def on_mount(self) -> None:
         self._apply_theme_with_fallback(self.state.theme)
         transcript = self.query_one("#transcript", Log)
-        for message in self.messages[-100:]:
-            transcript.write_line(self._format_transcript_line(message))
+        transcript.clear()
+        for message in self.messages[-200:]:
+            if message.role == "user":
+                self._write_transcript("You", message.content)
+            elif message.role == "assistant":
+                sanitized = sanitize_response(message.content)
+                if sanitized.structured_hidden:
+                    display = "Output contained structured data. See Tools panel for details."
+                else:
+                    display = sanitized.text or "No response."
+                self._write_transcript("Assistant", display)
         self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
+        self._refresh_sessions()
 
     def apply_theme(self, name: str) -> None:
         selected_name = name if name in THEMES else "cyberpunk"
@@ -138,7 +139,8 @@ class AIChatApp(App):
             "stream="
             + ("ON" if self.state.streaming else "OFF")
             + f" | approval={self.state.approval.value}"
-            + f" | shell={'ON' if self.state.allow_host_shell else 'OFF'}"
+            + f" | concise={'ON' if self.state.concise_mode else 'OFF'}"
+            + f" | shell={'ON' if self.state.shell_enabled else 'OFF'}"
             + f" | cwd={self.state.cwd}"
         )
 
@@ -158,19 +160,21 @@ class AIChatApp(App):
         if text.startswith("/"):
             asyncio.create_task(self.handle_command(text))
             return
+        if text.startswith("!"):
+            asyncio.create_task(self._handle_shell_command(text[1:]))
+            return
         self.tools.reset_turn()
         user = Message("user", text)
         self.messages.append(user)
         self.transcript_store.append(user)
-        self.query_one("#transcript", Log).write_line(self._format_transcript_line(user))
+        self._write_transcript("You", text)
         self.active_task = asyncio.create_task(self.run_llm_turn())
         await self.active_task
 
     async def run_llm_turn(self) -> None:
         self.state.busy = True
-        transcript = self.query_one("#transcript", Log)
         content = ""
-        tools = self.tools.tool_definitions(self.state.allow_host_shell)
+        tools = self.tools.tool_definitions(self.state.shell_enabled)
         try:
             if self.state.streaming:
                 content, tool_calls = await self._stream_with_tools(tools)
@@ -185,40 +189,61 @@ class AIChatApp(App):
             if tool_calls:
                 await self._handle_tool_calls(tool_calls)
             else:
-                if not self.state.streaming:
-                    transcript.write_line(f"assistant> {content}")
-                assistant = Message("assistant", content[:4000], full_content=content)
-                self.messages.append(assistant)
-                self.transcript_store.append(assistant)
+                self._finalize_assistant_response(content)
         except asyncio.CancelledError:
-            transcript.write_line("[stream cancelled]")
+            self._write_transcript("Assistant", "Request cancelled.")
             raise
         except LLMClientError as exc:
-            transcript.write_line(f"[llm error] {exc}")
+            self._write_transcript("Assistant", f"LLM error: {exc}")
         finally:
             self.state.busy = False
             self.active_task = None
             await self.update_status()
+            self._refresh_sessions()
 
     async def handle_command(self, text: str) -> None:
         self.tools.reset_turn()
-        log = self.query_one("#toolpane", Log)
         try:
-            if text.startswith("/shell "):
-                output = await self.tools.run_shell(text[7:], self.state.approval, self._confirm_tool, cwd=self.state.cwd)
-                log.write_line(output or "(no output)")
-            elif text.startswith("/rss "):
-                payload = await self.tools.run_rss(text[5:], self.state.approval, self._confirm_tool)
-                log.write_line(str(payload))
-            elif text.startswith("/researchbox "):
-                payload = await self.tools.run_researchbox(text[13:], self.state.approval, self._confirm_tool)
-                log.write_line(str(payload))
-            else:
-                self.notify("Unknown command")
+            if text.startswith("/concise"):
+                await self._toggle_concise(text)
+                return
+            if text.startswith("/verbose"):
+                await self._set_concise(False)
+                return
+            if text.startswith("/shell"):
+                await self._handle_shell_command(text[6:].strip())
+                return
+            if text.startswith("/rss "):
+                topic = text[5:].strip()
+                if not topic:
+                    self._write_transcript("Assistant", "RSS command requires a topic.")
+                    return
+                call = ToolCall(index=0, name="rss_latest", args={"topic": topic}, call_id="", label="rss_latest")
+                results = await self._run_tool_batch([call])
+                self._log_tool_results(results)
+                if any(not res.ok for res in results):
+                    self._notify_tool_failures(results)
+                else:
+                    self._write_transcript("Assistant", "RSS fetched. See Tools panel for details.")
+                return
+            if text.startswith("/researchbox "):
+                topic = text[13:].strip()
+                if not topic:
+                    self._write_transcript("Assistant", "Researchbox command requires a topic.")
+                    return
+                call = ToolCall(index=0, name="researchbox_search", args={"topic": topic}, call_id="", label="researchbox_search")
+                results = await self._run_tool_batch([call])
+                self._log_tool_results(results)
+                if any(not res.ok for res in results):
+                    self._notify_tool_failures(results)
+                else:
+                    self._write_transcript("Assistant", "Researchbox search complete. See Tools panel for details.")
+                return
+            self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
-            log.write_line(f"[denied] {exc}")
+            self._tool_log(f"[denied] {exc}")
         except Exception as exc:
-            log.write_line(f"[tool error] {exc}")
+            self._tool_log(f"[tool error] {exc}")
 
 
     async def _show_modal(self, screen: object) -> object:
@@ -267,9 +292,7 @@ class AIChatApp(App):
                     func["arguments"] = str(func.get("arguments", "")) + str(call["function"]["arguments"])
 
     async def _stream_with_tools(self, tools: list[dict[str, object]]) -> tuple[str, list[dict[str, object]]]:
-        transcript = self.query_one("#transcript", Log)
         content = ""
-        self._stream_line = f"{self._model_tag()} "
         tool_call_state: dict[int, dict[str, object]] = {}
         async for event in self.client.chat_stream_events(
             self.state.model,
@@ -281,29 +304,22 @@ class AIChatApp(App):
                 if not chunk:
                     continue
                 content += chunk
-                self._stream_line += chunk
-                if "\n" in self._stream_line:
-                    for line in self._stream_line.splitlines()[:-1]:
-                        transcript.write_line(line)
-                    self._stream_line = self._stream_line.splitlines()[-1]
             elif event.get("type") == "tool_calls":
                 deltas = event.get("value", [])
                 if isinstance(deltas, list):
                     self._merge_tool_call_deltas(tool_call_state, deltas)
-        if self._stream_line:
-            transcript.write_line(self._stream_line.rstrip())
-            self._stream_line = ""
         tool_calls = [tool_call_state[idx] for idx in sorted(tool_call_state)]
         return content, tool_calls
 
     async def _handle_tool_calls(self, tool_calls: list[dict[str, object]]) -> None:
         if not tool_calls:
             return
-        log = self.query_one("#toolpane", Log)
         assistant = Message("assistant", "", full_content="", metadata={"tool_calls": tool_calls})
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
-        for call in tool_calls[: self.state.max_tool_calls_per_turn]:
+        calls: list[ToolCall] = []
+        immediate_results: list[ToolResult] = []
+        for index, call in enumerate(tool_calls[: self.state.max_tool_calls_per_turn]):
             name = ""
             args_text = ""
             call_id = ""
@@ -311,21 +327,34 @@ class AIChatApp(App):
                 name = str(call["function"].get("name", ""))
                 args_text = str(call["function"].get("arguments", ""))
             call_id = str(call.get("id", "")) if call.get("id") else ""
-            result_text = await self._execute_tool_call(name, args_text)
-            log.write_line(f"[tool:{name}] {result_text[:4000]}")
-            tool_msg = Message("tool", result_text[:4000], full_content=result_text, metadata={"tool_call_id": call_id})
-            self.messages.append(tool_msg)
-            self.transcript_store.append(tool_msg)
+            try:
+                args = json.loads(args_text) if args_text else {}
+            except json.JSONDecodeError as exc:
+                error = f"invalid tool arguments: {exc}"
+                immediate_results.append(
+                    ToolResult(
+                        call=ToolCall(index=index, name=name, args={}, call_id=call_id, label=name),
+                        ok=False,
+                        output="",
+                        attempts=1,
+                        duration=0.0,
+                        error=error,
+                    )
+                )
+                continue
+            calls.append(ToolCall(index=index, name=name, args=args, call_id=call_id, label=name))
+
+        results: list[ToolResult] = []
+        if calls:
+            results = await self._run_tool_batch(calls)
+        results = results + immediate_results
+        results.sort(key=lambda r: r.call.index)
+        self._log_tool_results(results)
+        self._append_tool_messages(results)
+        self._notify_tool_failures(results)
         await self._run_followup_response()
 
-    async def _execute_tool_call(self, name: str, args_text: str) -> str:
-        log = self.query_one("#toolpane", Log)
-        try:
-            args = json.loads(args_text) if args_text else {}
-        except json.JSONDecodeError as exc:
-            error = f"invalid tool arguments: {exc}"
-            log.write_line(f"[tool error] {error}")
-            return error
+    async def _execute_tool_call(self, name: str, args: dict[str, object]) -> str:
         if name == "rss_latest":
             topic = str(args.get("topic", "")).strip()
             if not topic:
@@ -339,6 +368,8 @@ class AIChatApp(App):
             payload = await self.tools.run_researchbox(topic, self.state.approval, self._confirm_tool)
             return json.dumps(payload, ensure_ascii=False)
         if name == "shell_exec":
+            if not self.state.shell_enabled:
+                return "shell_exec: shell access is disabled"
             command = str(args.get("command", "")).strip()
             if not command:
                 return "shell_exec: missing 'command'"
@@ -347,46 +378,124 @@ class AIChatApp(App):
         return f"unknown tool '{name}'"
 
     async def _run_followup_response(self) -> None:
-        transcript = self.query_one("#transcript", Log)
         content = ""
-        self._stream_line = f"{self._model_tag()} "
         if self.state.streaming:
             async for chunk in self.client.chat_stream(self.state.model, self._llm_messages()):
                 content += chunk
-                self._stream_line += chunk
-                if "\n" in self._stream_line:
-                    for line in self._stream_line.splitlines()[:-1]:
-                        transcript.write_line(line)
-                    self._stream_line = self._stream_line.splitlines()[-1]
-            if self._stream_line:
-                transcript.write_line(self._stream_line.rstrip())
-                self._stream_line = ""
         else:
             content = await self.client.chat_once(self.state.model, self._llm_messages())
-            transcript.write_line(f"{self._model_tag()} {content}")
-        assistant = Message("assistant", content[:4000], full_content=content)
-        self.messages.append(assistant)
-        self.transcript_store.append(assistant)
-
-    def _model_tag(self) -> str:
-        name = self.state.model.strip() if self.state.model else "Model"
-        return f"<{name}>"
-
-    def _format_transcript_line(self, message: Message) -> str:
-        if message.role == "user":
-            tag = "<User>"
-        elif message.role == "assistant":
-            tag = self._model_tag()
-            if not message.content and "tool_calls" in message.metadata:
-                return f"{tag} [tool call]"
-        elif message.role == "tool":
-            tag = "<Tool>"
-        else:
-            tag = f"<{message.role}>"
-        return f"{tag} {message.content}".rstrip()
+        self._finalize_assistant_response(content)
 
     def _llm_messages(self) -> list[dict[str, object]]:
         return [{"role": "system", "content": self.system_prompt}, *[m.as_chat_dict() for m in self.messages]]
+
+    def _build_system_prompt(self) -> str:
+        base = (
+            "You are a senior ultra gigabrain Linux engineer with deep Docker, Python, Rust, "
+            "and multi-language expertise."
+        )
+        if self.state.concise_mode:
+            return (
+                base
+                + " Respond with the final answer only. Be concise. No planning. No meta commentary."
+                + " No <think>. No JSON/XML. Use short bullets when helpful."
+                + " Max ~8-12 lines unless the user asks for more."
+            )
+        return base + " Respond with the final answer only. Avoid meta commentary. No <think>."
+
+    def _write_transcript(self, speaker: str, text: str) -> None:
+        log = self.query_one("#transcript", Log)
+        lines = (text or "").splitlines() or [""]
+        prefix = f"{speaker}:"
+        log.write_line(f"{prefix} {lines[0]}".rstrip())
+        pad = " " * (len(prefix) + 1)
+        for line in lines[1:]:
+            log.write_line(f"{pad}{line}".rstrip())
+
+    def _finalize_assistant_response(self, content: str) -> None:
+        sanitized = sanitize_response(content)
+        if sanitized.structured_hidden:
+            display = "Output contained structured data. See Tools panel for details."
+        else:
+            display = sanitized.text.strip()
+            if not display:
+                display = "No response."
+        self._write_transcript("Assistant", display)
+        assistant = Message("assistant", display[:4000], full_content=content)
+        self.messages.append(assistant)
+        self.transcript_store.append(assistant)
+
+    def _tool_log(self, message: str) -> None:
+        self.query_one("#toolpane", Log).write_line(message)
+
+    def _log_tool_results(self, results: list[ToolResult]) -> None:
+        for result in results:
+            if result.ok:
+                output = result.output or "(no output)"
+            else:
+                output = result.error or "Tool failed"
+            snippet = output.strip()
+            if result.call.name == "shell_exec":
+                snippet = self._redact_secrets(snippet)
+            if len(snippet) > 4000:
+                snippet = snippet[:4000] + " ...[truncated]"
+            self._tool_log(f"result [{result.call.name}] {snippet}")
+
+    def _append_tool_messages(self, results: list[ToolResult]) -> None:
+        for result in results:
+            payload = result.output if result.ok else (result.error or "Tool failed")
+            tool_msg = Message(
+                "tool",
+                payload[:4000],
+                full_content=payload,
+                metadata={"tool_call_id": result.call.call_id},
+            )
+            self.messages.append(tool_msg)
+            self.transcript_store.append(tool_msg)
+
+    def _notify_tool_failures(self, results: list[ToolResult]) -> None:
+        failures = [res for res in results if not res.ok]
+        if not failures:
+            return
+        summary = "; ".join(
+            f"{res.call.name}: {(res.error or 'failed').splitlines()[0][:120]}" for res in failures[:3]
+        )
+        self._write_transcript("Assistant", f"Tool error: {summary}. See Tools panel.")
+
+    async def _run_tool_batch(self, calls: list[ToolCall]) -> list[ToolResult]:
+        if not calls:
+            return []
+        self._pending_tools = len(calls)
+        self._refresh_sessions()
+        scheduler = ToolScheduler(
+            self._execute_tool_from_call,
+            log=self._tool_log,
+            concurrency=self.state.tool_concurrency,
+        )
+        try:
+            return await scheduler.run_batch(calls)
+        finally:
+            self._pending_tools = 0
+            self._refresh_sessions()
+
+    async def _execute_tool_from_call(self, call: ToolCall) -> str:
+        return await self._execute_tool_call(call.name, call.args)
+
+    def _refresh_sessions(self) -> None:
+        log = self.query_one("#sessionpane", Log)
+        log.clear()
+        log.write_line(f"LLM busy: {'yes' if self.state.busy else 'no'}")
+        log.write_line(f"Tool queue: {self._pending_tools}")
+        sessions = self.tools.active_sessions()
+        log.write_line("Shell sessions: " + (", ".join(sessions) if sessions else "none"))
+        for note in self._session_notes[-5:]:
+            log.write_line(note)
+
+    def _log_session(self, message: str) -> None:
+        self._session_notes.append(message)
+        if len(self._session_notes) > 20:
+            self._session_notes = self._session_notes[-20:]
+        self._refresh_sessions()
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -394,6 +503,112 @@ class AIChatApp(App):
             return False
         choice = await self._show_modal(ChoiceModal(f"Allow tool '{tool_name}'?", ["yes", "no"]))
         return choice == "yes"
+
+    async def _toggle_concise(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            self._write_transcript(
+                "Assistant",
+                f"Concise mode is {'ON' if self.state.concise_mode else 'OFF'}.",
+            )
+            return
+        value = parts[1].strip().lower()
+        if value in {"on", "true", "yes"}:
+            await self._set_concise(True)
+            return
+        if value in {"off", "false", "no"}:
+            await self._set_concise(False)
+            return
+        self._write_transcript("Assistant", "Usage: /concise on|off")
+
+    async def _set_concise(self, enabled: bool) -> None:
+        self.state.concise_mode = enabled
+        self.system_prompt = self._build_system_prompt()
+        save_config(
+            {
+                "base_url": self.state.base_url,
+                "model": self.state.model,
+                "theme": self.state.theme,
+                "approval": self.state.approval.value,
+                "shell_enabled": self.state.shell_enabled,
+                "concise_mode": self.state.concise_mode,
+            }
+        )
+        await self.update_status()
+        self._write_transcript("Assistant", f"Concise mode {'enabled' if enabled else 'disabled'}.")
+
+    async def _handle_shell_command(self, text: str) -> None:
+        self.tools.reset_turn()
+        arg = text.strip()
+        if arg.lower() in {"on", "off"}:
+            enabled = arg.lower() == "on"
+            self.state.shell_enabled = enabled
+            save_config(
+                {
+                    "base_url": self.state.base_url,
+                    "model": self.state.model,
+                    "theme": self.state.theme,
+                    "approval": self.state.approval.value,
+                    "shell_enabled": self.state.shell_enabled,
+                    "concise_mode": self.state.concise_mode,
+                }
+            )
+            await self.update_status()
+            self._write_transcript("Assistant", f"Shell {'enabled' if enabled else 'disabled'}.")
+            return
+        if not arg:
+            self._write_transcript(
+                "Assistant",
+                f"Shell is {'ON' if self.state.shell_enabled else 'OFF'}. Use /shell on|off.",
+            )
+            return
+        if not self.state.shell_enabled:
+            self._write_transcript("Assistant", "Shell is OFF. Use /shell on to enable.")
+            return
+        tool_log = self.query_one("#toolpane", Log)
+        tool_log.write_line(f"shell> {arg}")
+        start = time.monotonic()
+        exit_code = 0
+        output = ""
+
+        def _on_output(chunk: str) -> None:
+            redacted = self._redact_secrets(chunk)
+            for line in redacted.splitlines():
+                tool_log.write_line(line)
+
+        try:
+            exit_code, output = await self.tools.run_shell_stream(
+                arg,
+                self.state.approval,
+                self._confirm_tool,
+                cwd=self.state.cwd,
+                on_output=_on_output,
+            )
+        except ToolDeniedError as exc:
+            tool_log.write_line(f"[denied] {exc}")
+            self._write_transcript("Assistant", f"Shell denied: {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            tool_log.write_line(f"[shell error] {exc}")
+            self._write_transcript("Assistant", f"Shell error: {exc}")
+            return
+        elapsed = time.monotonic() - start
+        self._log_session(f"Shell command executed (exit {exit_code}, {elapsed:.2f}s)")
+        self._write_transcript(
+            "Assistant",
+            f"Ran command: {arg} (exit {exit_code}). See Tools panel for output.",
+        )
+
+    def _redact_secrets(self, text: str) -> str:
+        redacted = text
+        for key, value in os.environ.items():
+            if not value:
+                continue
+            upper = key.upper()
+            if any(token in upper for token in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+                if len(value) >= 4:
+                    redacted = redacted.replace(value, "****")
+        return redacted
 
     async def action_cancel(self) -> None:
         if self.active_task and not self.active_task.done():
@@ -418,9 +633,7 @@ class AIChatApp(App):
 
 
     async def action_help(self) -> None:
-        self.notify(
-            "F1 Help | F2 Model | F3 Search | F4 Approval | F5 Theme | F6 Streaming | F7 Sessions | F8 Settings | F9 Copy | F10 Export | F11 Cancel | F12 Quit"
-        )
+        self.notify(render_keybinds())
 
     async def action_pick_model(self) -> None:
         try:
@@ -449,9 +662,7 @@ class AIChatApp(App):
         self._push_modal(SearchModal(), _apply)
 
     async def action_sessions(self) -> None:
-        sessions = self.tools.active_sessions()
-        log = self.query_one("#sessionpane", Log)
-        log.write_line("active sessions: " + (", ".join(sessions) if sessions else "none"))
+        self._refresh_sessions()
 
     async def action_settings(self) -> None:
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
@@ -461,7 +672,9 @@ class AIChatApp(App):
             self.state.base_url = LM_STUDIO_BASE_URL
             self.state.model = str(values["model"])
             self.state.approval = ApprovalMode(str(values["approval"]))
-            self.state.allow_host_shell = bool(values.get("allow_host_shell", self.state.allow_host_shell))
+            self.state.shell_enabled = bool(values.get("shell_enabled", self.state.shell_enabled))
+            self.state.concise_mode = bool(values.get("concise_mode", self.state.concise_mode))
+            self.system_prompt = self._build_system_prompt()
             self.client = LLMClient(self.state.base_url)
             self._apply_theme_with_fallback(str(values["theme"]))
             save_config(
@@ -470,7 +683,8 @@ class AIChatApp(App):
                     "model": self.state.model,
                     "theme": self.state.theme,
                     "approval": self.state.approval.value,
-                    "allow_host_shell": self.state.allow_host_shell,
+                    "shell_enabled": self.state.shell_enabled,
+                    "concise_mode": self.state.concise_mode,
                 }
             )
             return self.update_status()
@@ -482,7 +696,8 @@ class AIChatApp(App):
                     "model": self.state.model,
                     "theme": self.state.theme,
                     "approval": self.state.approval.value,
-                    "allow_host_shell": self.state.allow_host_shell,
+                    "shell_enabled": self.state.shell_enabled,
+                    "concise_mode": self.state.concise_mode,
                 },
                 models=models,
                 themes=list(THEMES),
