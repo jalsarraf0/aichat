@@ -795,10 +795,16 @@ class AIChatApp(App):
             return
         elapsed = time.monotonic() - start
         self._log_session(f"Shell command executed (exit {exit_code}, {elapsed:.2f}s)")
-        self._write_transcript(
-            "Assistant",
-            f"Ran command: {arg} (exit {exit_code}). See Tools panel for output.",
-        )
+        summary = f"Ran command: {arg} (exit {exit_code})."
+        output_text = output.strip()
+        if output_text:
+            max_chars = 4000
+            if len(output_text) > max_chars:
+                output_text = output_text[:max_chars] + " ...[truncated]"
+            self._write_transcript("Assistant", summary)
+            self._write_transcript("Shell", output_text)
+        else:
+            self._write_transcript("Assistant", summary + " (no output)")
 
     def _redact_secrets(self, text: str) -> str:
         redacted = text

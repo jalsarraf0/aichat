@@ -41,7 +41,7 @@ class AppState:
     streaming: bool = True
     theme: str = "cyberpunk"
     concise_mode: bool = False
-    shell_enabled: bool = False
+    shell_enabled: bool = True
     busy: bool = False
     cwd: str = "."
     max_tool_calls_per_turn: int = 4
