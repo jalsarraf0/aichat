@@ -1,4 +1,3 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/scripts/bin/install" "$@"
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/bin/install"
