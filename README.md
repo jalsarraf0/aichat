@@ -60,6 +60,8 @@ docker compose down --volumes --remove-orphans
 
 Keybind bar order is always `F1..F12` then `^P`.
 
+Model picker labels include emojis that hint at capabilities (e.g., vision, code, tools).
+
 ## Concise Mode
 
 By default, assistant responses are longer, final-only, and sanitized (no `<think>` blocks or tool payloads).
@@ -73,6 +75,7 @@ Commands:
 - `/export` (export chat to markdown)
 - `/rss <topic>` (show latest stored RSS items)
 - `/rss store <topic>` (search feeds and ingest items into the RSS service)
+- `/rss ingest <topic> <feed_url>` (ingest a specific feed URL; useful with rssfinder.app or rss.app)
 
 ## Tools: batching + retries
 
