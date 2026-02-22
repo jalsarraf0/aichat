@@ -40,7 +40,7 @@ class AppState:
     approval: ApprovalMode = ApprovalMode.ASK
     streaming: bool = True
     theme: str = "cyberpunk"
-    concise_mode: bool = True
+    concise_mode: bool = False
     shell_enabled: bool = False
     busy: bool = False
     cwd: str = "."

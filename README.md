@@ -20,7 +20,7 @@ Notes:
 - The LLM endpoint is fixed to `http://localhost:1234`.
 - If Docker is available, the installer attempts `docker compose up -d --build` for plugin services.
 - If Docker is installed, ensure your user is in the `docker` group.
-- Concise mode is ON by default (final answers only). Toggle with `/concise on|off` or `/verbose`.
+- Concise mode is OFF by default (longer, clearer responses). Toggle with `/concise on|off` or `/verbose`.
 
 ## Uninstall
 
@@ -53,8 +53,8 @@ docker compose down --volumes --remove-orphans
 - F6: Toggle streaming
 - F7: Sessions
 - F8: Settings
-- F9: Copy last assistant message
-- F10: Export full chat to markdown
+- F9: New chat (archives previous context to `/tmp/context`)
+- F10: Clear transcript
 - F11: Cancel streaming
 - F12: Quit
 
@@ -62,11 +62,15 @@ Keybind bar order is always `F1..F12` then `^P`.
 
 ## Concise Mode
 
-By default, assistant responses are concise, final-only, and sanitized (no `<think>` blocks or tool payloads).
+By default, assistant responses are longer, final-only, and sanitized (no `<think>` blocks or tool payloads).
 
 Commands:
 - `/concise on` or `/concise off`
 - `/verbose` (alias for `/concise off`)
+- `/new` (start a new chat and archive previous context to `/tmp/context`)
+- `/clear` (clear the transcript)
+- `/copy` (copy last assistant response)
+- `/export` (export chat to markdown)
 
 ## Tools: batching + retries
 

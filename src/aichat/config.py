@@ -19,13 +19,19 @@ class AppConfig:
     model: str = "local-model"
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
-    concise_mode: bool = True
+    concise_mode: bool = False
     shell_enabled: bool = False
+    config_version: int = 2
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     defaults = AppConfig().__dict__.copy()
     merged = {**defaults, **cfg}
+    raw_version = cfg.get("config_version", 1)
+    if isinstance(raw_version, (int, str)) and str(raw_version).isdigit():
+        cfg_version = int(raw_version)
+    else:
+        cfg_version = 1
     # Enforce LM Studio endpoint only.
     merged["base_url"] = LM_STUDIO_BASE_URL
     if not isinstance(merged["model"], str) or not merged["model"].strip():
@@ -34,10 +40,14 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["theme"] = defaults["theme"]
     if merged["approval"] not in {m.value for m in ApprovalMode}:
         merged["approval"] = defaults["approval"]
-    merged["concise_mode"] = bool(merged.get("concise_mode", defaults["concise_mode"]))
+    if cfg_version < 2:
+        merged["concise_mode"] = defaults["concise_mode"]
+    else:
+        merged["concise_mode"] = bool(merged.get("concise_mode", defaults["concise_mode"]))
     merged["shell_enabled"] = bool(
         merged.get("shell_enabled", merged.get("allow_host_shell", defaults["shell_enabled"]))
     )
+    merged["config_version"] = defaults["config_version"]
     return merged
 
 
