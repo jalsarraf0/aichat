@@ -15,21 +15,25 @@ class ApprovalMode(str, Enum):
         return order[(order.index(self) + 1) % len(order)]
 
 
-@dataclass
+@dataclass(slots=True)
 class Message:
     role: str
     content: str
     full_content: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def as_chat_dict(self) -> dict[str, str]:
+        return {"role": self.role, "content": self.full_content or self.content}
 
-@dataclass
+
+@dataclass(slots=True)
 class AppState:
     model: str = "local-model"
-    base_url: str = "http://localhost:1234"
+    base_url: str = "http://127.0.0.1:1234"
     approval: ApprovalMode = ApprovalMode.ASK
     streaming: bool = True
-    mode: str = "chat"
     theme: str = "cyberpunk"
     busy: bool = False
+    cwd: str = "."
+    max_tool_calls_per_turn: int = 3
     tool_calls_this_turn: int = 0
