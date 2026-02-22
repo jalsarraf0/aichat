@@ -124,7 +124,7 @@ aichat repo create --public --owner <org>
 
 **Personalities**
 
-The app ships with ~50 expert personalities (Linux, shell, programming, security, cloud, political analysis, and more).
+The app ships with ~50 expert personalities (Linux, shell, programming, security, cloud, political analysis, and more) and always keeps the built-in set.
 You can switch between them with `Ctrl+;` or `/persona`, and add custom personalities with `/persona add`.
 All personalities are stored in `~/.config/aichat/config.yml`.
 

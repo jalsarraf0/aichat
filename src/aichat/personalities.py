@@ -420,7 +420,7 @@ def normalize_personalities(
     raw: object,
     fallback: Iterable[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    fallback_list = list(fallback or default_personalities())
+    fallback_list = list(default_personalities() if fallback is None else fallback)
     if not isinstance(raw, list):
         return fallback_list
     items: list[dict[str, str]] = []
@@ -444,3 +444,14 @@ def normalize_personalities(
         used.add(pid)
         items.append({"id": pid, "name": name, "prompt": prompt})
     return items or fallback_list
+
+
+def merge_personalities(custom: object) -> list[dict[str, str]]:
+    defaults = default_personalities()
+    default_ids = {p["id"] for p in defaults}
+    normalized_custom = normalize_personalities(custom, [])
+    merged = defaults[:]
+    for entry in normalized_custom:
+        if entry.get("id") not in default_ids:
+            merged.append(entry)
+    return merged
