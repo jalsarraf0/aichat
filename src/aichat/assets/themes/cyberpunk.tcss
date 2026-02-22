@@ -1,0 +1,30 @@
+Screen {
+    background: #070b14;
+    color: #d8edff;
+}
+
+Header,
+Footer {
+    background: #1a0d2e;
+    color: #b88cff;
+}
+
+#topbar,
+#status {
+    background: #120924;
+    color: #77ffff;
+    border: round #2de8ff;
+}
+
+#transcript,
+#toolpane {
+    background: #0d1324;
+    color: #d8edff;
+    border: round #2de8ff;
+}
+
+#prompt {
+    background: #0f1630;
+    color: #ecf7ff;
+    border: round #a65cff;
+}
