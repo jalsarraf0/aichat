@@ -98,8 +98,8 @@ retry with exponential backoff and jitter, capped to avoid spam. Progress and ra
 
 **Shell Tool (controlled)**
 
-Shell access is OFF by default. Approval mode still applies: `ASK` prompts, `AUTO` runs immediately.
-Output streams to the Tools panel; the Transcript shows only a short summary.
+Shell access is ON by default. Approval mode still applies: `ASK` prompts, `AUTO` runs immediately.
+Output streams to the Tools panel and also appears in the Transcript (truncated if very large).
 Sudo commands are run non-interactively (`sudo -n`). If your sudo policy requires a password, the command fails.
 
 **GitHub Repo Creation**

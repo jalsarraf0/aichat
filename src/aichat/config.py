@@ -20,8 +20,8 @@ class AppConfig:
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
     concise_mode: bool = False
-    shell_enabled: bool = False
-    config_version: int = 2
+    shell_enabled: bool = True
+    config_version: int = 3
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -44,9 +44,12 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["concise_mode"] = defaults["concise_mode"]
     else:
         merged["concise_mode"] = bool(merged.get("concise_mode", defaults["concise_mode"]))
-    merged["shell_enabled"] = bool(
-        merged.get("shell_enabled", merged.get("allow_host_shell", defaults["shell_enabled"]))
-    )
+    if cfg_version < 3:
+        merged["shell_enabled"] = defaults["shell_enabled"]
+    else:
+        merged["shell_enabled"] = bool(
+            merged.get("shell_enabled", merged.get("allow_host_shell", defaults["shell_enabled"]))
+        )
     merged["config_version"] = defaults["config_version"]
     return merged
 
