@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from .state import ApprovalMode
-from .personalities import DEFAULT_PERSONALITY_ID, default_personalities, normalize_personalities
+from .personalities import DEFAULT_PERSONALITY_ID, default_personalities, merge_personalities, normalize_personalities
 
 LM_STUDIO_BASE_URL = "http://localhost:1234"
 
@@ -57,7 +57,7 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["personalities"] = defaults["personalities"]
         merged["active_personality"] = defaults["active_personality"]
     else:
-        merged["personalities"] = normalize_personalities(merged.get("personalities"), defaults["personalities"])
+        merged["personalities"] = merge_personalities(merged.get("personalities"))
         merged["active_personality"] = str(merged.get("active_personality") or defaults["active_personality"])
     active = merged["active_personality"]
     ids = {p.get("id") for p in merged["personalities"] if isinstance(p, dict)}

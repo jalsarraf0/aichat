@@ -38,7 +38,7 @@ class PromptInput(TextArea):
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
 from .model_labels import model_options
-from .personalities import DEFAULT_PERSONALITY_ID
+from .personalities import DEFAULT_PERSONALITY_ID, merge_personalities
 from .sanitizer import sanitize_response
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
@@ -60,7 +60,7 @@ class AIChatApp(App):
         super().__init__()
         self._project_root = Path("~/git")
         cfg = load_config()
-        self.personalities: list[dict[str, str]] = cfg.get("personalities", [])
+        self.personalities: list[dict[str, str]] = merge_personalities(cfg.get("personalities", []))
         self.state = AppState(
             model=cfg["model"],
             base_url=cfg["base_url"],
@@ -787,7 +787,7 @@ class AIChatApp(App):
                 "shell_enabled": self.state.shell_enabled,
                 "concise_mode": self.state.concise_mode,
                 "active_personality": self.state.personality_id,
-                "personalities": self.personalities,
+                "personalities": merge_personalities(self.personalities),
             }
         )
 
