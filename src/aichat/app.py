@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, Log, Static
 
 from .client import LLMClient, LLMClientError
-from .config import load_config, save_config
+from .config import LM_STUDIO_BASE_URL, load_config, save_config
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
 from .tools.manager import ToolDeniedError, ToolManager
@@ -242,7 +242,7 @@ class AIChatApp(App):
         )
         if not values:
             return
-        self.state.base_url = values["base_url"]
+        self.state.base_url = LM_STUDIO_BASE_URL
         self.state.model = values["model"]
         self.state.approval = ApprovalMode(values["approval"])
         self.client = LLMClient(self.state.base_url)

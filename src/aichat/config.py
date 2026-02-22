@@ -8,6 +8,8 @@ import yaml
 
 from .state import ApprovalMode
 
+LM_STUDIO_BASE_URL = "http://localhost:1234"
+
 CONFIG_PATH = Path.home() / ".config" / "aichat" / "config.yml"
 
 
@@ -23,8 +25,8 @@ class AppConfig:
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     defaults = AppConfig().__dict__.copy()
     merged = {**defaults, **cfg}
-    if not isinstance(merged["base_url"], str) or not merged["base_url"].startswith(("http://", "https://")):
-        merged["base_url"] = defaults["base_url"]
+    # Enforce LM Studio endpoint only.
+    merged["base_url"] = LM_STUDIO_BASE_URL
     if not isinstance(merged["model"], str) or not merged["model"].strip():
         merged["model"] = defaults["model"]
     if not isinstance(merged["theme"], str) or not merged["theme"].strip():
