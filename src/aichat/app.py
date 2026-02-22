@@ -410,6 +410,7 @@ class AIChatApp(App):
         results = results + immediate_results
         results.sort(key=lambda r: r.call.index)
         self._log_tool_results(results)
+        self._append_shell_output(results)
         self._append_tool_messages(results)
         self._notify_tool_failures(results)
         await self._run_followup_response()
@@ -523,6 +524,17 @@ class AIChatApp(App):
             if len(snippet) > 4000:
                 snippet = snippet[:4000] + " ...[truncated]"
             self._tool_log(f"result [{result.call.name}] {snippet}")
+
+    def _append_shell_output(self, results: list[ToolResult]) -> None:
+        for result in results:
+            if result.call.name != "shell_exec" or not result.ok:
+                continue
+            output = self._redact_secrets(result.output or "").strip()
+            if not output:
+                continue
+            if len(output) > 4000:
+                output = output[:4000] + " ...[truncated]"
+            self._write_transcript("Shell", output)
 
     def _append_tool_messages(self, results: list[ToolResult]) -> None:
         for result in results:
