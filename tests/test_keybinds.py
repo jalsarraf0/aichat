@@ -11,4 +11,4 @@ class TestKeybindOrdering(unittest.TestCase):
     def test_ordering(self) -> None:
         keys = [display_key(spec.key) for spec in KEYBINDS]
         self.assertEqual(keys[:12], [f"F{i}" for i in range(1, 13)])
-        self.assertEqual(keys[-1], "^P")
+        self.assertEqual(keys[-1], "^H")

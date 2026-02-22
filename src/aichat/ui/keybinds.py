@@ -27,7 +27,7 @@ KEYBINDS: list[KeybindSpec] = [
     KeybindSpec("f10", "clear_transcript", "Clear"),
     KeybindSpec("f11", "cancel", "Cancel"),
     KeybindSpec("f12", "quit", "Quit"),
-    KeybindSpec("ctrl+p", "help", "Help"),
+    KeybindSpec("ctrl+h", "help", "Help"),
 ]
 
 
@@ -41,8 +41,8 @@ def display_key(key: str) -> str:
     key_lower = key.lower()
     if key_lower.startswith("f") and key_lower[1:].isdigit():
         return key_upper(key_lower)
-    if key_lower == "ctrl+p":
-        return "^P"
+    if key_lower == "ctrl+h":
+        return "^H"
     return key
 
 
