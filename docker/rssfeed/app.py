@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -18,16 +19,23 @@ def conn():
 
 @app.on_event("startup")
 def startup():
-    with conn() as c:
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS items (
-          id SERIAL PRIMARY KEY,
-          topic TEXT NOT NULL,
-          title TEXT NOT NULL,
-          url TEXT NOT NULL,
-          published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """)
+    for attempt in range(1, 16):
+        try:
+            with conn() as c:
+                c.execute("""
+                CREATE TABLE IF NOT EXISTS items (
+                  id SERIAL PRIMARY KEY,
+                  topic TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  url TEXT NOT NULL,
+                  published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """)
+            break
+        except psycopg.OperationalError:
+            if attempt >= 15:
+                raise
+            time.sleep(1)
     asyncio.create_task(purge_loop())
 
 
