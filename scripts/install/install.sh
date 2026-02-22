@@ -56,17 +56,7 @@ fi
 if command -v docker >/dev/null 2>&1; then
   if ! groups | tr ' ' '\n' | grep -qx docker; then
     warn "Docker is installed, but your user may not be in the 'docker' group."
-    warn "Skipping docker compose startup until docker permissions are fixed."
-  elif docker compose version >/dev/null 2>&1; then
-    log "Starting plugin containers with docker compose..."
-    if ! docker compose up -d --build; then
-      warn "docker compose startup failed; install completed but plugins may be unavailable."
-    fi
-  else
-    warn "docker compose plugin not found; skipping plugin containers startup."
   fi
-else
-  warn "Docker not installed; skipping plugin containers startup."
 fi
 
 log "Install complete."
