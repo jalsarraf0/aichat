@@ -57,6 +57,16 @@ if command -v docker >/dev/null 2>&1; then
   if ! groups | tr ' ' '\n' | grep -qx docker; then
     warn "Docker is installed, but your user may not be in the 'docker' group."
   fi
+  if docker compose version >/dev/null 2>&1; then
+    log "Starting docker-backed tools (docker compose up -d --build)."
+    if ! docker compose up -d --build; then
+      warn "Docker compose failed to start containers. Check docker permissions and that the daemon is running."
+    fi
+  else
+    warn "Docker is installed, but the 'docker compose' plugin is unavailable or permission was denied."
+  fi
+else
+  warn "Docker is not installed; skipping docker-backed tools."
 fi
 
 log "Install complete."
