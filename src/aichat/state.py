@@ -29,7 +29,7 @@ class Message:
 @dataclass(slots=True)
 class AppState:
     model: str = "local-model"
-    base_url: str = "http://127.0.0.1:1234"
+    base_url: str = "http://localhost:1234"
     approval: ApprovalMode = ApprovalMode.ASK
     streaming: bool = True
     theme: str = "cyberpunk"
