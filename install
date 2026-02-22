@@ -1,34 +1,5 @@
-#!/usr/bin/env python3
-# Title: AIChat Installer Entrypoint
-# Purpose: Provide a Python-invokable installer entrypoint that launches the bash bootstrap installer safely.
-# NIST 800-53 Controls: CM-6, SI-2, AC-6, AU-2
-# FIPS Dependencies: No (launcher only; no cryptography primitives implemented)
-# Authorisation Boundary: Subsystem
-# Written by: Jamal Al-Sarraf
-# Last-Reviewed: 2026-02-22
-from __future__ import annotations
-
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-
-def main() -> int:
-    repo_root = Path(__file__).resolve().parent
-    script = repo_root / "scripts" / "bootstrap" / "install_aichat.sh"
-
-    if not script.exists():
-        print(f"[aichat-install][error] Missing bootstrap script: {script}", file=sys.stderr)
-        return 1
-
-    env = os.environ.copy()
-    cmd = ["bash", str(script)]
-    print("[aichat-install] launching bootstrap installer...")
-    print("[aichat-install] tip: preferred usage is './install' or 'python3 install'.")
-    result = subprocess.run(cmd, cwd=repo_root, env=env, check=False)
-    return int(result.returncode)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+#!/usr/bin/env bash
+set -euo pipefail
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e .
