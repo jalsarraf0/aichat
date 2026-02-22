@@ -19,24 +19,6 @@ Codex-like Textual TUI with research mode, operator mode, strict tool sequencing
 
 ## Install
 
-## Quick Install (recommended)
-
-If `python3.12` is missing on your machine, use the bootstrap installer (it auto-detects an available Python):
-
-```bash
-git clone <your-repo-url>
-cd aichat
-./scripts/bootstrap/install_aichat.sh
-source .venv/bin/activate
-aichat
-```
-
-You can run it from anywhere too:
-
-```bash
-bash /path/to/aichat/scripts/bootstrap/install_aichat.sh
-```
-
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -102,19 +84,3 @@ Artifacts from researchbox are expected under `/tmp/research` (bind mount).
 - [ ] Purge older than 30 days works (scheduled + manual).
 - [ ] Tool outputs never garble transcript; tool pane shows raw with paging/search.
 - [ ] Export (F10) and copy (F9) include full content.
-
-
-## Troubleshooting Install Errors
-
-If you see `python3 install` errors about `set -euo pipefail`, you are running a shell script with Python.
-Use one of:
-
-```bash
-./install
-# or
-python3 install
-# or
-bash scripts/bootstrap/install_aichat.sh
-```
-
-Also verify typos: `python3` (not `pyton3`).
