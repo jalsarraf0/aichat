@@ -6,7 +6,7 @@
 
 - Stops/removes Docker stack, volumes, and local images.
 - Deletes project `.venv`.
-- Removes launcher from `/usr/local/bin` and user-level launcher paths.
+- Removes launcher scripts from `$HOME/.local/bin`.
 - Removes config/data/cache directories under `$HOME`.
 
 ## Usage
