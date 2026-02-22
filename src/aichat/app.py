@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from importlib.resources import as_file, files
 from pathlib import Path
 
 from textual import events
@@ -20,13 +21,6 @@ from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 
 
 class AIChatApp(App):
-    CSS = """
-    #topbar {height: 3;}
-    #status {height: 1;}
-    #transcript {width: 60%;}
-    #toolpane {width: 40%;}
-    """
-
     BINDINGS = [
         Binding("enter", "send", "Send", priority=True),
         Binding("escape", "cancel", "Cancel", priority=True),
@@ -57,6 +51,7 @@ class AIChatApp(App):
         self.messages = self.transcript_store.load_messages()
         self.active_task: asyncio.Task[None] | None = None
         self._stream_line = ""
+        self._loaded_theme_sources: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -70,15 +65,33 @@ class AIChatApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.apply_theme(self.state.theme)
+        self._apply_theme_with_fallback(self.state.theme)
         transcript = self.query_one("#transcript", Log)
         for message in self.messages[-100:]:
             transcript.write_line(f"{message.role}> {message.content}")
         await self.update_status()
 
     def apply_theme(self, name: str) -> None:
-        self.state.theme = name
-        self.stylesheet.read_all([THEMES.get(name, THEMES["cyberpunk"])])
+        selected_name = name if name in THEMES else "cyberpunk"
+        for source_key in self._loaded_theme_sources:
+            self.stylesheet.source.pop((source_key, ""), None)
+
+        base_file = files("aichat.assets").joinpath("base.tcss")
+        theme_file = files("aichat.assets").joinpath(f"themes/{THEMES[selected_name]}")
+
+        with as_file(base_file) as base_path, as_file(theme_file) as theme_path:
+            self.stylesheet.read_all([base_path, theme_path])
+            self._loaded_theme_sources = {str(base_path.resolve()), str(theme_path.resolve())}
+
+        self.state.theme = selected_name
+        self.refresh_css(animate=False)
+
+    def _apply_theme_with_fallback(self, requested_theme: str) -> None:
+        try:
+            self.apply_theme(requested_theme)
+        except Exception as exc:
+            self.apply_theme("cyberpunk")
+            self.notify(f"Theme '{requested_theme}' failed; reverted to cyberpunk ({exc})", severity="warning")
 
     async def update_status(self) -> None:
         up = await self.client.health()
@@ -180,7 +193,7 @@ class AIChatApp(App):
     async def action_theme_picker(self) -> None:
         selected = await self.push_screen_wait(ChoiceModal("Choose Theme", list(THEMES)))
         if selected in THEMES:
-            self.apply_theme(selected)
+            self._apply_theme_with_fallback(selected)
             await self.update_status()
 
     async def action_toggle_streaming(self) -> None:
@@ -233,7 +246,7 @@ class AIChatApp(App):
         self.state.model = values["model"]
         self.state.approval = ApprovalMode(values["approval"])
         self.client = LLMClient(self.state.base_url)
-        self.apply_theme(values["theme"])
+        self._apply_theme_with_fallback(values["theme"])
         save_config(
             {
                 "base_url": self.state.base_url,
