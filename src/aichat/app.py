@@ -38,6 +38,7 @@ class PromptInput(TextArea):
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
 from .model_labels import model_options
+from .personalities import DEFAULT_PERSONALITY_ID
 from .sanitizer import sanitize_response
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
@@ -46,7 +47,7 @@ from .tools.manager import ToolDeniedError, ToolManager
 from .transcript import TranscriptStore
 from .ui.keybind_bar import KeybindBar
 from .ui.keybinds import binding_list, render_keybinds
-from .ui.modals import ChoiceModal, RssIngestModal, SearchModal, SettingsModal
+from .ui.modals import ChoiceModal, PersonalityAddModal, RssIngestModal, SearchModal, SettingsModal
 
 
 class AIChatApp(App):
@@ -59,6 +60,7 @@ class AIChatApp(App):
         super().__init__()
         self._project_root = Path("~/git")
         cfg = load_config()
+        self.personalities: list[dict[str, str]] = cfg.get("personalities", [])
         self.state = AppState(
             model=cfg["model"],
             base_url=cfg["base_url"],
@@ -66,6 +68,7 @@ class AIChatApp(App):
             approval=ApprovalMode(cfg["approval"]),
             concise_mode=cfg.get("concise_mode", False),
             shell_enabled=cfg.get("shell_enabled", False),
+            personality_id=cfg.get("active_personality", DEFAULT_PERSONALITY_ID),
             cwd=str(Path.cwd()),
         )
         self.client = LLMClient(self.state.base_url)
@@ -141,6 +144,7 @@ class AIChatApp(App):
             + f" | approval={self.state.approval.value}"
             + f" | concise={'ON' if self.state.concise_mode else 'OFF'}"
             + f" | shell={'ON' if self.state.shell_enabled else 'OFF'}"
+            + f" | persona={self.state.personality_id}"
             + f" | cwd={self.state.cwd}"
         )
 
@@ -209,6 +213,9 @@ class AIChatApp(App):
                 return
             if text.startswith("/verbose"):
                 await self._set_concise(False)
+                return
+            if text.startswith("/persona") or text.startswith("/personality"):
+                await self._handle_personality_command(text)
                 return
             if text.startswith("/new"):
                 await self.action_new_chat()
@@ -455,11 +462,9 @@ class AIChatApp(App):
         return [{"role": "system", "content": self.system_prompt}, *[m.as_chat_dict() for m in self.messages]]
 
     def _build_system_prompt(self) -> str:
-        base = (
-            "You are a senior ultra gigabrain Linux engineer with deep Docker, Python, Rust, "
-            "and multi-language expertise."
-        )
-        base += " When creating new projects, use ~/git/<project>."
+        base = "You are a helpful assistant."
+        persona = self._current_personality_prompt()
+        base += f" {persona} When creating new projects, use ~/git/<project>."
         if self.state.concise_mode:
             return (
                 base
@@ -671,6 +676,60 @@ class AIChatApp(App):
             return
         self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
 
+    async def _handle_personality_command(self, text: str) -> None:
+        parts = text.split(maxsplit=2)
+        if len(parts) == 1:
+            await self.action_personality()
+            return
+        sub = parts[1].strip().lower()
+        if sub == "list":
+            names = ", ".join(p["name"] for p in self.personalities)
+            self._write_transcript("Assistant", f"Personalities: {names}")
+            return
+        if sub == "add":
+            await self._personality_add_modal()
+            return
+        await self._set_personality_by_query(" ".join(parts[1:]))
+
+    async def _personality_add_modal(self) -> None:
+        values = await self._show_modal(PersonalityAddModal())
+        if not isinstance(values, dict) or not values:
+            return
+        name = str(values.get("name", "")).strip()
+        prompt = str(values.get("prompt", "")).strip()
+        if not name or not prompt:
+            self._write_transcript("Assistant", "Personality name and prompt are required.")
+            return
+        new_id = self._unique_personality_id(name)
+        self.personalities.append({"id": new_id, "name": name, "prompt": prompt})
+        self.state.personality_id = new_id
+        self.system_prompt = self._build_system_prompt()
+        self._persist_config()
+        self._write_transcript("Assistant", f"Personality added: {name}")
+
+    def _unique_personality_id(self, name: str) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "custom"
+        existing = {p.get("id") for p in self.personalities if isinstance(p, dict)}
+        candidate = base
+        counter = 2
+        while candidate in existing:
+            candidate = f"{base}-{counter}"
+            counter += 1
+        return candidate
+
+    async def _set_personality_by_query(self, query: str) -> None:
+        key = query.strip().lower()
+        if not key:
+            return
+        for persona in self.personalities:
+            if persona.get("id", "").lower() == key or persona.get("name", "").lower() == key:
+                self.state.personality_id = persona["id"]
+                self.system_prompt = self._build_system_prompt()
+                self._persist_config()
+                self._write_transcript("Assistant", f"Personality set to {persona['name']}.")
+                return
+        self._write_transcript("Assistant", "Personality not found. Use /persona list.")
+
     async def _create_project(self, name: str) -> None:
         cleaned = name.strip()
         if not cleaned or cleaned in {".", ".."}:
@@ -696,6 +755,41 @@ class AIChatApp(App):
         await self.update_status()
         self._log_session(f"Project set to {project_path}")
         self._write_transcript("Assistant", f"Project ready at {project_path}.")
+
+    def _current_personality_prompt(self) -> str:
+        for persona in self.personalities:
+            if persona.get("id") == self.state.personality_id:
+                return str(persona.get("prompt", "")).strip()
+        return ""
+
+    async def action_personality(self) -> None:
+        options: list[tuple[str, str]] = []
+        for persona in self.personalities:
+            options.append((str(persona.get("name", "")), str(persona.get("id", ""))))
+        options.append(("Add Custom...", "__add__"))
+
+        async def _apply(selected: object) -> None:
+            if selected == "__add__":
+                await self._personality_add_modal()
+                return
+            if isinstance(selected, str) and selected:
+                await self._set_personality_by_query(selected)
+
+        self._push_modal(ChoiceModal("Choose Personality", options), _apply)
+
+    def _persist_config(self) -> None:
+        save_config(
+            {
+                "base_url": self.state.base_url,
+                "model": self.state.model,
+                "theme": self.state.theme,
+                "approval": self.state.approval.value,
+                "shell_enabled": self.state.shell_enabled,
+                "concise_mode": self.state.concise_mode,
+                "active_personality": self.state.personality_id,
+                "personalities": self.personalities,
+            }
+        )
 
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
@@ -725,16 +819,7 @@ class AIChatApp(App):
     async def _set_concise(self, enabled: bool) -> None:
         self.state.concise_mode = enabled
         self.system_prompt = self._build_system_prompt()
-        save_config(
-            {
-                "base_url": self.state.base_url,
-                "model": self.state.model,
-                "theme": self.state.theme,
-                "approval": self.state.approval.value,
-                "shell_enabled": self.state.shell_enabled,
-                "concise_mode": self.state.concise_mode,
-            }
-        )
+        self._persist_config()
         await self.update_status()
         self._write_transcript("Assistant", f"Concise mode {'enabled' if enabled else 'disabled'}.")
 
@@ -744,16 +829,7 @@ class AIChatApp(App):
         if arg.lower() in {"on", "off"}:
             enabled = arg.lower() == "on"
             self.state.shell_enabled = enabled
-            save_config(
-                {
-                    "base_url": self.state.base_url,
-                    "model": self.state.model,
-                    "theme": self.state.theme,
-                    "approval": self.state.approval.value,
-                    "shell_enabled": self.state.shell_enabled,
-                    "concise_mode": self.state.concise_mode,
-                }
-            )
+            self._persist_config()
             await self.update_status()
             self._write_transcript("Assistant", f"Shell {'enabled' if enabled else 'disabled'}.")
             return
@@ -827,31 +903,13 @@ class AIChatApp(App):
             return
         if self.state.model not in models:
             self.state.model = models[0]
-            save_config(
-                {
-                    "base_url": self.state.base_url,
-                    "model": self.state.model,
-                    "theme": self.state.theme,
-                    "approval": self.state.approval.value,
-                    "shell_enabled": self.state.shell_enabled,
-                    "concise_mode": self.state.concise_mode,
-                }
-            )
+            self._persist_config()
             await self.update_status()
             self._log_session(f"Default model set to {self.state.model}")
 
     async def action_toggle_shell(self) -> None:
         self.state.shell_enabled = not self.state.shell_enabled
-        save_config(
-            {
-                "base_url": self.state.base_url,
-                "model": self.state.model,
-                "theme": self.state.theme,
-                "approval": self.state.approval.value,
-                "shell_enabled": self.state.shell_enabled,
-                "concise_mode": self.state.concise_mode,
-            }
-        )
+        self._persist_config()
         await self.update_status()
         self._write_transcript(
             "Assistant",
@@ -911,16 +969,7 @@ class AIChatApp(App):
                     self.notify(str(exc), severity="error")
                     return
                 self.state.model = selected
-                save_config(
-                    {
-                        "base_url": self.state.base_url,
-                        "model": self.state.model,
-                        "theme": self.state.theme,
-                        "approval": self.state.approval.value,
-                        "shell_enabled": self.state.shell_enabled,
-                        "concise_mode": self.state.concise_mode,
-                    }
-                )
+                self._persist_config()
                 await self.update_status()
 
         self._push_modal(ChoiceModal("Pick Model", options), _apply)
@@ -970,16 +1019,7 @@ class AIChatApp(App):
             self.system_prompt = self._build_system_prompt()
             self.client = LLMClient(self.state.base_url)
             self._apply_theme_with_fallback(str(values["theme"]))
-            save_config(
-                {
-                    "base_url": self.state.base_url,
-                    "model": self.state.model,
-                    "theme": self.state.theme,
-                    "approval": self.state.approval.value,
-                    "shell_enabled": self.state.shell_enabled,
-                    "concise_mode": self.state.concise_mode,
-                }
-            )
+            self._persist_config()
             await self.update_status()
 
         self._push_modal(

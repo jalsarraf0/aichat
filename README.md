@@ -47,6 +47,7 @@ Make sure your user is in the `docker` group if you use these tools.
 - Shift+Enter: Newline.
 - PageUp/PageDown: Scroll transcript.
 - Ctrl+S: Toggle shell access (shown after F12 in the keybind bar).
+- Ctrl+; (shown as ^:): Personality menu.
 - F1: Help.
 - F2: Model picker.
 - F3: Search transcript.
@@ -60,12 +61,15 @@ Make sure your user is in the `docker` group if you use these tools.
 - F11: Cancel streaming.
 - F12: Quit.
 
-Keybind bar order is always `F1..F12` then `^S`.
+Keybind bar order is always `F1..F12` then `^S` and `^:`.
 Model picker labels include emojis that hint at capabilities (vision, code, tools, etc.).
 
 **Commands**
 
 - `/help` shows keybinds.
+- `/persona` or `/personality` opens the personality menu.
+- `/persona list` lists available personalities.
+- `/persona add` adds a custom personality.
 - `/concise on` or `/concise off`.
 - `/verbose` (alias for `/concise off`).
 - `/new` starts a new chat and archives previous context to `/tmp/context`.
@@ -117,6 +121,12 @@ Usage:
 aichat repo create --private
 aichat repo create --public --owner <org>
 ```
+
+**Personalities**
+
+The app ships with ~50 expert personalities (Linux, shell, programming, security, cloud, political analysis, and more).
+You can switch between them with `Ctrl+;` or `/persona`, and add custom personalities with `/persona add`.
+All personalities are stored in `~/.config/aichat/config.yml`.
 
 **Disclaimer**
 

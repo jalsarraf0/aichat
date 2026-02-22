@@ -42,6 +42,7 @@ class AppState:
     theme: str = "cyberpunk"
     concise_mode: bool = False
     shell_enabled: bool = True
+    personality_id: str = "linux-shell-programming"
     busy: bool = False
     cwd: str = "."
     max_tool_calls_per_turn: int = 4

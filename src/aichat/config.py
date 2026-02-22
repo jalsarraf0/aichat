@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from .state import ApprovalMode
+from .personalities import DEFAULT_PERSONALITY_ID, default_personalities, normalize_personalities
 
 LM_STUDIO_BASE_URL = "http://localhost:1234"
 
@@ -21,7 +22,9 @@ class AppConfig:
     approval: str = ApprovalMode.ASK.value
     concise_mode: bool = False
     shell_enabled: bool = True
-    config_version: int = 3
+    active_personality: str = DEFAULT_PERSONALITY_ID
+    personalities: list[dict[str, str]] = field(default_factory=default_personalities)
+    config_version: int = 4
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -50,6 +53,16 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["shell_enabled"] = bool(
             merged.get("shell_enabled", merged.get("allow_host_shell", defaults["shell_enabled"]))
         )
+    if cfg_version < 4:
+        merged["personalities"] = defaults["personalities"]
+        merged["active_personality"] = defaults["active_personality"]
+    else:
+        merged["personalities"] = normalize_personalities(merged.get("personalities"), defaults["personalities"])
+        merged["active_personality"] = str(merged.get("active_personality") or defaults["active_personality"])
+    active = merged["active_personality"]
+    ids = {p.get("id") for p in merged["personalities"] if isinstance(p, dict)}
+    if active not in ids:
+        merged["active_personality"] = defaults["active_personality"]
     merged["config_version"] = defaults["config_version"]
     return merged
 
