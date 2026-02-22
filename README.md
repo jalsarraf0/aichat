@@ -74,6 +74,7 @@ Commands:
 - `/clear` (clear the transcript)
 - `/copy` (copy last assistant response)
 - `/export` (export chat to markdown)
+- `/vibecode <project>` (create/switch to `~/git/<project>` for shell and coding tasks)
 - `/rss <topic>` (show latest stored RSS items)
 - `/rss store <topic>` (search feeds and ingest items into the RSS service)
 - `/rss ingest <topic> <feed_url>` (ingest a specific feed URL; useful with rssfinder.app or rss.app)
