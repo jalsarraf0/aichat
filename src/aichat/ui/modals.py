@@ -100,6 +100,12 @@ class SettingsModal(ModalScreen[dict]):
             yield Select.from_values(self.models or [self.current["model"]], value=self.current["model"], id="model")
             yield Select.from_values(self.themes, value=self.current["theme"], id="theme")
             yield Select.from_values(["DENY", "ASK", "AUTO"], value=self.current["approval"], id="approval")
+            yield Label("Host shell tool access")
+            yield Select.from_values(
+                ["true", "false"],
+                value="true" if self.current.get("allow_host_shell") else "false",
+                id="allow_host_shell",
+            )
             yield Button("Save", id="save")
             yield Button("Cancel", id="cancel")
 
@@ -117,6 +123,7 @@ class SettingsModal(ModalScreen[dict]):
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
+                    "allow_host_shell": str(self.query_one("#allow_host_shell", Select).value) == "true",
                 }
             )
 
@@ -128,6 +135,7 @@ class SettingsModal(ModalScreen[dict]):
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
+                    "allow_host_shell": str(self.query_one("#allow_host_shell", Select).value) == "true",
                 }
             )
             event.stop()

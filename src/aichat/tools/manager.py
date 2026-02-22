@@ -80,8 +80,8 @@ class ToolManager:
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
 
-    def tool_definitions(self) -> list[dict[str, object]]:
-        return [
+    def tool_definitions(self, allow_shell: bool) -> list[dict[str, object]]:
+        tools: list[dict[str, object]] = [
             {
                 "type": "function",
                 "function": {
@@ -111,3 +111,21 @@ class ToolManager:
                 },
             },
         ]
+        if allow_shell:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell_exec",
+                        "description": "Run a shell command on the host machine.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command": {"type": "string", "description": "Shell command to execute."}
+                            },
+                            "required": ["command"],
+                        },
+                    },
+                }
+            )
+        return tools

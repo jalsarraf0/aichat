@@ -19,7 +19,7 @@ class AppConfig:
     model: str = "local-model"
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
-    allow_host_shell: bool = False
+    allow_host_shell: bool = True
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
