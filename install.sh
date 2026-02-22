@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/bin/install"
+set -euo pipefail
+IFS=$'\n\t'
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "$REPO_ROOT/scripts/bin/install" "$@"
