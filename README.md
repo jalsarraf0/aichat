@@ -19,24 +19,6 @@ Codex-like Textual TUI with research mode, operator mode, strict tool sequencing
 
 ## Install
 
-## Quick Install (recommended)
-
-If `python3.12` is missing on your machine, use the bootstrap installer (it auto-detects an available Python):
-
-```bash
-git clone <your-repo-url>
-cd aichat
-./scripts/bootstrap/install_aichat.sh
-source .venv/bin/activate
-aichat
-```
-
-You can run it from anywhere too:
-
-```bash
-bash /path/to/aichat/scripts/bootstrap/install_aichat.sh
-```
-
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
