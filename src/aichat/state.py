@@ -35,5 +35,5 @@ class AppState:
     theme: str = "cyberpunk"
     busy: bool = False
     cwd: str = "."
-    max_tool_calls_per_turn: int = 3
+    max_tool_calls_per_turn: int = 1
     tool_calls_this_turn: int = 0

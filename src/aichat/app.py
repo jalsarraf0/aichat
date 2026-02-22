@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -9,7 +10,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Input, Log, Static
+from textual.widgets import Footer, Header, Log, Static, TextArea
 
 from .client import LLMClient, LLMClientError
 from .config import LM_STUDIO_BASE_URL, load_config, save_config
@@ -22,7 +23,6 @@ from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 
 class AIChatApp(App):
     BINDINGS = [
-        Binding("enter", "send", "Send", priority=True),
         Binding("f1", "help", "Help", priority=True),
         Binding("f2", "pick_model", "Model", priority=True),
         Binding("f3", "search", "Search", priority=True),
@@ -63,7 +63,7 @@ class AIChatApp(App):
         with Horizontal(id="main"):
             yield Log(id="transcript", auto_scroll=True)
             yield Log(id="toolpane", auto_scroll=True)
-        yield Input(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
+        yield TextArea(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -105,16 +105,20 @@ class AIChatApp(App):
         )
 
     async def action_send(self) -> None:
-        prompt = self.query_one("#prompt", Input)
-        text = prompt.value.strip()
-        prompt.value = ""
+        prompt = self.query_one("#prompt", TextArea)
+        text = prompt.text
+        if not text.strip():
+            prompt.text = ""
+            return
+        text = text.rstrip()
+        prompt.text = ""
         if not text:
             return
         await self.handle_submit(text)
 
     async def handle_submit(self, text: str) -> None:
         if text.startswith("/"):
-            await self.handle_command(text)
+            asyncio.create_task(self.handle_command(text))
             return
         self.tools.reset_turn()
         user = Message("user", text)
@@ -158,6 +162,7 @@ class AIChatApp(App):
             await self.update_status()
 
     async def handle_command(self, text: str) -> None:
+        self.tools.reset_turn()
         log = self.query_one("#toolpane", Log)
         try:
             if text.startswith("/shell "):
@@ -189,6 +194,20 @@ class AIChatApp(App):
         self.push_screen(screen, callback=_on_dismiss)
         return await result_future
 
+    def _push_modal(self, screen: object, on_dismiss: Callable[[object], object] | None = None) -> None:
+        """Push a modal screen and handle results via callback to avoid blocking the UI loop."""
+
+        def _handle(result: object) -> None:
+            if on_dismiss is None:
+                return
+            try:
+                outcome = on_dismiss(result)
+                if asyncio.iscoroutine(outcome):
+                    asyncio.create_task(outcome)
+            except Exception as exc:
+                self.notify(f"Modal handler failed: {exc}", severity="error")
+
+        self.push_screen(screen, callback=_handle)
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -206,10 +225,13 @@ class AIChatApp(App):
         await self.update_status()
 
     async def action_theme_picker(self) -> None:
-        selected = await self._show_modal(ChoiceModal("Choose Theme", list(THEMES)))
-        if selected in THEMES:
-            self._apply_theme_with_fallback(selected)
-            await self.update_status()
+        def _apply(selected: object) -> asyncio.Future | None:
+            if isinstance(selected, str) and selected in THEMES:
+                self._apply_theme_with_fallback(selected)
+                return self.update_status()
+            return None
+
+        self._push_modal(ChoiceModal("Choose Theme", list(THEMES)), _apply)
 
     async def action_toggle_streaming(self) -> None:
         self.state.streaming = not self.state.streaming
@@ -227,20 +249,25 @@ class AIChatApp(App):
         except LLMClientError as exc:
             self.notify(str(exc), severity="error")
             return
-        selected = await self._show_modal(ChoiceModal("Pick Model", models))
-        if selected:
-            self.state.model = selected
-            await self.update_status()
+        def _apply(selected: object) -> asyncio.Future | None:
+            if isinstance(selected, str) and selected:
+                self.state.model = selected
+                return self.update_status()
+            return None
+
+        self._push_modal(ChoiceModal("Pick Model", models), _apply)
 
     async def action_search(self) -> None:
-        query = await self._show_modal(SearchModal())
-        if not query:
-            return
-        hits = self.transcript_store.search(query)
-        log = self.query_one("#toolpane", Log)
-        log.clear()
-        for hit in hits[:20]:
-            log.write_line(f"[{hit['timestamp']}] {hit['role']}: {hit['content'][:120]}")
+        def _apply(query: object) -> None:
+            if not isinstance(query, str) or not query:
+                return
+            hits = self.transcript_store.search(query)
+            log = self.query_one("#toolpane", Log)
+            log.clear()
+            for hit in hits[:20]:
+                log.write_line(f"[{hit['timestamp']}] {hit['role']}: {hit['content'][:120]}")
+
+        self._push_modal(SearchModal(), _apply)
 
     async def action_sessions(self) -> None:
         sessions = self.tools.active_sessions()
@@ -249,7 +276,26 @@ class AIChatApp(App):
 
     async def action_settings(self) -> None:
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
-        values = await self._show_modal(
+        def _apply(values: object) -> asyncio.Future | None:
+            if not isinstance(values, dict) or not values:
+                return None
+            self.state.base_url = LM_STUDIO_BASE_URL
+            self.state.model = str(values["model"])
+            self.state.approval = ApprovalMode(str(values["approval"]))
+            self.client = LLMClient(self.state.base_url)
+            self._apply_theme_with_fallback(str(values["theme"]))
+            save_config(
+                {
+                    "base_url": self.state.base_url,
+                    "model": self.state.model,
+                    "theme": self.state.theme,
+                    "approval": self.state.approval.value,
+                    "allow_host_shell": False,
+                }
+            )
+            return self.update_status()
+
+        self._push_modal(
             SettingsModal(
                 current={
                     "base_url": self.state.base_url,
@@ -259,25 +305,9 @@ class AIChatApp(App):
                 },
                 models=models,
                 themes=list(THEMES),
-            )
+            ),
+            _apply,
         )
-        if not values:
-            return
-        self.state.base_url = LM_STUDIO_BASE_URL
-        self.state.model = values["model"]
-        self.state.approval = ApprovalMode(values["approval"])
-        self.client = LLMClient(self.state.base_url)
-        self._apply_theme_with_fallback(values["theme"])
-        save_config(
-            {
-                "base_url": self.state.base_url,
-                "model": self.state.model,
-                "theme": self.state.theme,
-                "approval": self.state.approval.value,
-                "allow_host_shell": False,
-            }
-        )
-        await self.update_status()
 
 
     async def action_copy_last(self) -> None:
@@ -294,7 +324,12 @@ class AIChatApp(App):
         self.notify(f"exported to {out}")
 
     async def on_key(self, event: events.Key) -> None:
-        if event.key == "enter" and self.focused and self.focused.id == "prompt":
+        if (
+            event.key == "enter"
+            and not event.shift
+            and self.focused
+            and self.focused.id == "prompt"
+        ):
             await self.action_send()
             event.stop()
 

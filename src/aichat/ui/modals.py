@@ -7,6 +7,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, ListItem, ListView, Select
 
 
+class ChoiceItem(ListItem):
+    def __init__(self, choice: str) -> None:
+        super().__init__(Label(choice))
+        self.choice = choice
+
+
 class ChoiceModal(ModalScreen[str]):
     def __init__(self, title: str, choices: list[str]) -> None:
         super().__init__()
@@ -16,18 +22,22 @@ class ChoiceModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         with Vertical(id="choice-modal"):
             yield Label(self._title)
-            yield ListView(*[ListItem(Label(item)) for item in self._choices], id="choice-list")
+            yield ListView(*[ChoiceItem(item) for item in self._choices], id="choice-list")
             yield Button("Close", id="close")
 
     def on_mount(self) -> None:
         self.set_focus(self.query_one("#choice-list", ListView))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        index = event.index
-        if 0 <= index < len(self._choices):
-            self.dismiss(self._choices[index])
-            return
-        self.dismiss("")
+        choice = ""
+        item = getattr(event, "item", None)
+        if isinstance(item, ChoiceItem):
+            choice = item.choice
+        else:
+            index = event.index
+            if 0 <= index < len(self._choices):
+                choice = self._choices[index]
+        self.dismiss(choice)
 
     def on_button_pressed(self, _: Button.Pressed) -> None:
         self.dismiss("")
