@@ -174,12 +174,25 @@ class AIChatApp(App):
         except Exception as exc:
             log.write_line(f"[tool error] {exc}")
 
+
+    async def _show_modal(self, screen: object) -> object:
+        """Show a modal screen and await dismissal without requiring a Textual worker."""
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future[object] = loop.create_future()
+
+        def _on_dismiss(result: object) -> None:
+            if not result_future.done():
+                result_future.set_result(result)
+
+        self.push_screen(screen, callback=_on_dismiss)
+        return await result_future
+
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
         if self.state.approval == ApprovalMode.DENY:
             return False
-        choice = await self.push_screen_wait(ChoiceModal(f"Allow tool '{tool_name}'?", ["yes", "no"]))
+        choice = await self._show_modal(ChoiceModal(f"Allow tool '{tool_name}'?", ["yes", "no"]))
         return choice == "yes"
 
     async def action_cancel(self) -> None:
@@ -191,7 +204,7 @@ class AIChatApp(App):
         await self.update_status()
 
     async def action_theme_picker(self) -> None:
-        selected = await self.push_screen_wait(ChoiceModal("Choose Theme", list(THEMES)))
+        selected = await self._show_modal(ChoiceModal("Choose Theme", list(THEMES)))
         if selected in THEMES:
             self._apply_theme_with_fallback(selected)
             await self.update_status()
@@ -206,13 +219,13 @@ class AIChatApp(App):
         except LLMClientError as exc:
             self.notify(str(exc), severity="error")
             return
-        selected = await self.push_screen_wait(ChoiceModal("Pick Model", models))
+        selected = await self._show_modal(ChoiceModal("Pick Model", models))
         if selected:
             self.state.model = selected
             await self.update_status()
 
     async def action_search(self) -> None:
-        query = await self.push_screen_wait(SearchModal())
+        query = await self._show_modal(SearchModal())
         if not query:
             return
         hits = self.transcript_store.search(query)
@@ -228,7 +241,7 @@ class AIChatApp(App):
 
     async def action_settings(self) -> None:
         models = await self.client.list_models() if await self.client.health() else [self.state.model]
-        values = await self.push_screen_wait(
+        values = await self._show_modal(
             SettingsModal(
                 current={
                     "base_url": self.state.base_url,
