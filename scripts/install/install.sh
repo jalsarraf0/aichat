@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Title: AIChat System Installer
-# Purpose: Install AIChat with minimal user effort, including Python/bootstrap dependencies and Docker services.
-# NIST 800-53 Controls: CM-6, SI-2, AC-6, AU-2, RA-5
-# FIPS Dependencies: No (installer workflow only; no cryptographic implementation)
-# Authorisation Boundary: Subsystem
-# Written by: Jamal Al-Sarraf
-# Last-Reviewed: 2026-02-22
-set -Eeuo pipefail
+set -euo pipefail
+IFS=$'\n\t'
 
 log() { printf '[aichat-install] %s\n' "$*"; }
 warn() { printf '[aichat-install][warn] %s\n' "$*" >&2; }
@@ -15,76 +9,65 @@ fail() { printf '[aichat-install][error] %s\n' "$*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
-[[ -f pyproject.toml ]] || fail "pyproject.toml missing; run inside AIChat repository."
 
-ensure_cmd() {
-  local cmd="$1"
-  command -v "$cmd" >/dev/null 2>&1
-}
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  fail "Do not run with sudo. Run: bash install.sh"
+fi
 
-install_pkg() {
-  local pkg="$1"
-  if ensure_cmd dnf; then sudo dnf install -y "$pkg"; return 0; fi
-  if ensure_cmd apt-get; then sudo apt-get update && sudo apt-get install -y "$pkg"; return 0; fi
-  if ensure_cmd zypper; then sudo zypper --non-interactive install "$pkg"; return 0; fi
-  if ensure_cmd pacman; then sudo pacman -Sy --noconfirm "$pkg"; return 0; fi
-  return 1
-}
+for script in install.sh uninstall.sh scripts/bin/install scripts/bin/uninstall scripts/install/install.sh scripts/uninstall/uninstall.sh; do
+  sed -i 's/\r$//' "$REPO_ROOT/$script"
+done
 
-pick_python() {
-  for bin in python3.12 python3.11 python3.10 python3; do
-    if ensure_cmd "$bin"; then
-      "$bin" - <<'PY' >/dev/null 2>&1 || continue
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  fail "python3 is required. Please install Python 3."
+fi
+
+"$PYTHON_BIN" - <<'PY' || fail "Python 3.12+ is required."
 import sys
-raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
 PY
-      echo "$bin"
-      return 0
-    fi
-  done
-  return 1
-}
 
-if ! PY_BIN="$(pick_python)"; then
-  warn "Python 3.10+ not found. Attempting package installation."
-  install_pkg python3 || fail "Unable to install python3 automatically. Please install Python 3.10+ manually."
-  PY_BIN="$(pick_python || true)"
-fi
-[[ -n "${PY_BIN:-}" ]] || fail "No usable Python found after attempted install."
+INSTALL_HOME="${HOME}/.local/share/aichat"
+VENV_DIR="$INSTALL_HOME/venv"
+BIN_DIR="${HOME}/.local/bin"
+LAUNCHER="$BIN_DIR/aichat"
 
-if ! ensure_cmd docker; then
-  warn "Docker not found. Attempting package installation."
-  install_pkg docker || warn "Could not install docker automatically."
-fi
-if ! ensure_cmd docker; then
-  fail "Docker is required for rss/researchbox services. Install Docker then rerun."
-fi
+mkdir -p "$INSTALL_HOME" "$BIN_DIR"
 
-if ! docker compose version >/dev/null 2>&1; then
-  fail "docker compose plugin is required. Install Docker Compose plugin and rerun."
-fi
+log "Creating/updating virtual environment at $VENV_DIR"
+"$PYTHON_BIN" -m venv "$VENV_DIR"
+"$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+"$VENV_DIR/bin/python" -m pip install -e "$REPO_ROOT"
 
-log "Using Python interpreter: $PY_BIN"
-"$PY_BIN" -m venv .venv
-# shellcheck source=/dev/null
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e .
-
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/aichat" <<WRAP
+cat > "$LAUNCHER" <<'WRAP'
 #!/usr/bin/env bash
-exec "$REPO_ROOT/.venv/bin/aichat" "\$@"
+set -euo pipefail
+IFS=$'\n\t'
+exec "$HOME/.local/share/aichat/venv/bin/python" -m aichat "$@"
 WRAP
-chmod 0755 "$HOME/.local/bin/aichat"
+chmod 0755 "$LAUNCHER"
 
-if [[ ":${PATH}:" != *":$HOME/.local/bin:"* ]]; then
-  warn "~/.local/bin is not currently in PATH. Add: export PATH=\"$HOME/.local/bin:\$PATH\""
+if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
+  warn "~/.local/bin is not currently in PATH. Add this line to your shell profile:"
+  warn "export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-log "Starting Docker services..."
-docker compose up -d --build
+if command -v docker >/dev/null 2>&1; then
+  if ! groups | tr ' ' '\n' | grep -qx docker; then
+    warn "Docker is installed, but your user may not be in the 'docker' group."
+    warn "Skipping docker compose startup until docker permissions are fixed."
+  elif docker compose version >/dev/null 2>&1; then
+    log "Starting plugin containers with docker compose..."
+    if ! docker compose up -d --build; then
+      warn "docker compose startup failed; install completed but plugins may be unavailable."
+    fi
+  else
+    warn "docker compose plugin not found; skipping plugin containers startup."
+  fi
+else
+  warn "Docker not installed; skipping plugin containers startup."
+fi
 
 log "Install complete."
-log "Run now with: $HOME/.local/bin/aichat"
-log "Or activate venv: source .venv/bin/activate && aichat"
+log "Run: $HOME/.local/bin/aichat"

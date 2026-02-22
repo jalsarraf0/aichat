@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-pip uninstall -y aichat || true
+IFS=$'\n\t'
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+exec bash "$REPO_ROOT/scripts/uninstall/uninstall.sh" "$@"
