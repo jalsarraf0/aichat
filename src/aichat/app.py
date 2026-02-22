@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import textwrap
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -49,7 +50,6 @@ from .ui.modals import ChoiceModal, RssIngestModal, SearchModal, SettingsModal
 
 class AIChatApp(App):
     BINDINGS = binding_list() + [
-        Binding("ctrl+s", "toggle_shell", "Shell", priority=True),
         Binding("pageup", "scroll_up", "ScrollUp", priority=True),
         Binding("pagedown", "scroll_down", "ScrollDown", priority=True),
     ]
@@ -456,18 +456,26 @@ class AIChatApp(App):
             )
         return (
             base
-            + " Respond with the final answer only. Be clear, detailed, and a bit more verbose."
+            + " Respond with the final answer only. Be clear, detailed, and more verbose when helpful."
             + " No <think>. Use short bullets when helpful. Include extra context and practical guidance."
+            + " Ask a brief follow-up question when it makes sense."
         )
 
     def _write_transcript(self, speaker: str, text: str) -> None:
         log = self.query_one("#transcript", Log)
-        lines = (text or "").splitlines() or [""]
+        raw_lines = (text or "").splitlines() or [""]
         prefix = f"{speaker}:"
-        log.write_line(f"{prefix} {lines[0]}".rstrip())
         pad = " " * (len(prefix) + 1)
-        for line in lines[1:]:
-            log.write_line(f"{pad}{line}".rstrip())
+        width = max(log.size.width - len(prefix) - 1, 20)
+        first = True
+        for raw in raw_lines:
+            wrapped = textwrap.wrap(raw, width=width) or [""]
+            for segment in wrapped:
+                if first:
+                    log.write_line(f"{prefix} {segment}".rstrip())
+                    first = False
+                else:
+                    log.write_line(f"{pad}{segment}".rstrip())
 
     def _finalize_assistant_response(self, content: str) -> None:
         sanitized = sanitize_response(content)
