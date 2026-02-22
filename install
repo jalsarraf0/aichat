@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/bootstrap/install_aichat.sh"
+set -euo pipefail
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e .
