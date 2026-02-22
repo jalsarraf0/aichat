@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -51,18 +51,45 @@ class LLMClient:
         if models and model not in models:
             raise ModelNotFoundError(f"Model '{model}' not available. Available: {', '.join(models)}")
 
-    async def chat_once(self, model: str, messages: list[dict[str, str]]) -> str:
+    async def chat_once(self, model: str, messages: list[dict[str, Any]]) -> str:
+        response = await self.chat_once_with_tools(model, messages)
+        return response.get("content", "")
+
+    async def chat_once_with_tools(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | None = None,
+    ) -> dict[str, Any]:
         await self.ensure_model(model)
-        payload = {"model": model, "messages": messages, "stream": False}
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
         response = await self._request("POST", "/v1/chat/completions", json=payload)
         try:
-            return response.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+            message = response.json()["choices"][0]["message"]
+            return {
+                "content": message.get("content") or "",
+                "tool_calls": message.get("tool_calls") or [],
+                "raw": message,
+            }
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMClientError("Malformed chat response") from exc
 
-    async def chat_stream(self, model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def chat_stream_events(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         await self.ensure_model(model)
-        payload = {"model": model, "messages": messages, "stream": True}
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 async with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:
@@ -77,14 +104,21 @@ class LLMClient:
                             break
                         try:
                             parsed = json.loads(data)
-                            chunk = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
                         except json.JSONDecodeError:
-                            chunk = data
-                        if chunk:
-                            yield chunk
+                            continue
+                        delta = parsed.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta and delta["content"]:
+                            yield {"type": "content", "value": delta["content"]}
+                        if "tool_calls" in delta and delta["tool_calls"]:
+                            yield {"type": "tool_calls", "value": delta["tool_calls"]}
         except httpx.TimeoutException as exc:
             raise LLMClientError("Streaming timed out") from exc
         except httpx.HTTPStatusError as exc:
             raise LLMClientError(f"Streaming failed with HTTP {exc.response.status_code}") from exc
         except httpx.HTTPError as exc:
             raise LLMClientError(f"Streaming network error: {exc}") from exc
+
+    async def chat_stream(self, model: str, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
+        async for event in self.chat_stream_events(model, messages):
+            if event.get("type") == "content":
+                yield event.get("value", "")

@@ -22,8 +22,15 @@ class Message:
     full_content: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def as_chat_dict(self) -> dict[str, str]:
-        return {"role": self.role, "content": self.full_content or self.content}
+    def as_chat_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"role": self.role, "content": self.full_content or self.content}
+        if self.role == "assistant" and "tool_calls" in self.metadata:
+            payload["tool_calls"] = self.metadata["tool_calls"]
+        if self.role == "tool":
+            tool_call_id = self.metadata.get("tool_call_id")
+            if tool_call_id:
+                payload["tool_call_id"] = tool_call_id
+        return payload
 
 
 @dataclass(slots=True)

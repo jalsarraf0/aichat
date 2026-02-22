@@ -79,3 +79,35 @@ class ToolManager:
 
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
+
+    def tool_definitions(self) -> list[dict[str, object]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "rss_latest",
+                    "description": "Fetch the latest RSS items for a topic from the docker rssfeed service.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {"type": "string", "description": "Topic to query for recent items."}
+                        },
+                        "required": ["topic"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "researchbox_search",
+                    "description": "Search for RSS feed sources for a topic via the docker researchbox service.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {"type": "string", "description": "Topic to search for feeds."}
+                        },
+                        "required": ["topic"],
+                    },
+                },
+            },
+        ]

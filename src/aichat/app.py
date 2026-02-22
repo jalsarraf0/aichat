@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import as_file, files
@@ -57,13 +58,22 @@ class AIChatApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="topbar"):
-            yield Static("", id="model-line")
-            yield Static("", id="status")
-        with Horizontal(id="main"):
-            yield Log(id="transcript", auto_scroll=True)
-            yield Log(id="toolpane", auto_scroll=True)
-        yield TextArea(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
+        with Vertical(id="app"):
+            with Horizontal(id="status-bar"):
+                yield Static("", id="model-line")
+                yield Static("", id="status")
+            with Horizontal(id="body"):
+                with Vertical(id="chat-pane"):
+                    yield Static("Transcript", classes="pane-title")
+                    yield Log(id="transcript", auto_scroll=True)
+                with Vertical(id="tool-pane"):
+                    yield Static("Tools", classes="pane-title")
+                    yield Log(id="toolpane", auto_scroll=True)
+                    yield Static("Sessions", classes="pane-title")
+                    yield Log(id="sessionpane", auto_scroll=True)
+            with Vertical(id="input-pane"):
+                yield Static("Prompt", classes="pane-title")
+                yield TextArea(placeholder="Ask anything. Commands: /shell /rss /researchbox", id="prompt")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -71,6 +81,7 @@ class AIChatApp(App):
         transcript = self.query_one("#transcript", Log)
         for message in self.messages[-100:]:
             transcript.write_line(f"{message.role}> {message.content}")
+        self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
 
     def apply_theme(self, name: str) -> None:
@@ -132,25 +143,26 @@ class AIChatApp(App):
         self.state.busy = True
         transcript = self.query_one("#transcript", Log)
         content = ""
+        tools = self.tools.tool_definitions()
         try:
             if self.state.streaming:
-                transcript.write_line("assistant> ")
-                async for chunk in self.client.chat_stream(self.state.model, [m.as_chat_dict() for m in self.messages]):
-                    content += chunk
-                    self._stream_line += chunk
-                    if "\n" in self._stream_line:
-                        for line in self._stream_line.splitlines()[:-1]:
-                            transcript.write_line(line)
-                        self._stream_line = self._stream_line.splitlines()[-1]
-                if self._stream_line:
-                    transcript.write_line(self._stream_line)
-                    self._stream_line = ""
+                content, tool_calls = await self._stream_with_tools(tools)
             else:
-                content = await self.client.chat_once(self.state.model, [m.as_chat_dict() for m in self.messages])
-                transcript.write_line(f"assistant> {content}")
-            assistant = Message("assistant", content[:4000], full_content=content)
-            self.messages.append(assistant)
-            self.transcript_store.append(assistant)
+                response = await self.client.chat_once_with_tools(
+                    self.state.model,
+                    [m.as_chat_dict() for m in self.messages],
+                    tools=tools,
+                )
+                content = response.get("content", "")
+                tool_calls = response.get("tool_calls", [])
+            if tool_calls:
+                await self._handle_tool_calls(tool_calls)
+            else:
+                if not self.state.streaming:
+                    transcript.write_line(f"assistant> {content}")
+                assistant = Message("assistant", content[:4000], full_content=content)
+                self.messages.append(assistant)
+                self.transcript_store.append(assistant)
         except asyncio.CancelledError:
             transcript.write_line("[stream cancelled]")
             raise
@@ -208,6 +220,122 @@ class AIChatApp(App):
                 self.notify(f"Modal handler failed: {exc}", severity="error")
 
         self.push_screen(screen, callback=_handle)
+
+    def _merge_tool_call_deltas(self, state: dict[int, dict[str, object]], deltas: list[dict[str, object]]) -> None:
+        for call in deltas:
+            index = int(call.get("index", 0))
+            entry = state.setdefault(
+                index,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if "id" in call:
+                entry["id"] = call["id"]
+            if "type" in call:
+                entry["type"] = call["type"]
+            if "function" in call and isinstance(call["function"], dict):
+                func = entry.setdefault("function", {"name": "", "arguments": ""})
+                if "name" in call["function"]:
+                    func["name"] = call["function"]["name"]
+                if "arguments" in call["function"]:
+                    func["arguments"] = str(func.get("arguments", "")) + str(call["function"]["arguments"])
+
+    async def _stream_with_tools(self, tools: list[dict[str, object]]) -> tuple[str, list[dict[str, object]]]:
+        transcript = self.query_one("#transcript", Log)
+        content = ""
+        self._stream_line = ""
+        tool_call_state: dict[int, dict[str, object]] = {}
+        transcript.write_line("assistant> ")
+        async for event in self.client.chat_stream_events(
+            self.state.model,
+            [m.as_chat_dict() for m in self.messages],
+            tools=tools,
+        ):
+            if event.get("type") == "content":
+                chunk = str(event.get("value", ""))
+                if not chunk:
+                    continue
+                content += chunk
+                self._stream_line += chunk
+                if "\n" in self._stream_line:
+                    for line in self._stream_line.splitlines()[:-1]:
+                        transcript.write_line(line)
+                    self._stream_line = self._stream_line.splitlines()[-1]
+            elif event.get("type") == "tool_calls":
+                deltas = event.get("value", [])
+                if isinstance(deltas, list):
+                    self._merge_tool_call_deltas(tool_call_state, deltas)
+        if self._stream_line:
+            transcript.write_line(self._stream_line)
+            self._stream_line = ""
+        tool_calls = [tool_call_state[idx] for idx in sorted(tool_call_state)]
+        return content, tool_calls
+
+    async def _handle_tool_calls(self, tool_calls: list[dict[str, object]]) -> None:
+        if not tool_calls:
+            return
+        log = self.query_one("#toolpane", Log)
+        assistant = Message("assistant", "", full_content="", metadata={"tool_calls": tool_calls})
+        self.messages.append(assistant)
+        self.transcript_store.append(assistant)
+        for call in tool_calls[: self.state.max_tool_calls_per_turn]:
+            name = ""
+            args_text = ""
+            call_id = ""
+            if isinstance(call.get("function"), dict):
+                name = str(call["function"].get("name", ""))
+                args_text = str(call["function"].get("arguments", ""))
+            call_id = str(call.get("id", "")) if call.get("id") else ""
+            result_text = await self._execute_tool_call(name, args_text)
+            log.write_line(f"[tool:{name}] {result_text[:4000]}")
+            tool_msg = Message("tool", result_text[:4000], full_content=result_text, metadata={"tool_call_id": call_id})
+            self.messages.append(tool_msg)
+            self.transcript_store.append(tool_msg)
+        await self._run_followup_response()
+
+    async def _execute_tool_call(self, name: str, args_text: str) -> str:
+        log = self.query_one("#toolpane", Log)
+        try:
+            args = json.loads(args_text) if args_text else {}
+        except json.JSONDecodeError as exc:
+            error = f"invalid tool arguments: {exc}"
+            log.write_line(f"[tool error] {error}")
+            return error
+        if name == "rss_latest":
+            topic = str(args.get("topic", "")).strip()
+            if not topic:
+                return "rss_latest: missing 'topic'"
+            payload = await self.tools.run_rss(topic, self.state.approval, self._confirm_tool)
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "researchbox_search":
+            topic = str(args.get("topic", "")).strip()
+            if not topic:
+                return "researchbox_search: missing 'topic'"
+            payload = await self.tools.run_researchbox(topic, self.state.approval, self._confirm_tool)
+            return json.dumps(payload, ensure_ascii=False)
+        return f"unknown tool '{name}'"
+
+    async def _run_followup_response(self) -> None:
+        transcript = self.query_one("#transcript", Log)
+        content = ""
+        self._stream_line = ""
+        if self.state.streaming:
+            transcript.write_line("assistant> ")
+            async for chunk in self.client.chat_stream(self.state.model, [m.as_chat_dict() for m in self.messages]):
+                content += chunk
+                self._stream_line += chunk
+                if "\n" in self._stream_line:
+                    for line in self._stream_line.splitlines()[:-1]:
+                        transcript.write_line(line)
+                    self._stream_line = self._stream_line.splitlines()[-1]
+            if self._stream_line:
+                transcript.write_line(self._stream_line)
+                self._stream_line = ""
+        else:
+            content = await self.client.chat_once(self.state.model, [m.as_chat_dict() for m in self.messages])
+            transcript.write_line(f"assistant> {content}")
+        assistant = Message("assistant", content[:4000], full_content=content)
+        self.messages.append(assistant)
+        self.transcript_store.append(assistant)
     async def _confirm_tool(self, tool_name: str) -> bool:
         if self.state.approval == ApprovalMode.AUTO:
             return True
@@ -271,7 +399,7 @@ class AIChatApp(App):
 
     async def action_sessions(self) -> None:
         sessions = self.tools.active_sessions()
-        log = self.query_one("#toolpane", Log)
+        log = self.query_one("#sessionpane", Log)
         log.write_line("active sessions: " + (", ".join(sessions) if sessions else "none"))
 
     async def action_settings(self) -> None:

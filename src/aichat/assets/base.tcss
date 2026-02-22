@@ -1,26 +1,65 @@
-#topbar {
-    height: 3;
-}
-
-#status {
-    height: 1;
-}
-
-#main {
+#app {
     height: 1fr;
 }
 
+#status-bar {
+    height: 3;
+    padding: 0 1;
+}
+
+#model-line {
+    width: 1fr;
+}
+
+#status {
+    width: 1fr;
+    text-align: right;
+}
+
+#body {
+    height: 1fr;
+}
+
+#chat-pane {
+    width: 65%;
+    padding: 0 1 0 1;
+}
+
+#tool-pane {
+    width: 35%;
+    padding: 0 1 0 0;
+}
+
+#input-pane {
+    height: 6;
+    padding: 0 1 1 1;
+}
+
+.pane-title {
+    text-style: bold;
+    margin: 0 0 0 1;
+}
+
 #transcript {
-    width: 60%;
+    height: 1fr;
+    border: round $accent;
     padding: 0 1;
 }
 
 #toolpane {
-    width: 40%;
+    height: 1fr;
+    border: round $accent;
+    padding: 0 1;
+}
+
+#sessionpane {
+    height: 8;
+    border: round $accent;
     padding: 0 1;
 }
 
 #prompt {
-    margin: 0 0 1 0;
     height: 3;
+    border: round $accent;
+    padding: 0 1;
 }
