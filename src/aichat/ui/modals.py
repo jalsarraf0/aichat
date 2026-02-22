@@ -31,6 +31,10 @@ class ChoiceModal(ModalScreen[str]):
         for choice in choices:
             if isinstance(choice, Choice):
                 normalized.append(choice)
+            elif isinstance(choice, (tuple, list)) and len(choice) == 2:
+                label = str(choice[0])
+                value = str(choice[1])
+                normalized.append(Choice(label=label, value=value))
             else:
                 normalized.append(Choice(label=str(choice), value=str(choice)))
         self._choices = normalized
@@ -102,6 +106,39 @@ class SearchModal(ModalScreen[str]):
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             self.dismiss("")
+            event.stop()
+
+
+class RssIngestModal(ModalScreen[dict]):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rss-ingest-modal"):
+            yield Label("RSS ingest")
+            yield Input(placeholder="Topic (e.g., linux)", id="rss-topic")
+            yield Input(placeholder="Feed URL", id="rss-feed-url")
+            yield Button("Ingest", id="ingest")
+            yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.set_focus(self.query_one("#rss-topic", Input))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss({})
+            return
+        if event.button.id == "ingest":
+            topic = self.query_one("#rss-topic", Input).value.strip()
+            feed_url = self.query_one("#rss-feed-url", Input).value.strip()
+            self.dismiss({"topic": topic, "feed_url": feed_url})
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "rss-feed-url":
+            topic = self.query_one("#rss-topic", Input).value.strip()
+            feed_url = self.query_one("#rss-feed-url", Input).value.strip()
+            self.dismiss({"topic": topic, "feed_url": feed_url})
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss({})
             event.stop()
 
 
