@@ -7,7 +7,6 @@ from datetime import datetime
 from importlib.resources import as_file, files
 from pathlib import Path
 
-from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -24,6 +23,8 @@ from .ui.modals import ChoiceModal, SearchModal, SettingsModal
 
 class AIChatApp(App):
     BINDINGS = [
+        Binding("enter", "send", "Send", priority=True),
+        Binding("shift+enter", "newline", "Newline", priority=True),
         Binding("f1", "help", "Help", priority=True),
         Binding("f2", "pick_model", "Model", priority=True),
         Binding("f3", "search", "Search", priority=True),
@@ -485,16 +486,10 @@ class AIChatApp(App):
         out = Path.home() / ".local" / "share" / "aichat" / f"export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
         self.transcript_store.export_markdown(out)
         self.notify(f"exported to {out}")
-
-    async def on_key(self, event: events.Key) -> None:
-        if (
-            event.key == "enter"
-            and not event.shift
-            and self.focused
-            and self.focused.id == "prompt"
-        ):
-            await self.action_send()
-            event.stop()
+    async def action_newline(self) -> None:
+        if self.focused and self.focused.id == "prompt":
+            prompt = self.query_one("#prompt", TextArea)
+            prompt.insert("\n")
 
 
 def main() -> None:
