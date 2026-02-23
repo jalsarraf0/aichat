@@ -12,7 +12,6 @@ from importlib.resources import as_file, files
 from pathlib import Path
 
 from .tool_args import parse_tool_args
-from .shell_paths import detect_project_name, rewrite_cd_commands
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -62,7 +61,6 @@ class AIChatApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._project_root = Path("~/git")
-        self._locked_project_path: Path | None = None
         cfg = load_config()
         self.personalities: list[dict[str, str]] = merge_personalities(cfg.get("personalities", []))
         self.state = AppState(
@@ -171,9 +169,6 @@ class AIChatApp(App):
         if text.startswith("!"):
             asyncio.create_task(self._handle_shell_command(text[1:]))
             return
-        project_hint = detect_project_name(text)
-        if project_hint:
-            await self._create_project(project_hint)
         self.tools.reset_turn()
         user = Message("user", text)
         self.messages.append(user)
@@ -223,10 +218,6 @@ class AIChatApp(App):
                 return
             if text.startswith("/persona") or text.startswith("/personality"):
                 await self._handle_personality_command(text)
-                return
-            if text.startswith("/unlock") or text.startswith("/project clear") or text.startswith("/project unlock"):
-                self._clear_project_lock()
-                self._write_transcript("Assistant", "Project lock cleared.")
                 return
             if text.startswith("/new"):
                 await self.action_new_chat()
@@ -455,8 +446,6 @@ class AIChatApp(App):
             command = str(args.get("command", "")).strip()
             if not command:
                 return "shell_exec: missing 'command'"
-            if self._locked_project_path:
-                command = rewrite_cd_commands(command, self._project_root, self._locked_project_path)
             output = await self.tools.run_shell(command, self.state.approval, self._confirm_tool, cwd=self.state.cwd)
             return output or "(no output)"
         return f"unknown tool '{name}'"
@@ -478,7 +467,7 @@ class AIChatApp(App):
         persona = self._current_personality_prompt()
         base += (
             f" {persona} When creating new projects, use ~/git/<project>."
-            " Use the exact project/directory name the user provides; do not invent or modify it."
+            " Use exact names and paths requested by the user; do not invent or alter names."
         )
         if self.state.concise_mode:
             return (
@@ -613,7 +602,6 @@ class AIChatApp(App):
         self.transcript_store.clear()
         self.messages = []
         self.query_one("#transcript", Log).clear()
-        self._locked_project_path = None
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
@@ -779,13 +767,9 @@ class AIChatApp(App):
             return
         project_path.mkdir(parents=True, exist_ok=True)
         self.state.cwd = str(project_path)
-        self._locked_project_path = project_path
         await self.update_status()
         self._log_session(f"Project set to {project_path}")
         self._write_transcript("Assistant", f"Project ready at {project_path}.")
-
-    def _clear_project_lock(self) -> None:
-        self._locked_project_path = None
 
     def _current_personality_prompt(self) -> str:
         for persona in self.personalities:

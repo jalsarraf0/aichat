@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-from pathlib import Path
 from collections.abc import Awaitable, Callable
 from enum import Enum
 
@@ -85,7 +84,6 @@ class ToolManager:
         cwd: str | None = None,
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
-        ensure_project_dirs(command, cwd)
         command = self._ensure_non_interactive_sudo(command)
         proc = await asyncio.create_subprocess_exec(
             "bash",
@@ -219,60 +217,3 @@ class ToolManager:
                 }
             )
         return tools
-
-
-def ensure_project_dirs(command: str, cwd: str | None) -> None:
-    current = Path(cwd) if cwd else Path.cwd()
-    _ensure_dir(current)
-    for target in _iter_cd_targets(command, current):
-        _ensure_dir(target)
-        current = target
-
-
-def _ensure_dir(path: Path) -> None:
-    candidate = path.expanduser()
-    try:
-        candidate.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-
-
-def _iter_cd_targets(command: str, start_dir: Path) -> list[Path]:
-    if not command:
-        return []
-    targets: list[Path] = []
-    current = start_dir
-    for line in command.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        cleaned = stripped.replace("&&", ";").replace("||", ";")
-        for segment in cleaned.split(";"):
-            try:
-                parts = shlex.split(segment)
-            except ValueError:
-                continue
-            for idx, token in enumerate(parts):
-                if token not in {"cd", "pushd"}:
-                    continue
-                j = idx + 1
-                while j < len(parts) and parts[j].startswith("-"):
-                    if parts[j] == "--":
-                        j += 1
-                        break
-                    j += 1
-                if j >= len(parts):
-                    continue
-                target = parts[j].rstrip(";")
-                if target == "-":
-                    continue
-                target = os.path.expandvars(target)
-                if target in {"~", "~/"}:
-                    target_path = Path.home()
-                else:
-                    target_path = Path(target).expanduser()
-                if not target_path.is_absolute():
-                    target_path = current / target_path
-                targets.append(target_path)
-                current = target_path
-    return targets
