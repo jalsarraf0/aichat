@@ -224,10 +224,12 @@ class ToolManager:
 def ensure_project_dirs(command: str, cwd: str | None) -> None:
     if cwd:
         _ensure_dir(Path(cwd))
-    target = _extract_cd_target(command)
-    if target:
-        if not target.is_absolute() and cwd:
-            target = Path(cwd) / target
+    else:
+        _ensure_dir(Path.cwd())
+    for target in _extract_cd_targets(command):
+        if not target.is_absolute():
+            base = Path(cwd) if cwd else Path.cwd()
+            target = base / target
         _ensure_dir(target)
 
 
@@ -239,23 +241,34 @@ def _ensure_dir(path: Path) -> None:
         return
 
 
-def _extract_cd_target(command: str) -> Path | None:
+def _extract_cd_targets(command: str) -> list[Path]:
     if not command:
-        return None
+        return []
+    targets: list[Path] = []
     for line in command.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        if not stripped.startswith("cd "):
-            return None
-        try:
-            parts = shlex.split(stripped)
-        except ValueError:
-            return None
-        if len(parts) < 2:
-            return None
-        target = parts[1]
-        if target in {"~", "~/"}:
-            return Path.home()
-        return Path(target)
-    return None
+        cleaned = stripped.replace("&&", ";").replace("||", ";")
+        for segment in cleaned.split(";"):
+            try:
+                parts = shlex.split(segment)
+            except ValueError:
+                continue
+            for idx, token in enumerate(parts):
+                if token != "cd":
+                    continue
+                j = idx + 1
+                while j < len(parts) and parts[j].startswith("-"):
+                    if parts[j] == "--":
+                        j += 1
+                        break
+                    j += 1
+                if j >= len(parts):
+                    continue
+                target = parts[j].rstrip(";")
+                if target in {"~", "~/"}:
+                    targets.append(Path.home())
+                else:
+                    targets.append(Path(target))
+    return targets

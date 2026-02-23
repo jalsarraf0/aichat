@@ -28,3 +28,10 @@ class TestShellDirs(unittest.TestCase):
             command = "cd relproj\nls"
             ensure_project_dirs(command, str(base))
             self.assertTrue((base / "relproj").exists())
+
+    def test_creates_cd_after_preamble(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            command = "set -e\ncd relproj\npwd"
+            ensure_project_dirs(command, str(base))
+            self.assertTrue((base / "relproj").exists())
