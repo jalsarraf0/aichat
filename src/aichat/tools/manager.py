@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+from pathlib import Path
 from collections.abc import Awaitable, Callable
 from enum import Enum
 
@@ -84,6 +85,7 @@ class ToolManager:
         cwd: str | None = None,
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
+        ensure_project_dirs(command, cwd)
         command = self._ensure_non_interactive_sudo(command)
         proc = await asyncio.create_subprocess_exec(
             "bash",
@@ -121,6 +123,55 @@ class ToolManager:
             return command
         parts.insert(1, "-n")
         return shlex.join(parts)
+
+
+PROJECT_ROOT = Path("~/git")
+
+
+def ensure_project_dirs(command: str, cwd: str | None, root: Path = PROJECT_ROOT) -> None:
+    root = root.expanduser()
+    if cwd:
+        _ensure_dir_if_project(Path(cwd), root)
+    target = _extract_cd_target(command)
+    if target:
+        _ensure_dir_if_project(target, root)
+
+
+def _ensure_dir_if_project(path: Path, root: Path) -> None:
+    try:
+        resolved_root = root.resolve()
+    except FileNotFoundError:
+        resolved_root = root
+    candidate = path.expanduser()
+    try:
+        resolved = candidate.resolve()
+    except FileNotFoundError:
+        resolved = candidate
+    if resolved_root != resolved and not str(resolved).startswith(str(resolved_root) + os.sep):
+        return
+    resolved.mkdir(parents=True, exist_ok=True)
+
+
+def _extract_cd_target(command: str) -> Path | None:
+    if not command:
+        return None
+    for line in command.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("cd "):
+            return None
+        try:
+            parts = shlex.split(stripped)
+        except ValueError:
+            return None
+        if len(parts) < 2:
+            return None
+        target = parts[1]
+        if target in {"~", "~/"}:
+            return Path.home()
+        return Path(target)
+    return None
 
     async def run_rss(
         self,
