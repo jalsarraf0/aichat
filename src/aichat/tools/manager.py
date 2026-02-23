@@ -222,15 +222,11 @@ class ToolManager:
 
 
 def ensure_project_dirs(command: str, cwd: str | None) -> None:
-    if cwd:
-        _ensure_dir(Path(cwd))
-    else:
-        _ensure_dir(Path.cwd())
-    for target in _extract_cd_targets(command):
-        if not target.is_absolute():
-            base = Path(cwd) if cwd else Path.cwd()
-            target = base / target
+    current = Path(cwd) if cwd else Path.cwd()
+    _ensure_dir(current)
+    for target in _iter_cd_targets(command, current):
         _ensure_dir(target)
+        current = target
 
 
 def _ensure_dir(path: Path) -> None:
@@ -241,10 +237,11 @@ def _ensure_dir(path: Path) -> None:
         return
 
 
-def _extract_cd_targets(command: str) -> list[Path]:
+def _iter_cd_targets(command: str, start_dir: Path) -> list[Path]:
     if not command:
         return []
     targets: list[Path] = []
+    current = start_dir
     for line in command.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -267,8 +264,15 @@ def _extract_cd_targets(command: str) -> list[Path]:
                 if j >= len(parts):
                     continue
                 target = parts[j].rstrip(";")
+                if target == "-":
+                    continue
                 if target in {"~", "~/"}:
-                    targets.append(Path.home())
+                    target_path = Path.home()
                 else:
-                    targets.append(Path(target))
+                    target_path = Path(target)
+                if not target_path.is_absolute():
+                    target_path = current / target_path
+                target_path = target_path.expanduser()
+                targets.append(target_path)
+                current = target_path
     return targets
