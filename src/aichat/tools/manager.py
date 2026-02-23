@@ -124,46 +124,6 @@ class ToolManager:
         parts.insert(1, "-n")
         return shlex.join(parts)
 
-
-def ensure_project_dirs(command: str, cwd: str | None) -> None:
-    if cwd:
-        _ensure_dir(Path(cwd))
-    target = _extract_cd_target(command)
-    if target:
-        if not target.is_absolute() and cwd:
-            target = Path(cwd) / target
-        _ensure_dir(target)
-
-
-def _ensure_dir(path: Path) -> None:
-    candidate = path.expanduser()
-    try:
-        candidate.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-
-
-def _extract_cd_target(command: str) -> Path | None:
-    if not command:
-        return None
-    for line in command.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not stripped.startswith("cd "):
-            return None
-        try:
-            parts = shlex.split(stripped)
-        except ValueError:
-            return None
-        if len(parts) < 2:
-            return None
-        target = parts[1]
-        if target in {"~", "~/"}:
-            return Path.home()
-        return Path(target)
-    return None
-
     async def run_rss(
         self,
         topic: str,
@@ -259,3 +219,43 @@ def _extract_cd_target(command: str) -> Path | None:
                 }
             )
         return tools
+
+
+def ensure_project_dirs(command: str, cwd: str | None) -> None:
+    if cwd:
+        _ensure_dir(Path(cwd))
+    target = _extract_cd_target(command)
+    if target:
+        if not target.is_absolute() and cwd:
+            target = Path(cwd) / target
+        _ensure_dir(target)
+
+
+def _ensure_dir(path: Path) -> None:
+    candidate = path.expanduser()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+
+def _extract_cd_target(command: str) -> Path | None:
+    if not command:
+        return None
+    for line in command.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("cd "):
+            return None
+        try:
+            parts = shlex.split(stripped)
+        except ValueError:
+            return None
+        if len(parts) < 2:
+            return None
+        target = parts[1]
+        if target in {"~", "~/"}:
+            return Path.home()
+        return Path(target)
+    return None
