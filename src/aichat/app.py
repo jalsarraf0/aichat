@@ -478,8 +478,9 @@ class AIChatApp(App):
         base += (
             f" {persona} When creating new projects, use ~/git/<project>."
             " Use exact names and paths requested by the user; do not invent or alter names."
-            " If a request is ambiguous, make reasonable assumptions to answer, and ask a brief"
-            " clarifying question if needed. Be natural and helpful."
+            " If a request is ambiguous, choose the most likely interpretation, state the key"
+            " assumption briefly, answer fully, and ask one short clarifying question."
+            " Be natural, conversational, and helpful."
         )
         if self.state.concise_mode:
             return (
