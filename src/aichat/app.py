@@ -11,7 +11,7 @@ from datetime import datetime
 from importlib.resources import as_file, files
 from pathlib import Path
 
-import yaml
+from .tool_args import parse_tool_args
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -389,7 +389,7 @@ class AIChatApp(App):
                 name = str(call["function"].get("name", ""))
                 args_text = str(call["function"].get("arguments", ""))
             call_id = str(call.get("id", "")) if call.get("id") else ""
-            args, error = self._parse_tool_args(name, args_text)
+            args, error = parse_tool_args(name, args_text)
             if error:
                 immediate_results.append(
                     ToolResult(
@@ -449,30 +449,6 @@ class AIChatApp(App):
             output = await self.tools.run_shell(command, self.state.approval, self._confirm_tool, cwd=self.state.cwd)
             return output or "(no output)"
         return f"unknown tool '{name}'"
-
-    def _parse_tool_args(self, name: str, args_text: str) -> tuple[dict[str, object], str | None]:
-        if not args_text:
-            return {}, None
-        cleaned = args_text.strip()
-        if cleaned.startswith("```") and cleaned.endswith("```"):
-            cleaned = "\n".join(cleaned.splitlines()[1:-1]).strip()
-        parsed: object
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
-            try:
-                parsed = yaml.safe_load(cleaned)
-            except Exception as exc:  # noqa: BLE001
-                if name == "shell_exec" and cleaned:
-                    return {"command": cleaned}, None
-                return {}, f"invalid tool arguments: {exc}"
-        if isinstance(parsed, dict):
-            return parsed, None
-        if name == "shell_exec" and isinstance(parsed, str) and parsed.strip():
-            return {"command": parsed.strip()}, None
-        if name == "shell_exec" and cleaned:
-            return {"command": cleaned}, None
-        return {}, "invalid tool arguments: expected object payload"
 
     async def _run_followup_response(self) -> None:
         content = ""
