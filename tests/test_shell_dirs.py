@@ -9,25 +9,22 @@ from aichat.tools.manager import ensure_project_dirs
 
 
 class TestShellDirs(unittest.TestCase):
-    def test_creates_cwd_under_root(self) -> None:
+    def test_creates_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "root"
-            target = root / "proj"
-            ensure_project_dirs("", str(target), root=root)
+            target = Path(tmp) / "proj"
+            ensure_project_dirs("", str(target))
             self.assertTrue(target.exists())
 
-    def test_creates_cd_target_under_root(self) -> None:
+    def test_creates_cd_target_absolute(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "root"
-            target = root / "proj2"
+            target = Path(tmp) / "proj2"
             command = f"cd {target}\npython -V"
-            ensure_project_dirs(command, None, root=root)
+            ensure_project_dirs(command, None)
             self.assertTrue(target.exists())
 
-    def test_does_not_create_outside_root(self) -> None:
+    def test_creates_cd_target_relative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "root"
-            outside = Path(tmp) / "outside"
-            command = f"cd {outside}\nls"
-            ensure_project_dirs(command, None, root=root)
-            self.assertFalse(outside.exists())
+            base = Path(tmp) / "base"
+            command = "cd relproj\nls"
+            ensure_project_dirs(command, str(base))
+            self.assertTrue((base / "relproj").exists())

@@ -125,31 +125,22 @@ class ToolManager:
         return shlex.join(parts)
 
 
-PROJECT_ROOT = Path("~/git")
-
-
-def ensure_project_dirs(command: str, cwd: str | None, root: Path = PROJECT_ROOT) -> None:
-    root = root.expanduser()
+def ensure_project_dirs(command: str, cwd: str | None) -> None:
     if cwd:
-        _ensure_dir_if_project(Path(cwd), root)
+        _ensure_dir(Path(cwd))
     target = _extract_cd_target(command)
     if target:
-        _ensure_dir_if_project(target, root)
+        if not target.is_absolute() and cwd:
+            target = Path(cwd) / target
+        _ensure_dir(target)
 
 
-def _ensure_dir_if_project(path: Path, root: Path) -> None:
-    try:
-        resolved_root = root.resolve()
-    except FileNotFoundError:
-        resolved_root = root
+def _ensure_dir(path: Path) -> None:
     candidate = path.expanduser()
     try:
-        resolved = candidate.resolve()
-    except FileNotFoundError:
-        resolved = candidate
-    if resolved_root != resolved and not str(resolved).startswith(str(resolved_root) + os.sep):
+        candidate.mkdir(parents=True, exist_ok=True)
+    except OSError:
         return
-    resolved.mkdir(parents=True, exist_ok=True)
 
 
 def _extract_cd_target(command: str) -> Path | None:
