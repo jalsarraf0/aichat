@@ -56,3 +56,46 @@ class TestShellDirs(unittest.TestCase):
                 self.assertTrue((base / "nested").exists())
             finally:
                 os.chdir(original)
+
+    def test_cd_home_and_expandvars(self) -> None:
+        home = Path.home()
+        target = home / "aichat_home_test"
+        if target.exists():
+            target.rmdir()
+        ensure_project_dirs("cd ~\ncd aichat_home_test", None)
+        self.assertTrue(target.exists())
+
+    def test_cd_home_tilde_path(self) -> None:
+        target = Path.home() / "aichat_home_tilde"
+        if target.exists():
+            target.rmdir()
+        ensure_project_dirs("cd ~/aichat_home_tilde", None)
+        self.assertTrue(target.exists())
+
+    def test_cd_with_double_dash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "dash"
+            ensure_project_dirs(f"cd -- {target}", None)
+            self.assertTrue(target.exists())
+
+    def test_cd_dash_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "-"
+            if target.exists():
+                target.rmdir()
+            ensure_project_dirs("cd -\ncd other", tmp)
+            self.assertFalse(target.exists())
+            self.assertTrue((Path(tmp) / "other").exists())
+
+    def test_cd_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "dir with spaces"
+            command = f'cd "{target}"\npwd'
+            ensure_project_dirs(command, None)
+            self.assertTrue(target.exists())
+
+    def test_pushd_creates_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "pushd_dir"
+            ensure_project_dirs(f"pushd {target}", None)
+            self.assertTrue(target.exists())

@@ -253,7 +253,7 @@ def _iter_cd_targets(command: str, start_dir: Path) -> list[Path]:
             except ValueError:
                 continue
             for idx, token in enumerate(parts):
-                if token != "cd":
+                if token not in {"cd", "pushd"}:
                     continue
                 j = idx + 1
                 while j < len(parts) and parts[j].startswith("-"):
@@ -266,13 +266,13 @@ def _iter_cd_targets(command: str, start_dir: Path) -> list[Path]:
                 target = parts[j].rstrip(";")
                 if target == "-":
                     continue
+                target = os.path.expandvars(target)
                 if target in {"~", "~/"}:
                     target_path = Path.home()
                 else:
-                    target_path = Path(target)
+                    target_path = Path(target).expanduser()
                 if not target_path.is_absolute():
                     target_path = current / target_path
-                target_path = target_path.expanduser()
                 targets.append(target_path)
                 current = target_path
     return targets
