@@ -12,6 +12,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 
 from .tool_args import parse_tool_args
+from .shell_paths import detect_project_name, rewrite_cd_commands
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -61,6 +62,7 @@ class AIChatApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._project_root = Path("~/git")
+        self._locked_project_path: Path | None = None
         cfg = load_config()
         self.personalities: list[dict[str, str]] = merge_personalities(cfg.get("personalities", []))
         self.state = AppState(
@@ -169,6 +171,9 @@ class AIChatApp(App):
         if text.startswith("!"):
             asyncio.create_task(self._handle_shell_command(text[1:]))
             return
+        project_hint = detect_project_name(text)
+        if project_hint:
+            await self._create_project(project_hint)
         self.tools.reset_turn()
         user = Message("user", text)
         self.messages.append(user)
@@ -446,6 +451,8 @@ class AIChatApp(App):
             command = str(args.get("command", "")).strip()
             if not command:
                 return "shell_exec: missing 'command'"
+            if self._locked_project_path:
+                command = rewrite_cd_commands(command, self._project_root, self._locked_project_path)
             output = await self.tools.run_shell(command, self.state.approval, self._confirm_tool, cwd=self.state.cwd)
             return output or "(no output)"
         return f"unknown tool '{name}'"
@@ -465,7 +472,10 @@ class AIChatApp(App):
     def _build_system_prompt(self) -> str:
         base = "You are a helpful assistant."
         persona = self._current_personality_prompt()
-        base += f" {persona} When creating new projects, use ~/git/<project>."
+        base += (
+            f" {persona} When creating new projects, use ~/git/<project>."
+            " Use the exact project/directory name the user provides; do not invent or modify it."
+        )
         if self.state.concise_mode:
             return (
                 base
@@ -750,10 +760,10 @@ class AIChatApp(App):
         if re.search(r"[\\\\/]", cleaned):
             self._write_transcript("Assistant", "Project name must not contain slashes.")
             return
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", cleaned):
+        if not re.fullmatch(r"[A-Za-z0-9._ -]+", cleaned) or cleaned.strip(" ._-") == "":
             self._write_transcript(
                 "Assistant",
-                "Project name must use letters, numbers, dot, underscore, or dash.",
+                "Project name must use letters, numbers, spaces, dot, underscore, or dash.",
             )
             return
         root = self._project_root.resolve()
@@ -764,6 +774,7 @@ class AIChatApp(App):
             return
         project_path.mkdir(parents=True, exist_ok=True)
         self.state.cwd = str(project_path)
+        self._locked_project_path = project_path
         await self.update_status()
         self._log_session(f"Project set to {project_path}")
         self._write_transcript("Assistant", f"Project ready at {project_path}.")
