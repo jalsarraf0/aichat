@@ -224,6 +224,10 @@ class AIChatApp(App):
             if text.startswith("/persona") or text.startswith("/personality"):
                 await self._handle_personality_command(text)
                 return
+            if text.startswith("/unlock") or text.startswith("/project clear") or text.startswith("/project unlock"):
+                self._clear_project_lock()
+                self._write_transcript("Assistant", "Project lock cleared.")
+                return
             if text.startswith("/new"):
                 await self.action_new_chat()
                 return
@@ -609,6 +613,7 @@ class AIChatApp(App):
         self.transcript_store.clear()
         self.messages = []
         self.query_one("#transcript", Log).clear()
+        self._locked_project_path = None
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
@@ -778,6 +783,9 @@ class AIChatApp(App):
         await self.update_status()
         self._log_session(f"Project set to {project_path}")
         self._write_transcript("Assistant", f"Project ready at {project_path}.")
+
+    def _clear_project_lock(self) -> None:
+        self._locked_project_path = None
 
     def _current_personality_prompt(self) -> str:
         for persona in self.personalities:
