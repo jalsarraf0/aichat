@@ -167,7 +167,7 @@ class AIChatApp(App):
             asyncio.create_task(self.handle_command(text))
             return
         if text.startswith("!"):
-            asyncio.create_task(self._handle_shell_command(text[1:]))
+            asyncio.create_task(self._handle_shell_command(text[1:], allow_toggle=False))
             return
         self.tools.reset_turn()
         user = Message("user", text)
@@ -235,7 +235,7 @@ class AIChatApp(App):
                 await self.action_help()
                 return
             if text.startswith("/shell"):
-                await self._handle_shell_command(text[6:].strip())
+                await self._handle_shell_command(text[6:].strip(), allow_toggle=True)
                 return
             if text.startswith("/vibecode"):
                 name = text[len("/vibecode"):].strip()
@@ -838,10 +838,10 @@ class AIChatApp(App):
         await self.update_status()
         self._write_transcript("Assistant", f"Concise mode {'enabled' if enabled else 'disabled'}.")
 
-    async def _handle_shell_command(self, text: str) -> None:
+    async def _handle_shell_command(self, text: str, *, allow_toggle: bool = True) -> None:
         self.tools.reset_turn()
         arg = text.strip()
-        if arg.lower() in {"on", "off"}:
+        if allow_toggle and arg.lower() in {"on", "off"}:
             enabled = arg.lower() == "on"
             self.state.shell_enabled = enabled
             self._persist_config()
