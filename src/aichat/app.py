@@ -15,6 +15,7 @@ from .tool_args import parse_tool_args
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Header, Log, Static, TextArea
 
 
@@ -137,17 +138,21 @@ class AIChatApp(App):
 
     async def update_status(self) -> None:
         up = await self.client.health()
-        self.query_one("#model-line", Static).update(
+        model_line = self._safe_query_one("#model-line", Static)
+        status_line = self._safe_query_one("#status", Static)
+        if model_line is None or status_line is None:
+            return
+        model_line.update(
             f"model={self.state.model} | base={self.state.base_url} | server={'UP' if up else 'DOWN'}"
         )
-        self.query_one("#status", Static).update(
+        status_line.update(
             "stream="
             + ("ON" if self.state.streaming else "OFF")
             + f" | approval={self.state.approval.value}"
             + f" | concise={'ON' if self.state.concise_mode else 'OFF'}"
             + f" | shell={'ON' if self.state.shell_enabled else 'OFF'}"
             + f" | persona={self.state.personality_id}"
-            + f" | cwd={self.state.cwd}"
+            + f" | cmd={self.state.cwd}"
         )
 
     async def action_send(self) -> None:
@@ -446,7 +451,12 @@ class AIChatApp(App):
             command = str(args.get("command", "")).strip()
             if not command:
                 return "shell_exec: missing 'command'"
-            output = await self.tools.run_shell(command, self.state.approval, self._confirm_tool, cwd=self.state.cwd)
+            output, new_cwd = await self.tools.run_shell(
+                command, self.state.approval, self._confirm_tool, cwd=self.state.cwd
+            )
+            if new_cwd:
+                self.state.cwd = new_cwd
+                await self.update_status()
             return output or "(no output)"
         return f"unknown tool '{name}'"
 
@@ -484,7 +494,9 @@ class AIChatApp(App):
         )
 
     def _write_transcript(self, speaker: str, text: str) -> None:
-        log = self.query_one("#transcript", Log)
+        log = self._safe_query_one("#transcript", Log)
+        if log is None:
+            return
         raw_lines = (text or "").splitlines() or [""]
         prefix = f"{speaker}:"
         pad = " " * (len(prefix) + 1)
@@ -513,7 +525,10 @@ class AIChatApp(App):
         self.transcript_store.append(assistant)
 
     def _tool_log(self, message: str) -> None:
-        self.query_one("#toolpane", Log).write_line(message)
+        log = self._safe_query_one("#toolpane", Log)
+        if log is None:
+            return
+        log.write_line(message)
 
     def _log_tool_results(self, results: list[ToolResult]) -> None:
         for result in results:
@@ -580,7 +595,9 @@ class AIChatApp(App):
         return await self._execute_tool_call(call.name, call.args)
 
     def _refresh_sessions(self) -> None:
-        log = self.query_one("#sessionpane", Log)
+        log = self._safe_query_one("#sessionpane", Log)
+        if log is None:
+            return
         log.clear()
         log.write_line(f"LLM busy: {'yes' if self.state.busy else 'no'}")
         log.write_line(f"Tool queue: {self._pending_tools}")
@@ -594,6 +611,12 @@ class AIChatApp(App):
         if len(self._session_notes) > 20:
             self._session_notes = self._session_notes[-20:]
         self._refresh_sessions()
+
+    def _safe_query_one(self, selector: str, expect_type):
+        try:
+            return self.query_one(selector, expect_type)
+        except NoMatches:
+            return None
 
     def _start_new_chat(self, initial: bool = False) -> None:
         archived = self.transcript_store.archive_to(Path("/tmp/context"))
@@ -869,13 +892,16 @@ class AIChatApp(App):
                 tool_log.write_line(line)
 
         try:
-            exit_code, output = await self.tools.run_shell_stream(
+            exit_code, output, new_cwd = await self.tools.run_shell_stream(
                 arg,
                 self.state.approval,
                 self._confirm_tool,
                 cwd=self.state.cwd,
                 on_output=_on_output,
             )
+            if new_cwd:
+                self.state.cwd = new_cwd
+                await self.update_status()
         except ToolDeniedError as exc:
             tool_log.write_line(f"[denied] {exc}")
             self._write_transcript("Assistant", f"Shell denied: {exc}")

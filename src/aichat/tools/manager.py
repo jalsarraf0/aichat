@@ -55,15 +55,15 @@ class ToolManager:
         mode: ApprovalMode,
         confirmer: Callable[[str], Awaitable[bool]] | None,
         cwd: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
-        exit_code, output = await self._run_shell_process(command, cwd=cwd)
+        exit_code, output, new_cwd = await self._run_shell_process(command, cwd=cwd)
         trimmed = output.strip()
         if exit_code != 0:
             if trimmed:
-                return f"{trimmed}\n(exit {exit_code})"
-            return f"(exit {exit_code})"
-        return trimmed
+                return f"{trimmed}\n(exit {exit_code})", new_cwd
+            return f"(exit {exit_code})", new_cwd
+        return trimmed, new_cwd
 
     async def run_shell_stream(
         self,
@@ -73,7 +73,7 @@ class ToolManager:
         *,
         cwd: str | None = None,
         on_output: Callable[[str], None] | None = None,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str | None]:
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
         return await self._run_shell_process(command, cwd=cwd, on_output=on_output)
 
@@ -83,29 +83,53 @@ class ToolManager:
         *,
         cwd: str | None = None,
         on_output: Callable[[str], None] | None = None,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str | None]:
+        marker = "__AICHAT_CWD__"
         command = self._ensure_non_interactive_sudo(command)
+        wrapped = self._wrap_command_with_pwd(command, marker)
         proc = await asyncio.create_subprocess_exec(
             "bash",
             "-lc",
-            command,
+            wrapped,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
             env=os.environ.copy(),
         )
         output_chunks: list[str] = []
+        buffer = ""
+        cwd_value: str | None = None
+        marker_token = f"\n{marker}"
         assert proc.stdout is not None
         while True:
             data = await proc.stdout.read(1024)
             if not data:
                 break
             text = data.decode(errors="replace")
-            output_chunks.append(text)
-            if on_output:
-                on_output(text)
+            buffer += text
+            if marker_token in buffer:
+                before, after = buffer.split(marker_token, 1)
+                if before:
+                    output_chunks.append(before)
+                    if on_output:
+                        on_output(before)
+                cwd_value = after.strip() or None
+                buffer = ""
+                # ignore anything after marker
+                continue
+            if len(buffer) > len(marker_token):
+                safe = buffer[:-len(marker_token)]
+                if safe:
+                    output_chunks.append(safe)
+                    if on_output:
+                        on_output(safe)
+                buffer = buffer[-len(marker_token):]
         exit_code = await proc.wait()
-        return exit_code, "".join(output_chunks).strip()
+        if buffer and cwd_value is None:
+            output_chunks.append(buffer)
+            if on_output:
+                on_output(buffer)
+        return exit_code, "".join(output_chunks).strip(), cwd_value
 
     def _ensure_non_interactive_sudo(self, command: str) -> str:
         stripped = command.lstrip()
@@ -121,6 +145,16 @@ class ToolManager:
             return command
         parts.insert(1, "-n")
         return shlex.join(parts)
+
+    def _wrap_command_with_pwd(self, command: str, marker: str) -> str:
+        if not command.strip():
+            return command
+        return (
+            f"{command}\n"
+            "status=$?\n"
+            f"printf '\\n{marker}%s' \"$PWD\"\n"
+            "exit $status"
+        )
 
     async def run_rss(
         self,
