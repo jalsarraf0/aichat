@@ -1,11 +1,15 @@
 """
 MCP (Model Context Protocol) server for aichat.
 
-Exposes the full aichat tool suite — browser (human_browser / a12fdfeaaf78),
-web_fetch, memory, database storage/cache, researchbox, and shell — as MCP
-tools that any MCP-compatible client (LM Studio, Claude Desktop, etc.) can use.
+Exposes the full aichat tool suite — browser (human_browser), web_fetch,
+memory, database storage/cache, researchbox, and shell — as MCP tools that
+any MCP-compatible client (LM Studio, Claude Desktop, etc.) can use.
 
 Protocol: JSON-RPC 2.0 over stdio (one JSON object per line).
+
+Screenshot responses include an inline base64-encoded PNG image block so
+clients that support the MCP image content type (e.g. LM Studio) can render
+the screenshot directly.
 
 Usage
 -----
@@ -30,7 +34,9 @@ LM Studio mcp_servers.json entry
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import sys
 from typing import Any
 
@@ -188,6 +194,33 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "db_store_image",
+        "description": (
+            "Save a screenshot or image to the PostgreSQL image registry. "
+            "Records the host file path, source URL, and a description."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":       {"type": "string", "description": "Source URL the image was captured from."},
+                "host_path": {"type": "string", "description": "Host file path (e.g. /docker/human_browser/workspace/screenshot.png)."},
+                "alt_text":  {"type": "string", "description": "Description or caption."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "db_list_images",
+        "description": "List screenshots and images saved in the PostgreSQL database, with their host file paths.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max images to return (default 20)."},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "shell_exec",
         "description": "Run a shell command on the host machine.",
         "inputSchema": {
@@ -202,15 +235,34 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 # ---------------------------------------------------------------------------
-# Tool dispatch
+# Tool dispatch — returns list of MCP content blocks
 # ---------------------------------------------------------------------------
 
-async def _call_tool(name: str, arguments: dict[str, Any]) -> str:
+def _image_content_blocks(host_path: str, text: str) -> list[dict[str, Any]]:
+    """Build MCP content list with a text summary and inline base64 PNG image."""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    if host_path and os.path.isfile(host_path):
+        try:
+            with open(host_path, "rb") as fh:
+                b64 = base64.standard_b64encode(fh.read()).decode("ascii")
+            blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
+        except Exception:
+            pass
+    return blocks
+
+
+async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dispatch a tool call and return a list of MCP content blocks."""
     mgr = _get_manager()
+
+    def _text(s: str) -> list[dict[str, Any]]:
+        return [{"type": "text", "text": s}]
+
     try:
         if name == "browser":
+            action = str(arguments.get("action", ""))
             result = await mgr.run_browser(
-                action=str(arguments.get("action", "")),
+                action=action,
                 mode=_APPROVAL,
                 confirmer=None,
                 url=arguments.get("url"),
@@ -218,7 +270,19 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> str:
                 value=arguments.get("value"),
                 code=arguments.get("code"),
             )
-            return json.dumps(result, ensure_ascii=False)
+            if action == "screenshot":
+                host_path = result.get("host_path", "")
+                error = result.get("error", "")
+                if error and not host_path:
+                    return _text(f"Screenshot failed: {error}")
+                page = result.get("title", "") or result.get("url", "")
+                summary = (
+                    f"Screenshot saved.\n"
+                    f"File: {host_path}\n"
+                    f"Page: {page}"
+                )
+                return _image_content_blocks(host_path, summary)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "web_fetch":
             url = str(arguments.get("url", "")).strip()
@@ -228,24 +292,22 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> str:
             text = result.get("text", "")
             truncated = result.get("truncated", False)
             suffix = "\n...[truncated]" if truncated else ""
-            return f"{text}{suffix}" if text else "(no content)"
+            return _text(f"{text}{suffix}" if text else "(no content)")
 
         if name == "memory_store":
             result = await mgr.run_memory_store(
                 str(arguments.get("key", "")),
                 str(arguments.get("value", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "memory_recall":
             result = await mgr.run_memory_recall(
                 str(arguments.get("key", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "db_store_article":
             result = await mgr.run_db_store_article(
@@ -253,69 +315,87 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> str:
                 str(arguments.get("title", "")),
                 str(arguments.get("content", "")),
                 str(arguments.get("topic", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "db_search":
             result = await mgr.run_db_search(
                 str(arguments.get("topic", "")),
                 str(arguments.get("q", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "db_cache_store":
             result = await mgr.run_db_cache_store(
                 str(arguments.get("url", "")),
                 str(arguments.get("content", "")),
                 str(arguments.get("title", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "db_cache_get":
             result = await mgr.run_db_cache_get(
                 str(arguments.get("url", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
+
+        if name == "db_store_image":
+            result = await mgr.run_db_store_image(
+                str(arguments.get("url", "")),
+                str(arguments.get("host_path", "")),
+                str(arguments.get("alt_text", "")),
+                _APPROVAL, None,
+            )
+            return _text(json.dumps(result, ensure_ascii=False))
+
+        if name == "db_list_images":
+            limit = int(arguments.get("limit", 20))
+            result = await mgr.run_db_list_images(limit, _APPROVAL, None)
+            images = result.get("images", [])
+            if not images:
+                return _text("No screenshots stored yet.")
+            lines = [f"Stored screenshots ({len(images)}):"]
+            for img in images:
+                hp = img.get("host_path") or img.get("url", "")
+                alt = img.get("alt_text", "")
+                ts = (img.get("stored_at", "")[:19]).replace("T", " ") if img.get("stored_at") else ""
+                lines.append(f"  {hp}" + (f"  [{alt}]" if alt else "") + (f"  {ts}" if ts else ""))
+            # Include the most recent image inline if it exists
+            most_recent = images[0].get("host_path", "") if images else ""
+            return _image_content_blocks(most_recent, "\n".join(lines))
 
         if name == "researchbox_search":
             result = await mgr.run_researchbox(
                 str(arguments.get("topic", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "researchbox_push":
             result = await mgr.run_researchbox_push(
                 str(arguments.get("feed_url", "")),
                 str(arguments.get("topic", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return json.dumps(result, ensure_ascii=False)
+            return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "shell_exec":
             output, _ = await mgr.run_shell(
                 str(arguments.get("command", "")),
-                _APPROVAL,
-                None,
+                _APPROVAL, None,
             )
-            return output or "(no output)"
+            return _text(output or "(no output)")
 
-        return f"Unknown tool: {name}"
+        return _text(f"Unknown tool: {name}")
 
     except ToolDeniedError as exc:
-        return f"Tool denied: {exc}"
+        return _text(f"Tool denied: {exc}")
     except Exception as exc:
-        return f"Error: {exc}"
+        return _text(f"Error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -370,9 +450,9 @@ async def _handle(line: str) -> None:
     elif method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments") or {}
-        content_text = await _call_tool(tool_name, arguments)
+        content_blocks = await _call_tool(tool_name, arguments)
         _write(_ok(req_id, {
-            "content": [{"type": "text", "text": content_text}],
+            "content": content_blocks,
             "isError": False,
         }))
 

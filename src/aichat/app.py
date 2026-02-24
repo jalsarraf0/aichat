@@ -416,12 +416,74 @@ class AIChatApp(App):
             if text.startswith("/tool"):
                 await self._handle_tool_command(text[5:].strip())
                 return
+            if text.startswith("/screenshots"):
+                await self._handle_screenshots_command()
+                return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
             self._tool_log(f"[denied] {exc}")
         except Exception as exc:
             self._tool_log(f"[tool error] {exc}")
 
+
+    # ------------------------------------------------------------------
+    # Screenshot helpers
+    # ------------------------------------------------------------------
+
+    def _format_screenshot_result(self, payload: dict) -> str:
+        """Return a user-friendly Markdown message for a screenshot result."""
+        error = payload.get("error", "")
+        host_path = payload.get("host_path", "")
+        if error and not host_path:
+            return f"Screenshot failed: {error}"
+        lines = ["**Screenshot saved.**", ""]
+        if host_path:
+            lines += [f"**File:** `{host_path}`", ""]
+        title = payload.get("title", "")
+        url = payload.get("url", "")
+        if title or url:
+            lines += [f"**Page:** {title}{' — ' + url if url else ''}", ""]
+        if host_path:
+            lines += [
+                "**Open with:**",
+                f"```",
+                f"xdg-open {host_path}",
+                f"```",
+                "",
+                "_Metadata stored in the image database. Use `/screenshots` to list all saved screenshots._",
+            ]
+        return "\n".join(lines)
+
+    def _format_image_list(self, payload: dict) -> str:
+        """Format a list of images from the database for display."""
+        images = payload.get("images", [])
+        if not images:
+            return "No screenshots stored yet. Use `browser` with `action=screenshot` to take one."
+        lines = [f"**{len(images)} screenshot(s) stored:**", ""]
+        for img in images:
+            host_path = img.get("host_path") or img.get("url", "")
+            alt = img.get("alt_text", "")
+            stored_at = img.get("stored_at", "")[:19].replace("T", " ") if img.get("stored_at") else ""
+            lines.append(f"- `{host_path}`" + (f"  _{alt}_" if alt else "") + (f"  ({stored_at})" if stored_at else ""))
+        lines += ["", "Open with `xdg-open <path>` or `eog <path>`."]
+        return "\n".join(lines)
+
+    async def _handle_screenshots_command(self) -> None:
+        """List all saved screenshots from the database."""
+        call = ToolCall(
+            index=0,
+            name="db_list_images",
+            args={"limit": 20},
+            call_id="",
+            label="db_list_images",
+        )
+        results = await self._run_tool_batch([call])
+        self._log_tool_results(results)
+        if any(not res.ok for res in results):
+            self._notify_tool_failures(results)
+        else:
+            text = results[0].output if results else "No output."
+            self._write_transcript("Assistant", text)
 
     async def _handle_tool_command(self, sub: str) -> None:
         parts = sub.split(maxsplit=1)
@@ -711,7 +773,25 @@ class AIChatApp(App):
                 value=str(args["value"]) if args.get("value") is not None else None,
                 code=str(args["code"]).strip() if args.get("code") else None,
             )
+            if action == "screenshot":
+                return self._format_screenshot_result(payload)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "db_store_image":
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "db_store_image: missing 'url'"
+            payload = await self.tools.run_db_store_image(
+                url,
+                str(args.get("host_path", "")),
+                str(args.get("alt_text", "")),
+                self.state.approval,
+                self._confirm_tool,
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "db_list_images":
+            limit = int(args.get("limit", 20))
+            payload = await self.tools.run_db_list_images(limit, self.state.approval, self._confirm_tool)
+            return self._format_image_list(payload)
         if self.tools.is_custom_tool(name):
             payload = await self.tools.run_custom_tool(
                 name, dict(args), self.state.approval, self._confirm_tool
