@@ -9,12 +9,14 @@ Architecture
   (using `docker cp`), then starts it with `docker exec -d ... uvicorn ...`.
 * Subsequent calls: HTTP POST to http://<container-bridge-ip>:7081/<action>.
 * The server persists across aichat restarts (the container keeps running).
+* Fallback: if the browser server fails, httpx fetches the URL directly.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -37,7 +39,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
@@ -61,6 +64,14 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.exception_handler(Exception)
+async def _global_exc(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content={"error": str(exc), "content": "", "title": "", "url": ""},
+    )
+
+
 async def _extract_text(page) -> str:
     js = """() => {
         const b = document.body;
@@ -76,6 +87,15 @@ async def _extract_text(page) -> str:
         return ""
 
 
+async def _safe_goto(page, url: str) -> None:
+    for wait in ("networkidle", "load", "domcontentloaded"):
+        try:
+            await page.goto(url, wait_until=wait, timeout=30000)
+            return
+        except Exception:
+            pass
+
+
 @app.get("/health")
 async def health():
     return {"ok": True}
@@ -89,14 +109,14 @@ class NavReq(BaseModel):
 @app.post("/navigate")
 async def navigate(req: NavReq):
     try:
-        await _page.goto(req.url, wait_until=req.wait, timeout=30000)
-    except Exception:
-        await _page.goto(req.url, wait_until="load", timeout=30000)
-    return {
-        "title": await _page.title(),
-        "url": _page.url,
-        "content": await _extract_text(_page),
-    }
+        await _safe_goto(_page, req.url)
+        return {
+            "title": await _page.title(),
+            "url": _page.url,
+            "content": await _extract_text(_page),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "content": "", "title": "", "url": req.url}
 
 
 class ClickReq(BaseModel):
@@ -105,12 +125,15 @@ class ClickReq(BaseModel):
 
 @app.post("/click")
 async def click(req: ClickReq):
-    await _page.click(req.selector, timeout=10000)
     try:
-        await _page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-    return {"url": _page.url, "content": await _extract_text(_page)}
+        await _page.click(req.selector, timeout=10000)
+        try:
+            await _page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        return {"url": _page.url, "content": await _extract_text(_page)}
+    except Exception as exc:
+        return {"error": str(exc), "content": "", "url": ""}
 
 
 class FillReq(BaseModel):
@@ -120,17 +143,23 @@ class FillReq(BaseModel):
 
 @app.post("/fill")
 async def fill(req: FillReq):
-    await _page.fill(req.selector, req.value)
-    return {"ok": True}
+    try:
+        await _page.fill(req.selector, req.value)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.get("/read")
 async def read():
-    return {
-        "title": await _page.title(),
-        "url": _page.url,
-        "content": await _extract_text(_page),
-    }
+    try:
+        return {
+            "title": await _page.title(),
+            "url": _page.url,
+            "content": await _extract_text(_page),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "content": "", "title": "", "url": ""}
 
 
 class EvalReq(BaseModel):
@@ -139,8 +168,11 @@ class EvalReq(BaseModel):
 
 @app.post("/eval")
 async def evaluate(req: EvalReq):
-    result = await _page.evaluate(req.code)
-    return {"result": str(result) if result is not None else "null"}
+    try:
+        result = await _page.evaluate(req.code)
+        return {"result": str(result) if result is not None else "null"}
+    except Exception as exc:
+        return {"error": str(exc), "result": "null"}
 
 
 class ScreenshotReq(BaseModel):
@@ -150,13 +182,13 @@ class ScreenshotReq(BaseModel):
 
 @app.post("/screenshot")
 async def screenshot(req: ScreenshotReq):
-    if req.url:
-        try:
-            await _page.goto(req.url, wait_until="networkidle", timeout=30000)
-        except Exception:
-            await _page.goto(req.url, wait_until="load", timeout=30000)
-    await _page.screenshot(path=req.path, full_page=False)
-    return {"path": req.path, "title": await _page.title(), "url": _page.url}
+    try:
+        if req.url:
+            await _safe_goto(_page, req.url)
+        await _page.screenshot(path=req.path, full_page=False)
+        return {"path": req.path, "title": await _page.title(), "url": _page.url}
+    except Exception as exc:
+        return {"error": str(exc), "path": req.path, "title": "", "url": ""}
 
 
 class SearchReq(BaseModel):
@@ -168,16 +200,16 @@ class SearchReq(BaseModel):
 async def search(req: SearchReq):
     """Human-like search: navigate to DuckDuckGo, type query, submit, return results."""
     try:
-        try:
-            await _page.goto("https://duckduckgo.com", wait_until="networkidle", timeout=20000)
-        except Exception:
-            await _page.goto("https://duckduckgo.com", wait_until="load", timeout=20000)
+        await _safe_goto(_page, "https://duckduckgo.com")
         await _page.fill("input[name='q']", req.query)
         await _page.keyboard.press("Enter")
         try:
             await _page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
-            await _page.wait_for_load_state("load", timeout=10000)
+            try:
+                await _page.wait_for_load_state("load", timeout=10000)
+            except Exception:
+                pass
         content = await _extract_text(_page)
         return {
             "query": req.query,
@@ -309,15 +341,63 @@ class BrowserTool:
         )
 
     # ------------------------------------------------------------------
+    # Fallback: plain httpx fetch when browser is unavailable
+    # ------------------------------------------------------------------
+
+    async def _httpx_fetch(self, url: str) -> dict:
+        """Direct HTTP fetch without Playwright — used as a last resort."""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as c:
+                r = await c.get(url)
+            raw = r.text
+            text = re.sub(r"<[^>]+>", " ", raw)
+            text = re.sub(r"\s{3,}", "\n\n", text).strip()[:8000]
+            return {"url": str(r.url), "title": url, "content": text, "fallback": True}
+        except Exception as exc:
+            return {"url": url, "title": "", "content": "", "error": str(exc), "fallback": True}
+
+    # ------------------------------------------------------------------
     # Browser actions
     # ------------------------------------------------------------------
 
     async def navigate(self, url: str) -> dict:
-        base = await self._ensure_server()
-        async with httpx.AsyncClient(timeout=45.0) as c:
-            r = await c.post(f"{base}/navigate", json={"url": url})
-        r.raise_for_status()
-        return r.json()
+        """Navigate to url; retries after re-deploying the server on failure, then falls back to httpx."""
+        for attempt in range(2):
+            try:
+                base = await self._ensure_server()
+                async with httpx.AsyncClient(timeout=45.0) as c:
+                    r = await c.post(f"{base}/navigate", json={"url": url})
+                if r.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"Browser server returned {r.status_code}",
+                        request=r.request,
+                        response=r,
+                    )
+                return r.json()
+            except httpx.HTTPStatusError:
+                if attempt == 0:
+                    self._server_url = None
+                    try:
+                        self._deploy_server()
+                        self._start_server_daemon()
+                        await asyncio.sleep(3.0)
+                    except Exception:
+                        pass
+                    continue
+                break
+            except Exception:
+                if attempt == 0:
+                    self._server_url = None
+                    continue
+                break
+        return await self._httpx_fetch(url)
 
     async def screenshot(self, url: str | None = None) -> dict:
         base = await self._ensure_server()
