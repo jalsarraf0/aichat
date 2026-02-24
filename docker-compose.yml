@@ -50,6 +50,7 @@ services:
       - "8095:8095"
     volumes:
       - ${HOME}/.config/aichat/tools:/data/tools
+      - ${HOME}/git:/data/repos:ro
     restart: unless-stopped
 
 volumes:

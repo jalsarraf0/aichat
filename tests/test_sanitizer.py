@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aichat.sanitizer import sanitize_response
+from aichat.sanitizer import format_structured, sanitize_response
 
 
 class TestSanitizer(unittest.TestCase):
@@ -79,3 +79,38 @@ class TestSanitizer(unittest.TestCase):
         result = sanitize_response(raw)
         self.assertNotIn("<|", result.text)
         self.assertIn("Hello", result.text)
+
+
+class TestFormatStructured(unittest.TestCase):
+    def test_json_object_pretty_printed(self) -> None:
+        raw = '{"key":"value","count":3}'
+        result = format_structured(raw)
+        self.assertIn("```json", result)
+        self.assertIn('"key"', result)
+        self.assertIn('"value"', result)
+        # Should be indented (pretty-printed)
+        self.assertIn("\n", result)
+
+    def test_json_array_pretty_printed(self) -> None:
+        raw = '[1, 2, 3]'
+        result = format_structured(raw)
+        self.assertIn("```json", result)
+        self.assertIn("1", result)
+
+    def test_non_json_falls_back_to_fenced_block(self) -> None:
+        raw = "not valid json *** random text"
+        result = format_structured(raw)
+        self.assertIn("```", result)
+        self.assertIn("not valid json", result)
+        self.assertNotIn("```json", result)
+
+    def test_xml_like_falls_back_to_fenced_block(self) -> None:
+        raw = "<result><item>foo</item></result>"
+        result = format_structured(raw)
+        self.assertIn("```", result)
+        self.assertIn("foo", result)
+
+    def test_fenced_block_closes(self) -> None:
+        raw = '{"x": 1}'
+        result = format_structured(raw)
+        self.assertTrue(result.strip().endswith("```"))

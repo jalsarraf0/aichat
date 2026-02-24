@@ -55,6 +55,7 @@ fi
 
 log "Creating aichat config directories."
 mkdir -p "${HOME}/.config/aichat/tools"
+mkdir -p "${HOME}/git"
 
 if command -v docker >/dev/null 2>&1; then
   if ! groups | tr ' ' '\n' | grep -qx docker; then

@@ -1,11 +1,16 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git jq bash && \
+    rm -rf /var/lib/apt/lists/* && \
+    update-ca-certificates && \
+    git config --global --add safe.directory '*'
 
 WORKDIR /app
-RUN mkdir -p /data/tools
+RUN mkdir -p /data/tools /data/repos
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    cat /etc/ssl/certs/ca-certificates.crt >> $(python -c "import certifi; print(certifi.where())")
 
 COPY app.py .
 EXPOSE 8095
