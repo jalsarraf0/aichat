@@ -36,7 +36,9 @@ import json
 import os
 import re
 import uuid
+from datetime import datetime
 from typing import Any
+from urllib.parse import unquote as _url_unquote
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -86,6 +88,27 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "screenshot_search",
+        "description": (
+            "Search the web for a topic, screenshot the top result pages, and return all "
+            "screenshots inline as rendered images. Also saves each to the PostgreSQL image "
+            "registry. Use this when the user asks to 'find a picture of X', 'show me X', "
+            "or wants to visually browse search results for a query. "
+            "Makes a best-effort: returns whatever screenshots succeed even if some pages fail."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic or query to search and screenshot."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of result pages to screenshot (default 3, max 5).",
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -282,20 +305,22 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 url = str(args.get("url", "")).strip()
                 if not url:
                     return _text("screenshot: 'url' is required")
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                container_path = f"/workspace/screenshot_{ts}.png"
                 try:
-                    r = await c.post(f"{BROWSER_URL}/screenshot", json={"url": url})
+                    r = await c.post(f"{BROWSER_URL}/screenshot",
+                                     json={"url": url, "path": container_path}, timeout=60)
                     data = r.json()
                 except Exception as exc:
                     return _text(f"Screenshot failed (browser unreachable): {exc}")
                 error = data.get("error", "")
-                container_path = data.get("path", "")  # /workspace/screenshot.png
+                container_path = data.get("path", container_path)
                 if error and not container_path:
                     return _text(f"Screenshot failed: {error}")
-                # host_path for DB storage (matches the bind-mount source on the host)
-                filename = os.path.basename(container_path) if container_path else ""
-                host_path = f"/docker/human_browser/workspace/{filename}" if filename else ""
+                filename = os.path.basename(container_path)
+                host_path = f"/docker/human_browser/workspace/{filename}"
                 page = data.get("title", "") or url
-                # Auto-save to database
+                # Always save fresh screenshot to database for later recall
                 try:
                     await c.post(f"{DATABASE_URL}/images/store", json={
                         "url": url,
@@ -303,13 +328,79 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         "alt_text": f"Screenshot of {page}",
                     })
                 except Exception:
-                    pass  # never fail the screenshot because DB is down
+                    pass
                 summary = (
                     f"Screenshot of: {page}\n"
                     f"URL: {url}\n"
                     f"File: {host_path}"
                 )
                 return _image_blocks(container_path, summary)
+
+            # ----------------------------------------------------------------
+            if name == "screenshot_search":
+                query = str(args.get("query", "")).strip()
+                if not query:
+                    return _text("screenshot_search: 'query' is required")
+                max_results = max(1, min(int(args.get("max_results", 3)), 5))
+
+                # Search DuckDuckGo HTML for result URLs
+                try:
+                    r = await c.get(
+                        f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        follow_redirects=True,
+                    )
+                    html = r.text
+                except Exception as exc:
+                    return _text(f"Search failed: {exc}")
+
+                # Extract result URLs — DDG HTML encodes them as uddg=<url-encoded> redirects
+                raw = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
+                seen_u: set[str] = set()
+                urls: list[str] = []
+                for encoded in raw:
+                    decoded = _url_unquote(encoded)
+                    if decoded not in seen_u:
+                        seen_u.add(decoded)
+                        urls.append(decoded)
+                urls = urls[:max_results]
+
+                if not urls:
+                    return _text(f"No URLs found in search results for: {query}")
+
+                blocks: list[dict[str, Any]] = [
+                    {"type": "text", "text": f"Visual search: '{query}' — screenshotting {len(urls)} result(s)...\n"}
+                ]
+                for i, url in enumerate(urls):
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{i}"
+                    cp = f"/workspace/screenshot_{ts}.png"
+                    try:
+                        sr = await c.post(f"{BROWSER_URL}/screenshot",
+                                          json={"url": url, "path": cp}, timeout=60)
+                        data = sr.json()
+                    except Exception as exc:
+                        blocks.append({"type": "text", "text": f"Failed to screenshot {url}: {exc}"})
+                        continue
+                    err = data.get("error", "")
+                    container_path = data.get("path", cp)
+                    if err and not container_path:
+                        blocks.append({"type": "text", "text": f"Failed: {url} — {err}"})
+                        continue
+                    filename = os.path.basename(container_path)
+                    host_path = f"/docker/human_browser/workspace/{filename}"
+                    page = data.get("title", "") or url
+                    # Always save fresh screenshot to database for recall
+                    try:
+                        await c.post(f"{DATABASE_URL}/images/store", json={
+                            "url": url,
+                            "host_path": host_path,
+                            "alt_text": f"Search: '{query}' — {page}",
+                        })
+                    except Exception:
+                        pass
+                    summary = f"{page}\n{url}\nFile: {host_path}"
+                    blocks.extend(_image_blocks(container_path, summary))
+                return blocks
 
             # ----------------------------------------------------------------
             if name == "web_search":
