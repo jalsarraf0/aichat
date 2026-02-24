@@ -511,11 +511,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"Search failed: {exc}")
 
                 # Tier 1: DDG uddg= redirect params (stable HTML endpoint format)
+                _DDG_HOSTS = ('duckduckgo.com', 'ddg.gg', 'duck.co')
                 raw = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
                 seen_u: set[str] = set()
                 urls: list[str] = []
                 for encoded in raw:
                     decoded = _url_unquote(encoded)
+                    # Skip DDG-internal URLs that get double-encoded into uddg=
+                    if any(d in decoded for d in _DDG_HOSTS):
+                        continue
                     if decoded not in seen_u:
                         seen_u.add(decoded)
                         urls.append(decoded)
@@ -526,7 +530,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     href_raw = re.findall(r'href=["\']?(https?://[^"\'>\s]+)', html)
                     urls = list(dict.fromkeys(
                         u for u in href_raw
-                        if not any(d in u for d in ('duckduckgo.com', 'ddg.gg', 'duck.co'))
+                        if not any(d in u for d in _DDG_HOSTS)
                     ))[:max_results]
 
                 # Tier 3: browser search + DOM eval (Chromium w/ anti-detection, most reliable)
@@ -668,12 +672,42 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     if cache_r.status_code == 200:
                         data = cache_r.json()
                         if data.get("found"):
-                            return _text(f"[cached] {data.get('content', '')[:max_chars]}")
+                            cached_text = data.get("content", "")
+                            # Re-cache items may contain raw HTML from old behavior — strip if needed.
+                            # Use `>?` so truncated tags (no closing >) are also removed.
+                            if cached_text.lstrip().startswith("<"):
+                                cached_text = re.sub(r"<[^>]*>?", " ", cached_text)
+                                cached_text = re.sub(r"\s+", " ", cached_text).strip()
+                            if cached_text:
+                                return _text(f"[cached] {cached_text[:max_chars]}")
+                            # Empty after stripping — fall through to live fetch
                 except Exception:
                     pass
-                # Fetch live
-                r = await c.get(url, headers=_BROWSER_HEADERS, follow_redirects=True)
-                text = r.text[:max_chars]
+                # Fetch via browser (renders JS, returns clean text, handles SSL)
+                text = ""
+                try:
+                    nav_r = await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/navigate", json={"url": url}),
+                        timeout=20.0,
+                    )
+                    nav_data = nav_r.json()
+                    text = nav_data.get("content", "")
+                    if text:
+                        title = nav_data.get("title", "")
+                        final_url = nav_data.get("url", url)
+                        header = f"Title: {title}\nURL: {final_url}\n\n" if title else ""
+                        text = (header + text)[:max_chars]
+                except Exception:
+                    pass
+                # Fallback: httpx + strip tags
+                if not text:
+                    try:
+                        r = await c.get(url, headers=_BROWSER_HEADERS, follow_redirects=True)
+                        raw = r.text
+                        text = re.sub(r"<[^>]+>", " ", raw)
+                        text = re.sub(r"\s+", " ", text).strip()[:max_chars]
+                    except Exception as exc:
+                        return _text(f"web_fetch failed: {exc}")
                 try:
                     await c.post(f"{DATABASE_URL}/cache/store", json={"url": url, "content": text})
                 except Exception:
