@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 
 import yaml
 
@@ -12,6 +13,13 @@ def parse_tool_args(name: str, args_text: str) -> tuple[dict[str, object], str |
     cleaned = args_text.strip()
     if cleaned.startswith("```") and cleaned.endswith("```"):
         cleaned = "\n".join(cleaned.splitlines()[1:-1]).strip()
+
+    # --- XML arg-key/arg-value format (some models emit this) ---
+    # e.g. <arg_key>topic</arg_key><arg_value>Iran News</arg_value>
+    xml_args = _parse_xml_args(cleaned)
+    if xml_args is not None:
+        return xml_args, None
+
     parsed: object
     try:
         parsed = json.loads(cleaned)
@@ -42,6 +50,41 @@ def parse_tool_args(name: str, args_text: str) -> tuple[dict[str, object], str |
     if name == "shell_exec" and cleaned:
         return {"command": cleaned}, None
     return {}, "invalid tool arguments: expected object payload"
+
+
+def _parse_xml_args(text: str) -> dict[str, object] | None:
+    """Parse XML-style arg key/value pairs emitted by some models.
+
+    Handles both:
+      <arg_key>topic</arg_key><arg_value>Iran News</arg_value>
+      <arg_key>topic</arg_key> <arg_value>Iran%20News</arg_value>
+    Returns a dict if any pairs found, otherwise None.
+    """
+    pairs = re.findall(
+        r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not pairs:
+        return None
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        key = key.strip()
+        value = value.strip()
+        # URL-decode in case the model percent-encoded the value.
+        try:
+            value = urllib.parse.unquote(value)
+        except Exception:  # noqa: BLE001
+            pass
+        # Attempt to coerce numeric strings to int/float for cleaner tool calls.
+        if value.isdigit():
+            result[key] = int(value)
+        else:
+            try:
+                result[key] = float(value)
+            except ValueError:
+                result[key] = value
+    return result
 
 
 def _extract_shell_command(text: str) -> str | None:
