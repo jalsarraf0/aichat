@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import re
-import textwrap
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -14,9 +13,10 @@ from pathlib import Path
 from .tool_args import parse_tool_args
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Header, Log, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Header, Log, Markdown, Static, TextArea
 
 
 class PromptInput(TextArea):
@@ -50,6 +50,27 @@ from .transcript import TranscriptStore
 from .ui.keybind_bar import KeybindBar
 from .ui.keybinds import binding_list, render_keybinds
 from .ui.modals import ChoiceModal, PersonalityAddModal, RssIngestModal, SearchModal, SettingsModal
+
+
+class ChatMessage(Widget):
+    """A single chat message bubble with a speaker label and markdown body."""
+
+    def __init__(self, speaker: str, content: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._speaker = speaker
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._speaker, classes="msg-speaker")
+        yield Markdown(self._content or " ", classes="msg-body")
+
+    def update_content(self, content: str) -> None:
+        """Replace the rendered body (used during streaming)."""
+        self._content = content
+        try:
+            self.query_one(".msg-body", Markdown).update(content or " ")
+        except Exception:
+            pass
 
 
 class AIChatApp(App):
@@ -93,7 +114,7 @@ class AIChatApp(App):
             with Horizontal(id="body"):
                 with Vertical(id="chat-pane"):
                     yield Static("Transcript", classes="pane-title")
-                    yield Log(id="transcript", auto_scroll=True)
+                    yield VerticalScroll(id="transcript")
                 with Vertical(id="tool-pane"):
                     yield Static("Tools", classes="pane-title")
                     yield Log(id="toolpane", auto_scroll=True)
@@ -106,8 +127,9 @@ class AIChatApp(App):
 
     async def on_mount(self) -> None:
         self._apply_theme_with_fallback(self.state.theme)
-        transcript = self.query_one("#transcript", Log)
-        transcript.clear()
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.remove_children()
         self._start_new_chat(initial=True)
         self.set_focus(self.query_one("#prompt", TextArea))
         await self.update_status()
@@ -187,9 +209,23 @@ class AIChatApp(App):
         self.state.busy = True
         content = ""
         tools = self.tools.tool_definitions(self.state.shell_enabled)
+        _live_msg: ChatMessage | None = None
         try:
             if self.state.streaming:
-                content, tool_calls = await self._stream_with_tools(tools)
+                _live_msg = ChatMessage("Assistant", "_…_", classes="chat-msg chat-assistant")
+                scroll = self._safe_query_one("#transcript", VerticalScroll)
+                if scroll is not None:
+                    scroll.mount(_live_msg)
+                    self.call_after_refresh(scroll.scroll_end, animate=False)
+
+                def _on_chunk(text: str) -> None:
+                    if _live_msg is not None:
+                        _live_msg.update_content(text)
+
+                content, tool_calls = await self._stream_with_tools(tools, on_chunk=_on_chunk)
+                if _live_msg is not None:
+                    _live_msg.remove()
+                    _live_msg = None
             else:
                 response = await self.client.chat_once_with_tools(
                     self.state.model,
@@ -208,6 +244,11 @@ class AIChatApp(App):
         except LLMClientError as exc:
             self._write_transcript("Assistant", f"LLM error: {exc}")
         finally:
+            if _live_msg is not None:
+                try:
+                    _live_msg.remove()
+                except Exception:
+                    pass
             self.state.busy = False
             self.active_task = None
             await self.update_status()
@@ -452,7 +493,11 @@ class AIChatApp(App):
                 if "arguments" in call["function"]:
                     func["arguments"] = str(func.get("arguments", "")) + str(call["function"]["arguments"])
 
-    async def _stream_with_tools(self, tools: list[dict[str, object]]) -> tuple[str, list[dict[str, object]]]:
+    async def _stream_with_tools(
+        self,
+        tools: list[dict[str, object]],
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, list[dict[str, object]]]:
         content = ""
         tool_call_state: dict[int, dict[str, object]] = {}
         async for event in self.client.chat_stream_events(
@@ -465,6 +510,8 @@ class AIChatApp(App):
                 if not chunk:
                     continue
                 content += chunk
+                if on_chunk:
+                    on_chunk(content)
             elif event.get("type") == "tool_calls":
                 deltas = event.get("value", [])
                 if isinstance(deltas, list):
@@ -647,22 +694,13 @@ class AIChatApp(App):
         )
 
     def _write_transcript(self, speaker: str, text: str) -> None:
-        log = self._safe_query_one("#transcript", Log)
-        if log is None:
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is None:
             return
-        raw_lines = (text or "").splitlines() or [""]
-        prefix = f"{speaker}:"
-        pad = " " * (len(prefix) + 1)
-        width = max(log.size.width - len(prefix) - 1, 20)
-        first = True
-        for raw in raw_lines:
-            wrapped = textwrap.wrap(raw, width=width) or [""]
-            for segment in wrapped:
-                if first:
-                    log.write_line(f"{prefix} {segment}".rstrip())
-                    first = False
-                else:
-                    log.write_line(f"{pad}{segment}".rstrip())
+        role_class = "chat-user" if speaker == "You" else "chat-assistant"
+        msg = ChatMessage(speaker, text or " ", classes=f"chat-msg {role_class}")
+        scroll.mount(msg)
+        self.call_after_refresh(scroll.scroll_end, animate=False)
 
     def _finalize_assistant_response(self, content: str) -> None:
         sanitized = sanitize_response(content)
@@ -777,14 +815,18 @@ class AIChatApp(App):
             self._log_session(f"Archived chat to {archived}")
         self.transcript_store.clear()
         self.messages = []
-        self.query_one("#transcript", Log).clear()
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.remove_children()
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
     def _clear_transcript(self) -> None:
         self.transcript_store.clear()
         self.messages = []
-        self.query_one("#transcript", Log).clear()
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.remove_children()
 
     async def _rss_store_topic(self, topic: str) -> None:
         search_call = ToolCall(
@@ -1112,15 +1154,14 @@ class AIChatApp(App):
         )
 
     async def action_scroll_up(self) -> None:
-        log = self.query_one("#transcript", Log)
-        log.auto_scroll = False
-        log.scroll_page_up()
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.scroll_page_up()
 
     async def action_scroll_down(self) -> None:
-        log = self.query_one("#transcript", Log)
-        log.scroll_page_down()
-        if log.is_vertical_scroll_end:
-            log.auto_scroll = True
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.scroll_page_down()
 
     async def action_cancel(self) -> None:
         if self.active_task and not self.active_task.done():

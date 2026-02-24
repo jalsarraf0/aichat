@@ -29,3 +29,17 @@ Footer,
     color: #ecf7ff;
     border: round #a65cff;
 }
+
+.chat-assistant {
+    background: #0e1525;
+    border: round #2de8ff;
+}
+
+.chat-user {
+    background: #160a2c;
+    border: round #a65cff;
+}
+
+.msg-speaker {
+    color: #77ffff;
+}

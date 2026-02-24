@@ -68,3 +68,20 @@
     height: 1;
     padding: 0 1;
 }
+
+/* ── Chat bubbles ──────────────────────────────────────── */
+.chat-msg {
+    margin: 0 0 1 0;
+    padding: 0 1 1 1;
+    width: 1fr;
+    border: round $accent;
+}
+
+.msg-speaker {
+    text-style: bold;
+}
+
+.msg-body {
+    margin: 0;
+    padding: 0;
+}
