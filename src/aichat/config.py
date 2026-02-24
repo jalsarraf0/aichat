@@ -21,7 +21,7 @@ class AppConfig:
     base_url: str = _DEFAULT_BASE_URL
     model: str = "local-model"
     theme: str = "cyberpunk"
-    approval: str = ApprovalMode.ASK.value
+    approval: str = ApprovalMode.AUTO.value
     concise_mode: bool = False
     shell_enabled: bool = True
     active_personality: str = DEFAULT_PERSONALITY_ID

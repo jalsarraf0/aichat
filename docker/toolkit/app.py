@@ -99,11 +99,16 @@ import json
 import math
 import os
 import re
+import shlex
+import subprocess
 import textwrap
 from datetime import datetime
 from pathlib import Path
 
 import httpx
+
+# User repos are available at /data/repos (e.g. Path('/data/repos/myproject'))
+REPOS_DIR = Path("/data/repos")
 
 TOOL_NAME = {tool_name_repr}
 TOOL_DESCRIPTION = {description_repr}

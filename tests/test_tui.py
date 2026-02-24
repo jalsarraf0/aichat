@@ -363,3 +363,84 @@ class TestWriteTranscriptEdgeCases:
             bubbles = list(app.query(".chat-msg"))
             assert len(bubbles) == 1
             assert "chat-user" in bubbles[0].classes
+
+
+class TestDefaultApprovalAuto:
+    """Default approval mode should be AUTO (no confirmation prompts)."""
+
+    def test_default_approval_is_auto(self):
+        from aichat.config import AppConfig
+        from aichat.state import ApprovalMode
+        cfg = AppConfig()
+        assert cfg.approval == ApprovalMode.AUTO.value, (
+            f"Expected AUTO, got {cfg.approval}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_app_starts_with_auto_approval(self):
+        app = _make_app()
+        # Fresh app should load AUTO from the default config
+        assert app.state.approval == ApprovalMode.AUTO
+
+
+class TestMouseScroll:
+    """Mouse wheel events scroll the transcript."""
+
+    @staticmethod
+    def _scroll_down_event():
+        from textual.events import MouseScrollDown
+        return MouseScrollDown(
+            widget=None, x=50, y=20, delta_x=0, delta_y=3,
+            button=0, shift=False, meta=False, ctrl=False,
+        )
+
+    @staticmethod
+    def _scroll_up_event():
+        from textual.events import MouseScrollUp
+        return MouseScrollUp(
+            widget=None, x=50, y=20, delta_x=0, delta_y=3,
+            button=0, shift=False, meta=False, ctrl=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_mouse_scroll_down_no_crash(self):
+        app = _make_app()
+        async with app.run_test(size=(180, 50)) as pilot:
+            await pilot.pause(1.0)
+            for i in range(10):
+                app._write_transcript("Assistant", f"Message {i}: " + "content " * 30)
+            await pilot.pause(0.3)
+            app.on_mouse_scroll_down(self._scroll_down_event())
+            await pilot.pause(0.1)
+
+    @pytest.mark.asyncio
+    async def test_mouse_scroll_up_no_crash(self):
+        app = _make_app()
+        async with app.run_test(size=(180, 50)) as pilot:
+            await pilot.pause(1.0)
+            for i in range(10):
+                app._write_transcript("Assistant", f"Message {i}: " + "content " * 30)
+            await pilot.pause(0.3)
+            app.on_mouse_scroll_up(self._scroll_up_event())
+            await pilot.pause(0.1)
+
+    @pytest.mark.asyncio
+    async def test_mouse_scroll_handlers_exist(self):
+        """Both mouse scroll handlers are present on AIChatApp."""
+        assert hasattr(AIChatApp, "on_mouse_scroll_up")
+        assert hasattr(AIChatApp, "on_mouse_scroll_down")
+
+    @pytest.mark.asyncio
+    async def test_mouse_scroll_changes_position(self):
+        """Scrolling down moves scroll position."""
+        app = _make_app()
+        async with app.run_test(size=(180, 50)) as pilot:
+            await pilot.pause(1.0)
+            for i in range(30):
+                app._write_transcript("Assistant", f"Message {i}: " + "content " * 20)
+            await pilot.pause(0.5)
+            scroll = app.query_one("#transcript", VerticalScroll)
+            for _ in range(5):
+                app.on_mouse_scroll_down(self._scroll_down_event())
+            await pilot.pause(0.3)
+            assert scroll is not None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 from collections.abc import Awaitable, Callable
 from enum import Enum
@@ -18,6 +19,41 @@ from .toolkit import ToolkitTool
 
 class ToolDeniedError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Dangerous-command blocklist (shell safety)
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_RE = re.compile(
+    r"""(
+        # rm with recursive+force targeting root, home, or critical paths
+        \brm\b[^|&;#\n]*-[a-zA-Z]*[rf][a-zA-Z]*[rf][a-zA-Z]*\s+(/[^/]|~/?[^/]|/\*)
+        |\brm\b[^|&;#\n]*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+(/[^/]|~/?[^/]|/\*)
+        # fork bomb
+        |:\(\)\s*\{[^}]*:\s*\|[^}]*:[^}]*&[^}]*\}[^;]*;
+        # mkfs / wipefs / dd to raw disk
+        |\bmkfs\b
+        |\bwipefs\b
+        |\bdd\b[^|&;\n]*\bof\s*=\s*/dev/[a-z]
+        # overwrite MBR/disk
+        |\bdd\b[^|&;\n]*\bif\s*=\s*/dev/zero[^|&;\n]*\bof\s*=\s*/dev/[a-z]
+        # chmod/chown 777 or world-writable on root or /etc
+        |\bchmod\b[^|&;\n]*(777|[ao][+\-=]w)[^|&;\n]*(/\s*$|/etc|/usr|/bin|/sbin|/lib|/boot)
+        # truncate / shred critical paths
+        |\bshred\b[^|&;\n]*(/(bin|sbin|lib|boot|etc|usr)\b|/dev/)
+        # kill -9 1 (kill PID 1 = init)
+        |\bkill\s+-9\s+1\b
+        # Python/Perl one-liner writing to /dev/sda etc.
+        |\bopen\s*\(\s*['"]/dev/[a-z]
+    )""",
+    re.IGNORECASE | re.VERBOSE | re.DOTALL,
+)
+
+
+def _is_dangerous(command: str) -> bool:
+    """Return True if the command matches a known-dangerous pattern."""
+    return bool(_DANGEROUS_RE.search(command))
 
 
 class ToolName(str, Enum):
@@ -98,6 +134,8 @@ class ToolManager:
         confirmer: Callable[[str], Awaitable[bool]] | None,
         cwd: str | None = None,
     ) -> tuple[str, str | None]:
+        if _is_dangerous(command):
+            raise ToolDeniedError(f"Blocked: potentially destructive command refused for safety.")
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
         exit_code, output, new_cwd = await self._run_shell_process(command, cwd=cwd)
         trimmed = output.strip()
@@ -116,6 +154,8 @@ class ToolManager:
         cwd: str | None = None,
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str, str | None]:
+        if _is_dangerous(command):
+            raise ToolDeniedError(f"Blocked: potentially destructive command refused for safety.")
         await self._check_approval(mode, ToolName.SHELL.value, confirmer)
         return await self._run_shell_process(command, cwd=cwd, on_output=on_output)
 
@@ -426,7 +466,8 @@ class ToolManager:
                         "The tool is saved to disk and immediately available for use — in this session "
                         "and all future sessions. Use this whenever you need a capability not covered "
                         "by the built-in tools. You can make HTTP calls (httpx), process data, parse "
-                        "HTML, call APIs, etc. Tools persist across restarts."
+                        "HTML, call APIs, run shell commands (subprocess/asyncio.create_subprocess_exec), "
+                        "and read files from the user's repos at /data/repos. Tools persist across restarts."
                     ),
                     "parameters": {
                         "type": "object",
@@ -450,7 +491,9 @@ class ToolManager:
                                 "type": "string",
                                 "description": (
                                     "Python implementation — the body of `async def run(**kwargs) -> str:`. "
-                                    "Available: asyncio, json, re, os, math, datetime, pathlib, httpx. "
+                                    "Available: asyncio, json, re, os, math, datetime, pathlib, shlex, subprocess, httpx. "
+                                    "User git repos are at /data/repos (Path('/data/repos/reponame')). "
+                                    "Run shell commands with asyncio.create_subprocess_exec or subprocess.run. "
                                     "Access parameters via kwargs. Must return a string."
                                 ),
                             },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -57,6 +58,20 @@ def sanitize_response(text: str) -> SanitizedResponse:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     structured_hidden = had_residual_arg_tags or _looks_structured(cleaned)
     return SanitizedResponse(text=cleaned, structured_hidden=structured_hidden)
+
+
+def format_structured(text: str) -> str:
+    """Convert structured/non-human-readable text into a readable Markdown block."""
+    stripped = text.strip()
+    # Try to parse as JSON and pretty-print it.
+    try:
+        parsed = json.loads(stripped)
+        pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+        return f"```json\n{pretty}\n```"
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fall back to a plain fenced block so it's still readable.
+    return f"```\n{stripped}\n```"
 
 
 def _looks_structured(text: str) -> bool:

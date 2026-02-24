@@ -41,7 +41,7 @@ from .client import LLMClient, LLMClientError
 from .config import load_config, save_config
 from .model_labels import model_options
 from .personalities import DEFAULT_PERSONALITY_ID, merge_personalities
-from .sanitizer import sanitize_response
+from .sanitizer import format_structured, sanitize_response
 from .state import AppState, ApprovalMode, Message
 from .themes import THEMES
 from .tool_scheduler import ToolCall, ToolResult, ToolScheduler
@@ -705,7 +705,7 @@ class AIChatApp(App):
     def _finalize_assistant_response(self, content: str) -> None:
         sanitized = sanitize_response(content)
         if sanitized.structured_hidden:
-            display = "Output contained structured data. See Tools panel for details."
+            display = format_structured(sanitized.text)
         else:
             display = sanitized.text.strip()
             if not display:
@@ -1162,6 +1162,16 @@ class AIChatApp(App):
         scroll = self._safe_query_one("#transcript", VerticalScroll)
         if scroll is not None:
             scroll.scroll_page_down()
+
+    def on_mouse_scroll_up(self, event) -> None:
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.scroll_up(animate=False)
+
+    def on_mouse_scroll_down(self, event) -> None:
+        scroll = self._safe_query_one("#transcript", VerticalScroll)
+        if scroll is not None:
+            scroll.scroll_down(animate=False)
 
     async def action_cancel(self) -> None:
         if self.active_task and not self.active_task.done():
