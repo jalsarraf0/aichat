@@ -19,12 +19,22 @@ LM Studio mcp_servers.json entry (on the localhost machine):
       }
     }
   }
+
+Screenshot support
+------------------
+The human_browser container must be connected to this container's Docker
+network (the install script does this automatically).  Screenshots are written
+to /workspace inside human_browser and are bind-mounted read-only into this
+container at /browser-workspace.  The result is sent to LM Studio as an inline
+base64-encoded PNG image block so it renders directly in the chat.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import uuid
 from typing import Any
 
@@ -38,6 +48,10 @@ app = FastAPI(title="aichat-mcp")
 DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-memory:8094")
 RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-researchbox:8092")
+# human_browser browser-server API — reachable after install connects it to this network.
+BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
+# Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
+BROWSER_WORKSPACE = os.environ.get("BROWSER_WORKSPACE", "/browser-workspace")
 
 # Active SSE sessions: session_id -> asyncio.Queue
 _sessions: dict[str, asyncio.Queue] = {}
@@ -49,12 +63,27 @@ _sessions: dict[str, asyncio.Queue] = {}
 
 _TOOLS: list[dict[str, Any]] = [
     {
+        "name": "screenshot",
+        "description": (
+            "Take a screenshot of any URL using the real Chromium browser and return it as an "
+            "inline image rendered directly in the chat. The screenshot is also saved to the "
+            "PostgreSQL image registry for later retrieval. "
+            "Use this whenever you want to visually inspect a web page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to screenshot (http/https)."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Search the web using a tiered strategy: "
-            "Tier 1 — real Chromium browser (human_browser / a12fdfeaaf78) navigating DuckDuckGo like a human; "
             "Tier 2 — direct httpx HTTP fetch of DuckDuckGo HTML; "
-            "Tier 3 — DuckDuckGo lite API. Returns results text and which tier was used."
+            "Tier 3 — DuckDuckGo lite API. Returns results text."
         ),
         "inputSchema": {
             "type": "object",
@@ -68,8 +97,8 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "web_fetch",
         "description": (
-            "Fetch a web page via the Chromium browser (human_browser / a12fdfeaaf78) "
-            "and return its readable text."
+            "Fetch a web page and return its readable text. "
+            "Checks the PostgreSQL cache first; falls back to a live httpx fetch."
         ),
         "inputSchema": {
             "type": "object",
@@ -131,6 +160,30 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "db_store_image",
+        "description": "Save a screenshot or image reference to the PostgreSQL image registry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":       {"type": "string", "description": "Source URL the image was captured from."},
+                "host_path": {"type": "string", "description": "Host file path of the image."},
+                "alt_text":  {"type": "string", "description": "Description or caption."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "db_list_images",
+        "description": "List screenshots and images saved in the PostgreSQL database.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max images to return (default 20)."},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "memory_store",
         "description": "Store a key-value note in persistent memory.",
         "inputSchema": {
@@ -180,95 +233,190 @@ _TOOLS: list[dict[str, Any]] = [
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _text(s: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": s}]
+
+
+def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
+    """Return MCP content blocks: text summary + inline base64 PNG (if readable)."""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": summary}]
+    # container_path is e.g. /workspace/screenshot.png inside human_browser.
+    # The workspace is bind-mounted at BROWSER_WORKSPACE inside this container.
+    if container_path:
+        filename = os.path.basename(container_path)
+        local_path = os.path.join(BROWSER_WORKSPACE, filename)
+        if os.path.isfile(local_path):
+            try:
+                with open(local_path, "rb") as fh:
+                    b64 = base64.standard_b64encode(fh.read()).decode("ascii")
+                blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
+            except Exception:
+                pass
+    return blocks
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatch (HTTP calls to sibling Docker services)
 # ---------------------------------------------------------------------------
 
-async def _call_tool(name: str, args: dict[str, Any]) -> str:
-    async with httpx.AsyncClient(timeout=45) as c:
+async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dispatch a tool call and return a list of MCP content blocks."""
+    async with httpx.AsyncClient(timeout=60) as c:
         try:
+            # ----------------------------------------------------------------
+            if name == "screenshot":
+                url = str(args.get("url", "")).strip()
+                if not url:
+                    return _text("screenshot: 'url' is required")
+                try:
+                    r = await c.post(f"{BROWSER_URL}/screenshot", json={"url": url})
+                    data = r.json()
+                except Exception as exc:
+                    return _text(f"Screenshot failed (browser unreachable): {exc}")
+                error = data.get("error", "")
+                container_path = data.get("path", "")  # /workspace/screenshot.png
+                if error and not container_path:
+                    return _text(f"Screenshot failed: {error}")
+                # host_path for DB storage (matches the bind-mount source on the host)
+                filename = os.path.basename(container_path) if container_path else ""
+                host_path = f"/docker/human_browser/workspace/{filename}" if filename else ""
+                page = data.get("title", "") or url
+                # Auto-save to database
+                try:
+                    await c.post(f"{DATABASE_URL}/images/store", json={
+                        "url": url,
+                        "host_path": host_path,
+                        "alt_text": f"Screenshot of {page}",
+                    })
+                except Exception:
+                    pass  # never fail the screenshot because DB is down
+                summary = (
+                    f"Screenshot of: {page}\n"
+                    f"URL: {url}\n"
+                    f"File: {host_path}"
+                )
+                return _image_blocks(container_path, summary)
+
+            # ----------------------------------------------------------------
             if name == "web_search":
                 query = str(args.get("query", "")).strip()
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
                 # Tier 2: DuckDuckGo HTML
                 try:
-                    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-                    r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
-                    import re as _re
-                    text = _re.sub(r"<[^>]+>", " ", r.text)
-                    text = _re.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return f"[Search via httpx (tier 2)]\n\n{text}"
+                    r = await c.get(
+                        f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        follow_redirects=True,
+                    )
+                    text = re.sub(r"<[^>]+>", " ", r.text)
+                    text = re.sub(r"\s+", " ", text).strip()[:max_chars]
+                    return _text(f"[Search via httpx (tier 2)]\n\n{text}")
                 except Exception:
                     pass
                 # Tier 3: DDG lite
                 try:
-                    url = f"https://lite.duckduckgo.com/lite/?q={query.replace(' ', '+')}"
-                    r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
-                    import re as _re2
-                    text = _re2.sub(r"<[^>]+>", " ", r.text)
-                    text = _re2.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return f"[Search via DDG lite (tier 3)]\n\n{text}"
+                    r = await c.get(
+                        f"https://lite.duckduckgo.com/lite/?q={query.replace(' ', '+')}",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        follow_redirects=True,
+                    )
+                    text = re.sub(r"<[^>]+>", " ", r.text)
+                    text = re.sub(r"\s+", " ", text).strip()[:max_chars]
+                    return _text(f"[Search via DDG lite (tier 3)]\n\n{text}")
                 except Exception as exc:
-                    return f"web_search failed: {exc}"
+                    return _text(f"web_search failed: {exc}")
 
+            # ----------------------------------------------------------------
             if name == "web_fetch":
-                # web_fetch is handled by the browser tool inside aichat itself;
-                # here we forward to the database service to check cache first,
-                # then fall through to a direct httpx fetch as a lightweight proxy.
                 url = str(args.get("url", "")).strip()
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
-                # Check cache
-                cache_r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": url})
-                if cache_r.status_code == 200:
-                    data = cache_r.json()
-                    if data.get("found"):
-                        content = data.get("content", "")[:max_chars]
-                        return f"[cached] {content}"
+                # Check cache first
+                try:
+                    cache_r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": url})
+                    if cache_r.status_code == 200:
+                        data = cache_r.json()
+                        if data.get("found"):
+                            return _text(f"[cached] {data.get('content', '')[:max_chars]}")
+                except Exception:
+                    pass
                 # Fetch live
                 r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
                 text = r.text[:max_chars]
-                # Store in cache
-                await c.post(f"{DATABASE_URL}/cache/store", json={"url": url, "content": text})
-                return text
+                try:
+                    await c.post(f"{DATABASE_URL}/cache/store", json={"url": url, "content": text})
+                except Exception:
+                    pass
+                return _text(text)
 
+            # ----------------------------------------------------------------
             if name == "db_store_article":
                 r = await c.post(f"{DATABASE_URL}/articles/store", json=args)
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
             if name == "db_search":
                 r = await c.get(f"{DATABASE_URL}/articles/search", params=args)
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
             if name == "db_cache_store":
                 r = await c.post(f"{DATABASE_URL}/cache/store", json=args)
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
             if name == "db_cache_get":
                 r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": args.get("url", "")})
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
+            # ----------------------------------------------------------------
+            if name == "db_store_image":
+                r = await c.post(f"{DATABASE_URL}/images/store", json={
+                    "url":       args.get("url", ""),
+                    "host_path": args.get("host_path", ""),
+                    "alt_text":  args.get("alt_text", ""),
+                })
+                return _text(json.dumps(r.json()))
+
+            if name == "db_list_images":
+                limit = int(args.get("limit", 20))
+                r = await c.get(f"{DATABASE_URL}/images/list", params={"limit": limit})
+                data = r.json()
+                images = data.get("images", [])
+                if not images:
+                    return _text("No screenshots stored yet.")
+                lines = [f"Stored screenshots ({len(images)}):"]
+                for img in images:
+                    hp = img.get("host_path") or img.get("url", "")
+                    alt = img.get("alt_text", "")
+                    ts = img.get("stored_at", "")[:19].replace("T", " ")
+                    lines.append(f"  {hp}" + (f"  [{alt}]" if alt else "") + (f"  {ts}" if ts else ""))
+                # Inline the most recent image
+                most_recent = images[0].get("path", "") or ""  # container path if available
+                return _image_blocks(most_recent, "\n".join(lines))
+
+            # ----------------------------------------------------------------
             if name == "memory_store":
                 r = await c.post(f"{MEMORY_URL}/store", json={"key": args["key"], "value": args["value"]})
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
             if name == "memory_recall":
-                key = args.get("key", "")
-                r = await c.get(f"{MEMORY_URL}/recall", params={"key": key})
-                return json.dumps(r.json())
+                r = await c.get(f"{MEMORY_URL}/recall", params={"key": args.get("key", "")})
+                return _text(json.dumps(r.json()))
 
             if name == "researchbox_search":
                 r = await c.get(f"{RESEARCH_URL}/search-feeds", params={"topic": args.get("topic", "")})
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
             if name == "researchbox_push":
                 r = await c.post(f"{RESEARCH_URL}/push-feed", json=args)
-                return json.dumps(r.json())
+                return _text(json.dumps(r.json()))
 
-            return f"Unknown tool: {name}"
+            return _text(f"Unknown tool: {name}")
 
         except Exception as exc:
-            return f"Error calling {name}: {exc}"
+            return _text(f"Error calling {name}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +449,11 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
         return ok({"tools": _TOOLS})
 
     if method == "tools/call":
-        tool_name = params.get("name", "")
+        tool_name  = params.get("name", "")
         arguments  = params.get("arguments") or {}
-        result_text = await _call_tool(tool_name, arguments)
+        content_blocks = await _call_tool(tool_name, arguments)
         return ok({
-            "content": [{"type": "text", "text": result_text}],
+            "content": content_blocks,
             "isError": False,
         })
 
@@ -339,7 +487,6 @@ async def sse_connect(request: Request) -> StreamingResponse:
                     msg = await asyncio.wait_for(queue.get(), timeout=15.0)
                     yield f"event: message\ndata: {json.dumps(msg)}\n\n"
                 except asyncio.TimeoutError:
-                    # Send a keepalive comment
                     yield ": keepalive\n\n"
         finally:
             _sessions.pop(session_id, None)
@@ -366,7 +513,8 @@ async def messages(request: Request, sessionId: str = "") -> Response:
         rpc = json.loads(body)
     except json.JSONDecodeError:
         return Response(
-            content=json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}),
+            content=json.dumps({"jsonrpc": "2.0", "id": None,
+                                "error": {"code": -32700, "message": "Parse error"}}),
             media_type="application/json",
             status_code=400,
         )
