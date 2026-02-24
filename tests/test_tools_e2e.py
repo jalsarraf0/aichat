@@ -803,6 +803,90 @@ class TestBrowserToolUnit:
         assert "path" in result
 
     @pytest.mark.asyncio
+    async def test_screenshot_auto_saves_to_db(self):
+        """Screenshot action on ToolManager auto-saves to DB when host_path is set."""
+        mgr = ToolManager()
+        mock_result = {
+            "path": "/workspace/screenshot_test.png",
+            "title": "Example Domain",
+            "url": "https://example.com",
+            "host_path": "/docker/human_browser/workspace/screenshot_test.png",
+        }
+        db_store_calls = []
+
+        async def _fake_store_image(**kwargs):
+            db_store_calls.append(kwargs)
+            return {"ok": True, "id": 1}
+
+        with patch.object(mgr.browser, "screenshot", new=AsyncMock(return_value=mock_result)):
+            with patch.object(mgr.db, "store_image", side_effect=_fake_store_image):
+                result = await mgr.run_browser(
+                    "screenshot", ApprovalMode.AUTO, None, url="https://example.com"
+                )
+        assert "path" in result
+        assert len(db_store_calls) == 1
+        assert db_store_calls[0]["host_path"] == "/docker/human_browser/workspace/screenshot_test.png"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_db_failure_does_not_raise(self):
+        """DB save failure after screenshot must not propagate — screenshot still returned."""
+        mgr = ToolManager()
+        mock_result = {
+            "path": "/workspace/screenshot_test.png",
+            "title": "Test",
+            "url": "https://example.com",
+            "host_path": "/docker/human_browser/workspace/screenshot_test.png",
+        }
+        with patch.object(mgr.browser, "screenshot", new=AsyncMock(return_value=mock_result)):
+            with patch.object(mgr.db, "store_image", side_effect=RuntimeError("DB down")):
+                result = await mgr.run_browser(
+                    "screenshot", ApprovalMode.AUTO, None, url="https://example.com"
+                )
+        assert "path" in result  # screenshot still returned despite DB error
+
+    @pytest.mark.asyncio
+    async def test_run_db_store_image_mocked(self):
+        """run_db_store_image delegates to DatabaseTool.store_image."""
+        mgr = ToolManager()
+        with patch.object(mgr.db, "store_image", new=AsyncMock(return_value={"ok": True, "id": 7})):
+            result = await mgr.run_db_store_image(
+                url="https://example.com",
+                host_path="/docker/human_browser/workspace/test.png",
+                alt_text="Test screenshot",
+                mode=ApprovalMode.AUTO,
+                confirmer=None,
+            )
+        assert result.get("ok") is True
+
+    @pytest.mark.asyncio
+    async def test_run_db_list_images_mocked(self):
+        """run_db_list_images returns images list from DatabaseTool."""
+        mgr = ToolManager()
+        fake_images = [
+            {"id": 1, "url": "https://example.com", "host_path": "/docker/x/test.png",
+             "alt_text": "Test", "stored_at": "2026-02-24T12:00:00"},
+        ]
+        with patch.object(mgr.db, "list_images", new=AsyncMock(return_value={"images": fake_images})):
+            result = await mgr.run_db_list_images(limit=10, mode=ApprovalMode.AUTO, confirmer=None)
+        assert "images" in result
+        assert len(result["images"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_db_store_image_denied(self):
+        mgr = ToolManager()
+        with pytest.raises(ToolDeniedError):
+            await mgr.run_db_store_image(
+                url="https://example.com", host_path="", alt_text="",
+                mode=ApprovalMode.DENY, confirmer=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_db_list_images_denied(self):
+        mgr = ToolManager()
+        with pytest.raises(ToolDeniedError):
+            await mgr.run_db_list_images(limit=5, mode=ApprovalMode.DENY, confirmer=None)
+
+    @pytest.mark.asyncio
     async def test_run_browser_missing_url_returns_error(self):
         mgr = ToolManager()
         result = await mgr.run_browser("navigate", ApprovalMode.AUTO, None)
@@ -1106,3 +1190,107 @@ class TestWebSearchLive:
         result = await tool.search("python asyncio", max_chars=2000)
         assert result.get("tier", 0) >= 1, "Expected at least one tier to succeed"
         assert result.get("content"), "Expected non-empty search results"
+
+
+# ---------------------------------------------------------------------------
+# MCP server — screenshot and image rendering tests
+# ---------------------------------------------------------------------------
+
+class TestMCPScreenshot:
+    """MCP server returns proper content-block lists for screenshot and image tools."""
+
+    @pytest.mark.asyncio
+    async def test_mcp_screenshot_returns_text_block(self):
+        """browser screenshot via MCP returns at least a text content block."""
+        import aichat.mcp_server as mcp
+        mock_result = {
+            "path": "/workspace/screenshot.png",
+            "title": "Example",
+            "url": "https://example.com",
+            "host_path": "/docker/human_browser/workspace/screenshot.png",
+        }
+        mgr = mcp._get_manager()
+        with patch.object(mgr.browser, "screenshot", new=AsyncMock(return_value=mock_result)):
+            with patch.object(mgr.db, "store_image", new=AsyncMock(return_value={"ok": True})):
+                blocks = await mcp._call_tool("browser", {"action": "screenshot", "url": "https://example.com"})
+        assert isinstance(blocks, list)
+        assert len(blocks) >= 1
+        assert blocks[0]["type"] == "text"
+        assert "screenshot" in blocks[0]["text"].lower() or "file" in blocks[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_screenshot_with_file_includes_image_block(self, tmp_path):
+        """If the host_path file exists, MCP adds an image content block."""
+        import aichat.mcp_server as mcp
+        # Create a tiny valid PNG (1×1 pixel)
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+            b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        img_file = tmp_path / "screenshot.png"
+        img_file.write_bytes(png_bytes)
+        mock_result = {
+            "path": "/workspace/screenshot.png",
+            "title": "Example",
+            "url": "https://example.com",
+            "host_path": str(img_file),
+        }
+        mgr = mcp._get_manager()
+        with patch.object(mgr.browser, "screenshot", new=AsyncMock(return_value=mock_result)):
+            with patch.object(mgr.db, "store_image", new=AsyncMock(return_value={"ok": True})):
+                blocks = await mcp._call_tool("browser", {"action": "screenshot", "url": "https://example.com"})
+        assert any(b["type"] == "image" for b in blocks), f"Expected image block in: {blocks}"
+        img_block = next(b for b in blocks if b["type"] == "image")
+        assert img_block["mimeType"] == "image/png"
+        assert len(img_block["data"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_mcp_db_list_images_no_images(self):
+        """db_list_images with empty DB returns text 'No screenshots stored'."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        with patch.object(mgr.db, "list_images", new=AsyncMock(return_value={"images": []})):
+            blocks = await mcp._call_tool("db_list_images", {})
+        assert blocks[0]["type"] == "text"
+        assert "no screenshots" in blocks[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_db_store_image(self):
+        """db_store_image tool returns JSON ok response."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        with patch.object(mgr.db, "store_image", new=AsyncMock(return_value={"ok": True, "id": 42})):
+            blocks = await mcp._call_tool(
+                "db_store_image",
+                {"url": "https://example.com", "host_path": "/docker/x.png", "alt_text": "Test"},
+            )
+        assert blocks[0]["type"] == "text"
+        data = json.loads(blocks[0]["text"])
+        assert data.get("ok") is True
+
+    @pytest.mark.asyncio
+    async def test_mcp_tools_call_returns_content_blocks(self):
+        """tools/call handler passes content_blocks directly (not wrapped in text)."""
+        import aichat.mcp_server as mcp
+        captured: list[dict] = []
+        original_write = mcp._write
+
+        def _capture(obj):
+            captured.append(obj)
+
+        mgr = mcp._get_manager()
+        with patch.object(mgr.db, "list_images", new=AsyncMock(return_value={"images": []})):
+            with patch.object(mcp, "_write", side_effect=_capture):
+                await mcp._handle(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "method": "tools/call",
+                    "params": {"name": "db_list_images", "arguments": {}},
+                }))
+
+        assert len(captured) == 1
+        result = captured[0]["result"]
+        # content must be a list of blocks, not a string
+        assert isinstance(result["content"], list)
+        assert result["content"][0]["type"] == "text"

@@ -73,6 +73,8 @@ class ToolName(str, Enum):
     DB_SEARCH = "db_search"
     DB_CACHE_STORE = "db_cache_store"
     DB_CACHE_GET = "db_cache_get"
+    DB_STORE_IMAGE = "db_store_image"
+    DB_LIST_IMAGES = "db_list_images"
 
 
 class ToolManager:
@@ -373,6 +375,26 @@ class ToolManager:
         await self._check_approval(mode, ToolName.DB_CACHE_GET.value, confirmer)
         return await self.db.cache_get(url)
 
+    async def run_db_store_image(
+        self,
+        url: str,
+        host_path: str,
+        alt_text: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_STORE_IMAGE.value, confirmer)
+        return await self.db.store_image(url=url, host_path=host_path or None, alt_text=alt_text or None)
+
+    async def run_db_list_images(
+        self,
+        limit: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_LIST_IMAGES.value, confirmer)
+        return await self.db.list_images(limit=limit)
+
     # ------------------------------------------------------------------
     # Toolkit meta-tools (create / list / delete / call custom tools)
     # ------------------------------------------------------------------
@@ -439,7 +461,21 @@ class ToolManager:
                     return {"error": "url is required for navigate"}
                 return await self.browser.navigate(url)
             if action == "screenshot":
-                return await self.browser.screenshot(url)
+                result = await self.browser.screenshot(url)
+                # Auto-persist screenshot metadata to the image database
+                host_path = result.get("host_path", "")
+                if host_path and not result.get("error"):
+                    try:
+                        page_url = result.get("url") or url or host_path
+                        alt = f"Screenshot of {result.get('title', page_url)}"
+                        await self.db.store_image(
+                            url=page_url,
+                            host_path=host_path,
+                            alt_text=alt,
+                        )
+                    except Exception:
+                        pass  # Never fail the screenshot because DB is down
+                return result
             if action == "click":
                 if not selector:
                     return {"error": "selector is required for click"}
@@ -657,6 +693,46 @@ class ToolManager:
                             "url": {"type": "string", "description": "Page URL to look up."},
                         },
                         "required": ["url"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_store_image",
+                    "description": (
+                        "Save an image or screenshot to the PostgreSQL image registry. "
+                        "Use after taking a screenshot or downloading an image to record it "
+                        "permanently with its source URL and description."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url":       {"type": "string", "description": "Source URL the image was captured from."},
+                            "host_path": {"type": "string", "description": "File path on the host (e.g. /docker/human_browser/workspace/screenshot.png)."},
+                            "alt_text":  {"type": "string", "description": "Description or caption for the image."},
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_list_images",
+                    "description": (
+                        "List screenshots and images previously saved to the PostgreSQL database. "
+                        "Returns host file paths so the user can open them."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of images to return (default 20).",
+                            },
+                        },
+                        "required": [],
                     },
                 },
             },

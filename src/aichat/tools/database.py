@@ -86,3 +86,6 @@ class DatabaseTool:
 
     async def cache_check(self, url: str) -> dict:
         return await self._request("GET", "/cache/check", params={"url": url})
+
+    async def list_images(self, limit: int = 20) -> dict:
+        return await self._request("GET", "/images/list", params={"limit": limit})
