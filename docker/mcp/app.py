@@ -42,9 +42,18 @@ from urllib.parse import unquote as _url_unquote
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 app = FastAPI(title="aichat-mcp")
+
+# Allow all origins so LM Studio (Electron/WebView2) can connect without CORS issues.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # Base URLs for aichat backend services (running on the same Docker network).
 DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
@@ -86,6 +95,22 @@ _TOOLS: list[dict[str, Any]] = [
                         "the user's message or from a web_search result."
                     ),
                 },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "fetch_image",
+        "description": (
+            "Download an image directly from a URL (jpg, png, gif, webp, etc.) and return it "
+            "as an inline rendered image. Also saves metadata to the PostgreSQL image registry. "
+            "Use this when the user provides a direct image URL and wants to view or save it, "
+            "rather than screenshotting a full web page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Direct URL to the image file (http/https)."},
             },
             "required": ["url"],
         },
@@ -337,6 +362,49 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 return _image_blocks(container_path, summary)
 
             # ----------------------------------------------------------------
+            if name == "fetch_image":
+                url = str(args.get("url", "")).strip()
+                if not url:
+                    return _text("fetch_image: 'url' is required")
+                try:
+                    r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                                    follow_redirects=True)
+                    r.raise_for_status()
+                    content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                    img_data = r.content
+                except Exception as exc:
+                    return _text(f"fetch_image failed: {exc}")
+                # Derive host_path for DB metadata (workspace is writable via host bind-mount)
+                raw_name = url.split("?")[0].split("/")[-1] or "image"
+                if "." not in raw_name:
+                    ext = {"image/jpeg": ".jpg", "image/png": ".png",
+                           "image/gif": ".gif", "image/webp": ".webp"}.get(content_type, ".jpg")
+                    raw_name += ext
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"img_{ts}_{raw_name}"
+                host_path = f"/docker/human_browser/workspace/{filename}"
+                # Save metadata to DB
+                try:
+                    await c.post(f"{DATABASE_URL}/images/store", json={
+                        "url": url,
+                        "host_path": host_path,
+                        "alt_text": f"Image from {url}",
+                    })
+                except Exception:
+                    pass
+                # Return inline base64 image
+                b64 = base64.standard_b64encode(img_data).decode("ascii")
+                summary = (
+                    f"Image from: {url}\n"
+                    f"Type: {content_type}  Size: {len(img_data):,} bytes\n"
+                    f"File: {host_path}"
+                )
+                return [
+                    {"type": "text", "text": summary},
+                    {"type": "image", "data": b64, "mimeType": content_type},
+                ]
+
+            # ----------------------------------------------------------------
             if name == "screenshot_search":
                 query = str(args.get("query", "")).strip()
                 if not query:
@@ -567,8 +635,60 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+}
+
+
 # ---------------------------------------------------------------------------
-# SSE endpoint — MCP clients connect here
+# MCP 2025-03-26 Streamable HTTP transport  (preferred by LM Studio 0.3.6+)
+# POST /mcp — single endpoint; responds with JSON or SSE depending on Accept
+# GET  /mcp — SSE stream, same session handshake as /sse
+# ---------------------------------------------------------------------------
+
+@app.post("/mcp")
+async def mcp_post(request: Request) -> Response:
+    """
+    Streamable HTTP transport (MCP 2025-03-26).
+    Clients that prefer a single endpoint send JSON-RPC here.
+    If the client sent Accept: text/event-stream we stream back; otherwise JSON.
+    """
+    body = await request.body()
+    try:
+        rpc = json.loads(body)
+    except json.JSONDecodeError:
+        return Response(
+            content=json.dumps({"jsonrpc": "2.0", "id": None,
+                                "error": {"code": -32700, "message": "Parse error"}}),
+            media_type="application/json",
+            status_code=400,
+        )
+
+    response = await _handle_rpc(rpc)
+    if response is None:
+        return Response(content="", status_code=202)
+
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" in accept:
+        async def _single_event():
+            yield f"event: message\ndata: {json.dumps(response)}\n\n"
+        return StreamingResponse(_single_event(), media_type="text/event-stream",
+                                 headers=_SSE_HEADERS)
+
+    return Response(content=json.dumps(response), media_type="application/json")
+
+
+@app.get("/mcp")
+async def mcp_sse(request: Request) -> StreamingResponse:
+    """GET /mcp — SSE stream, same as GET /sse (alias for the Streamable HTTP spec)."""
+    return await sse_connect(request)
+
+
+# ---------------------------------------------------------------------------
+# Legacy SSE transport (MCP 2024-11-05) — kept for backward compatibility
 # ---------------------------------------------------------------------------
 
 @app.get("/sse")
@@ -578,35 +698,22 @@ async def sse_connect(request: Request) -> StreamingResponse:
     _sessions[session_id] = queue
 
     async def event_stream():
-        # Tell the client where to POST its JSON-RPC requests
-        messages_endpoint = f"/messages?sessionId={session_id}"
-        yield f"event: endpoint\ndata: {messages_endpoint}\n\n"
+        yield f"event: endpoint\ndata: /messages?sessionId={session_id}\n\n"
         try:
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    msg = await asyncio.wait_for(queue.get(), timeout=5.0)
                     yield f"event: message\ndata: {json.dumps(msg)}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             _sessions.pop(session_id, None)
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers=_SSE_HEADERS)
 
-
-# ---------------------------------------------------------------------------
-# Messages endpoint — MCP clients POST JSON-RPC requests here
-# ---------------------------------------------------------------------------
 
 @app.post("/messages")
 async def messages(request: Request, sessionId: str = "") -> Response:
@@ -634,4 +741,9 @@ async def messages(request: Request, sessionId: str = "") -> Response:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"ok": True, "sessions": len(_sessions), "tools": len(_TOOLS)}
+    return {
+        "ok": True,
+        "sessions": len(_sessions),
+        "tools": len(_TOOLS),
+        "transports": ["POST /mcp (streamable-http)", "GET /sse (sse)", "GET /mcp (sse-alias)"],
+    }

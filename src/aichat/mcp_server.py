@@ -98,6 +98,21 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "fetch_image",
+        "description": (
+            "Download an image directly from a URL (jpg, png, gif, webp, etc.), save it to "
+            "disk, and return it as an inline rendered image. Use this when the user gives a "
+            "direct image URL and wants to view or save it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Direct URL to the image file."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "screenshot_search",
         "description": (
             "Search the web for a topic or query, screenshot the most relevant result pages, "
@@ -338,6 +353,25 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 f"Screenshot of: {page}\n"
                 f"URL: {url}\n"
                 f"File: {host_path}"
+            )
+            return _image_content_blocks(host_path, summary)
+
+        if name == "fetch_image":
+            url = str(arguments.get("url", "")).strip()
+            if not url:
+                return _text("fetch_image: 'url' is required")
+            result = await mgr.run_fetch_image(url, _APPROVAL, None)
+            error = result.get("error", "")
+            if error:
+                return _text(f"fetch_image failed: {error}")
+            host_path = result.get("host_path", "")
+            content_type = result.get("content_type", "image/jpeg")
+            size = result.get("size", 0)
+            summary = (
+                f"Image saved.\n"
+                f"Source: {url}\n"
+                f"File: {host_path}\n"
+                f"Type: {content_type}  Size: {size:,} bytes"
             )
             return _image_content_blocks(host_path, summary)
 
