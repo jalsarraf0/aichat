@@ -599,3 +599,267 @@ class TestTUIToolDispatch:
                     body_src = getattr(body, "_markdown", None) or ""
                     assert "</arg_key>" not in body_src
                     assert "</arg_value>" not in body_src
+
+
+# ---------------------------------------------------------------------------
+# Browser tool — unit tests (always run, mocked)
+# ---------------------------------------------------------------------------
+
+class TestBrowserToolUnit:
+    """BrowserTool dispatch through ToolManager with all I/O mocked."""
+
+    @pytest.mark.asyncio
+    async def test_run_browser_navigate_mocked(self):
+        mgr = ToolManager()
+        mock_result = {"title": "Example Domain", "url": "https://example.com", "content": "Hello"}
+        with patch.object(mgr.browser, "navigate", new=AsyncMock(return_value=mock_result)):
+            result = await mgr.run_browser(
+                "navigate", ApprovalMode.AUTO, None, url="https://example.com"
+            )
+        assert result["title"] == "Example Domain"
+
+    @pytest.mark.asyncio
+    async def test_run_browser_read_mocked(self):
+        mgr = ToolManager()
+        mock_result = {"title": "My Page", "url": "https://example.com", "content": "page text"}
+        with patch.object(mgr.browser, "read", new=AsyncMock(return_value=mock_result)):
+            result = await mgr.run_browser("read", ApprovalMode.AUTO, None)
+        assert result["content"] == "page text"
+
+    @pytest.mark.asyncio
+    async def test_run_browser_click_mocked(self):
+        mgr = ToolManager()
+        mock_result = {"url": "https://example.com/page2", "content": "clicked page"}
+        with patch.object(mgr.browser, "click", new=AsyncMock(return_value=mock_result)):
+            result = await mgr.run_browser("click", ApprovalMode.AUTO, None, selector="#btn")
+        assert "url" in result
+
+    @pytest.mark.asyncio
+    async def test_run_browser_fill_mocked(self):
+        mgr = ToolManager()
+        with patch.object(mgr.browser, "fill", new=AsyncMock(return_value={"ok": True})):
+            result = await mgr.run_browser(
+                "fill", ApprovalMode.AUTO, None, selector="#input", value="hello"
+            )
+        assert result["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_browser_eval_mocked(self):
+        mgr = ToolManager()
+        with patch.object(mgr.browser, "eval_js", new=AsyncMock(return_value={"result": "42"})):
+            result = await mgr.run_browser(
+                "eval", ApprovalMode.AUTO, None, code="1 + 41"
+            )
+        assert result["result"] == "42"
+
+    @pytest.mark.asyncio
+    async def test_run_browser_screenshot_mocked(self):
+        mgr = ToolManager()
+        mock_result = {
+            "path": "/workspace/screenshot_test.png",
+            "title": "Test",
+            "url": "https://example.com",
+            "host_path": "/docker/human_browser/workspace/screenshot_test.png",
+        }
+        with patch.object(mgr.browser, "screenshot", new=AsyncMock(return_value=mock_result)):
+            result = await mgr.run_browser(
+                "screenshot", ApprovalMode.AUTO, None, url="https://example.com"
+            )
+        assert "path" in result
+
+    @pytest.mark.asyncio
+    async def test_run_browser_missing_url_returns_error(self):
+        mgr = ToolManager()
+        result = await mgr.run_browser("navigate", ApprovalMode.AUTO, None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_run_browser_unknown_action_returns_error(self):
+        mgr = ToolManager()
+        result = await mgr.run_browser("teleport", ApprovalMode.AUTO, None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_run_browser_denied_raises(self):
+        mgr = ToolManager()
+        with pytest.raises(ToolDeniedError):
+            await mgr.run_browser("navigate", ApprovalMode.DENY, None, url="https://x.com")
+
+    def test_browser_tool_definition_present(self):
+        """browser tool must appear in the tool definitions list."""
+        mgr = ToolManager()
+        defs = mgr.tool_definitions(shell_enabled=True)
+        names = [d["function"]["name"] for d in defs]
+        assert "browser" in names, f"'browser' not found in tool definitions: {names}"
+
+    def test_browser_tool_has_required_fields(self):
+        mgr = ToolManager()
+        defs = mgr.tool_definitions(shell_enabled=False)
+        browser_def = next(d for d in defs if d["function"]["name"] == "browser")
+        params = browser_def["function"]["parameters"]["properties"]
+        assert "action" in params
+        assert "url" in params
+        assert "selector" in params
+        assert "value" in params
+        assert "code" in params
+
+
+# ---------------------------------------------------------------------------
+# Browser tool — live e2e smoke test (skipped if container not running)
+# ---------------------------------------------------------------------------
+
+def _human_browser_running() -> bool:
+    try:
+        import subprocess, json as _json
+        r = subprocess.run(
+            ["docker", "inspect", "human_browser"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return False
+        data = _json.loads(r.stdout)[0]
+        return bool(data.get("State", {}).get("Running"))
+    except Exception:
+        return False
+
+
+_BROWSER_UP = _human_browser_running()
+skip_no_browser = pytest.mark.skipif(
+    not _BROWSER_UP,
+    reason="human_browser container not running",
+)
+
+
+class TestBrowserLive:
+    """Live end-to-end tests against the real human_browser container."""
+
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_navigate_example_com(self):
+        from aichat.tools.browser import BrowserTool
+        tool = BrowserTool()
+        result = await tool.navigate("https://example.com")
+        assert "title" in result
+        assert "content" in result
+        assert "example" in result["title"].lower() or "example" in result["content"].lower()
+
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_read_after_navigate(self):
+        from aichat.tools.browser import BrowserTool
+        tool = BrowserTool()
+        await tool.navigate("https://example.com")
+        result = await tool.read()
+        assert "url" in result
+        assert "content" in result
+
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_eval_js(self):
+        from aichat.tools.browser import BrowserTool
+        tool = BrowserTool()
+        await tool.navigate("https://example.com")
+        result = await tool.eval_js("document.title")
+        assert "result" in result
+        assert result["result"]  # non-empty
+
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_screenshot_saves_file(self):
+        import os
+        from aichat.tools.browser import BrowserTool
+        tool = BrowserTool()
+        result = await tool.screenshot("https://example.com")
+        assert "path" in result
+        # Check the file was written into the workspace
+        host_path = result.get("host_path", "")
+        if host_path and os.path.exists(host_path):
+            assert os.path.getsize(host_path) > 0
+
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_manager_run_browser_live(self):
+        """Full stack: ToolManager → BrowserTool → real container."""
+        mgr = ToolManager()
+        result = await mgr.run_browser(
+            "navigate", ApprovalMode.AUTO, None, url="https://example.com"
+        )
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert result.get("title") or result.get("content")
+
+
+# ---------------------------------------------------------------------------
+# Browser tool — TUI integration (mocked browser, real TUI)
+# ---------------------------------------------------------------------------
+
+class TestBrowserTUIDispatch:
+    """LLM returns browser tool call → dispatched → result bubble appears."""
+
+    @pytest.mark.asyncio
+    async def test_browser_navigate_tui_roundtrip(self):
+        app = _make_app()
+        call_count = 0
+
+        async def _chat_with_browser(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "b1",
+                        "function": {
+                            "name": "browser",
+                            "arguments": '{"action":"navigate","url":"https://example.com"}',
+                        },
+                    }],
+                }
+            return {"content": "The page title is Example Domain.", "tool_calls": []}
+
+        app.client.chat_once_with_tools = _chat_with_browser
+
+        with patch.object(
+            app.tools.browser, "navigate",
+            new=AsyncMock(return_value={
+                "title": "Example Domain",
+                "url": "https://example.com",
+                "content": "This domain is for illustrative examples.",
+            }),
+        ):
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.pause(1.0)
+                await _type_and_send(pilot, "go to example.com")
+                for _ in range(50):
+                    await pilot.pause(0.4)
+                    if not app.state.busy:
+                        break
+                bubbles = list(app.query(".chat-msg"))
+                assert any("chat-assistant" in b.classes for b in bubbles)
+
+    @pytest.mark.asyncio
+    async def test_browser_error_does_not_crash_tui(self):
+        """A browser tool failure surfaces gracefully without crashing the app."""
+        app = _make_app()
+        app.client.chat_once_with_tools = AsyncMock(return_value={
+            "content": "",
+            "tool_calls": [{
+                "id": "b2",
+                "function": {
+                    "name": "browser",
+                    "arguments": '{"action":"navigate","url":"https://example.com"}',
+                },
+            }],
+        })
+        with patch.object(
+            app.tools.browser, "navigate",
+            new=AsyncMock(side_effect=RuntimeError("Container not running")),
+        ):
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.pause(1.0)
+                await _type_and_send(pilot, "browse")
+                for _ in range(40):
+                    await pilot.pause(0.4)
+                    if not app.state.busy:
+                        break
+                bubbles = list(app.query(".chat-msg"))
+                assert len(bubbles) >= 1

@@ -645,6 +645,20 @@ class AIChatApp(App):
                 tool_name, self.state.approval, self._confirm_tool
             )
             return json.dumps(payload, ensure_ascii=False)
+        if name == "browser":
+            action = str(args.get("action", "")).strip()
+            if not action:
+                return "browser: missing 'action'"
+            payload = await self.tools.run_browser(
+                action,
+                self.state.approval,
+                self._confirm_tool,
+                url=str(args["url"]).strip() if args.get("url") else None,
+                selector=str(args["selector"]).strip() if args.get("selector") else None,
+                value=str(args["value"]) if args.get("value") is not None else None,
+                code=str(args["code"]).strip() if args.get("code") else None,
+            )
+            return json.dumps(payload, ensure_ascii=False)
         if self.tools.is_custom_tool(name):
             payload = await self.tools.run_custom_tool(
                 name, dict(args), self.state.approval, self._confirm_tool
