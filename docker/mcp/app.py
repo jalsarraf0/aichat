@@ -109,7 +109,9 @@ _TOOLS: list[dict[str, Any]] = [
             "IMPORTANT: Always use the exact URL from the user's request or from a prior "
             "web_search result. Never substitute a placeholder like example.com. "
             "If the user asks to screenshot a topic or site name rather than a full URL, "
-            "call web_search first to find the correct URL, then call screenshot with that URL."
+            "call web_search first to find the correct URL, then call screenshot with that URL. "
+            "Use 'find_text' to zoom in on a specific section — the browser will scroll to the "
+            "first occurrence of that text and clip the screenshot to show just that region."
         ),
         "inputSchema": {
             "type": "object",
@@ -120,6 +122,14 @@ _TOOLS: list[dict[str, Any]] = [
                         "The exact URL to screenshot (must start with http:// or https://). "
                         "Do NOT use example.com or any placeholder — use the real URL from "
                         "the user's message or from a web_search result."
+                    ),
+                },
+                "find_text": {
+                    "type": "string",
+                    "description": (
+                        "Optional. A word or phrase to search for on the page. "
+                        "The screenshot will be clipped to the section containing this text, "
+                        "zooming in on the relevant content instead of the full viewport."
                     ),
                 },
             },
@@ -372,11 +382,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 url = str(args.get("url", "")).strip()
                 if not url:
                     return _text("screenshot: 'url' is required")
+                find_text = str(args.get("find_text", "")).strip() or None
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 container_path = f"/workspace/screenshot_{ts}.png"
+                shot_req: dict = {"url": url, "path": container_path}
+                if find_text:
+                    shot_req["find_text"] = find_text
                 try:
                     r = await c.post(f"{BROWSER_URL}/screenshot",
-                                     json={"url": url, "path": container_path}, timeout=20)
+                                     json=shot_req, timeout=20)
                     data = r.json()
                 except Exception as exc:
                     return _text(f"Screenshot failed (browser unreachable): {exc}")
@@ -387,9 +401,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 host_path = f"/docker/human_browser/workspace/{filename}"
                 local_path = os.path.join(BROWSER_WORKSPACE, filename)
                 page_title = data.get("title", "") or url
+                clipped = data.get("clipped", False)
+                clip_note = f"\nZoomed to: '{find_text}'" if clipped and find_text else ""
                 summary = (
                     f"Screenshot of: {page_title}\n"
-                    f"URL: {url}\n"
+                    f"URL: {url}{clip_note}\n"
                     f"File: {host_path}"
                 )
                 # Happy path — screenshot file was written
@@ -678,9 +694,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             if cached_text.lstrip().startswith("<"):
                                 cached_text = re.sub(r"<[^>]*>?", " ", cached_text)
                                 cached_text = re.sub(r"\s+", " ", cached_text).strip()
-                            if cached_text:
+                            if len(cached_text) > 50:
                                 return _text(f"[cached] {cached_text[:max_chars]}")
-                            # Empty after stripping — fall through to live fetch
+                            # Too short (stripped HTML left only a title/nav) — fall through to live fetch
                 except Exception:
                     pass
                 # Fetch via browser (renders JS, returns clean text, handles SSL)
