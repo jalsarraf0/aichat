@@ -1,40 +1,42 @@
 services:
-  aichat-rssfeed-db:
+  # PostgreSQL: general-purpose storage for articles, images, and web cache.
+  # The old aichat-rssfeed and aichat-fetch services have been removed;
+  # all web content is now fetched via the human_browser container (a12fdfeaaf78)
+  # and persisted here.
+  aichat-db:
     image: postgres:16
     environment:
-      POSTGRES_DB: rssfeed
-      POSTGRES_USER: rss
-      POSTGRES_PASSWORD: rss
+      POSTGRES_DB: aichat
+      POSTGRES_USER: aichat
+      POSTGRES_PASSWORD: aichat
     volumes:
-      - rssdb:/var/lib/postgresql/data
+      - aichatdb:/var/lib/postgresql/data
     ports:
       - "5432:5432"
 
-  aichat-rssfeed:
-    build: ./docker/rssfeed
+  # FastAPI service that wraps the PostgreSQL DB with REST endpoints for
+  # storing/searching articles, images, and cached web pages.
+  aichat-database:
+    build: ./docker/database
     environment:
-      DATABASE_URL: postgresql://rss:rss@aichat-rssfeed-db:5432/rssfeed
-      PURGE_INTERVAL_SECONDS: 21600
-      RETENTION_DAYS: 30
+      DATABASE_URL: postgresql://aichat:aichat@aichat-db:5432/aichat
     depends_on:
-      - aichat-rssfeed-db
+      - aichat-db
     ports:
       - "8091:8091"
+    restart: unless-stopped
 
+  # RSS/feed discovery (returns feed URLs; stores articles via aichat-database).
   aichat-researchbox:
     build: ./docker/researchbox
     tty: true
     stdin_open: true
+    environment:
+      DATABASE_URL: http://aichat-database:8091
     volumes:
       - /tmp/research:/tmp/research
     ports:
       - "8092:8092"
-
-  aichat-fetch:
-    build: ./docker/fetch
-    ports:
-      - "8093:8093"
-    restart: unless-stopped
 
   aichat-memory:
     build: ./docker/memory
@@ -54,5 +56,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  rssdb:
+  aichatdb:
   memorydb:

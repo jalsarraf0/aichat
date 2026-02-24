@@ -5,6 +5,7 @@ import sys
 
 from .app import main as app_main
 from .github_repo import repo_create_and_push
+from .mcp_server import main as mcp_main
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     gh_init.add_argument("--remote", default="origin", help="Git remote name (default: origin)")
     gh_init.set_defaults(func=repo_create_command)
 
+    subparsers.add_parser(
+        "mcp",
+        help=(
+            "Run the MCP (Model Context Protocol) server over stdio. "
+            "Hook this up to LM Studio or any MCP client."
+        ),
+    )
+
     return parser
 
 
@@ -56,6 +65,9 @@ def main() -> None:
     args = parser.parse_args()
     if not args.command:
         app_main()
+        return
+    if args.command == "mcp":
+        mcp_main()
         return
     if hasattr(args, "func"):
         sys.exit(args.func(args))
