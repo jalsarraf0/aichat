@@ -376,7 +376,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 container_path = f"/workspace/screenshot_{ts}.png"
                 try:
                     r = await c.post(f"{BROWSER_URL}/screenshot",
-                                     json={"url": url, "path": container_path}, timeout=60)
+                                     json={"url": url, "path": container_path}, timeout=20)
                     data = r.json()
                 except Exception as exc:
                     return _text(f"Screenshot failed (browser unreachable): {exc}")
@@ -497,7 +497,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 if not query:
                     return _text("screenshot_search: 'query' is required")
-                max_results = max(1, min(int(args.get("max_results", 3)), 5))
+                max_results = max(1, min(int(args.get("max_results", 1)), 3))
 
                 # Search DuckDuckGo HTML for result URLs (realistic headers)
                 try:
@@ -569,15 +569,19 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     "User-Agent": _BROWSER_HEADERS["User-Agent"],
                     "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
                 }
+                # 24-second budget for all screenshots — fits within LM Studio's timeout.
+                _deadline = asyncio.get_event_loop().time() + 24.0
                 for i, url in enumerate(urls):
-                    # Human-like pause between page loads — avoid triggering rate limits
-                    if i > 0:
-                        await asyncio.sleep(random.uniform(2.0, 5.0))
+                    remaining = _deadline - asyncio.get_event_loop().time()
+                    if remaining < 3:
+                        blocks.append({"type": "text", "text": f"(time budget reached — stopped at {i} of {len(urls)} results)"})
+                        break
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{i}"
                     cp = f"/workspace/screenshot_{ts}.png"
                     try:
                         sr = await c.post(f"{BROWSER_URL}/screenshot",
-                                          json={"url": url, "path": cp}, timeout=60)
+                                          json={"url": url, "path": cp},
+                                          timeout=min(15.0, remaining - 2.0))
                         data = sr.json()
                     except Exception as exc:
                         blocks.append({"type": "text", "text": f"Failed to screenshot {url}: {exc}"})
@@ -628,18 +632,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
-                # Tier 1: human_browser (Chromium — most reliable, anti-detection, human-like)
-                try:
-                    br = await asyncio.wait_for(
-                        c.post(f"{BROWSER_URL}/search", json={"query": query}),
-                        timeout=30.0,
-                    )
-                    data = br.json()
-                    if data.get("content"):
-                        return _text(f"[Search via browser (tier 1)]\n\n{data['content'][:max_chars]}")
-                except Exception:
-                    pass
-                # Tier 2: DuckDuckGo HTML (realistic browser headers)
+                # Tier 1: DuckDuckGo HTML via httpx (fast, reliable, bot-resilient with brotlicffi)
                 try:
                     r = await c.get(
                         f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
@@ -648,7 +641,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     )
                     text = re.sub(r"<[^>]+>", " ", r.text)
                     text = re.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return _text(f"[Search via httpx (tier 2)]\n\n{text}")
+                    return _text(f"[Search results]\n\n{text}")
                 except Exception:
                     pass
                 # Tier 3: DDG lite (realistic browser headers)
@@ -660,7 +653,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     )
                     text = re.sub(r"<[^>]+>", " ", r.text)
                     text = re.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return _text(f"[Search via DDG lite (tier 3)]\n\n{text}")
+                    return _text(f"[Search results (lite)]\n\n{text}")
                 except Exception as exc:
                     return _text(f"web_search failed: {exc}")
 
@@ -901,7 +894,26 @@ async def messages(request: Request, sessionId: str = "") -> Response:
 
     async def _deliver(rpc: dict, sid: str) -> None:
         try:
-            response = await _handle_rpc(rpc)
+            task = asyncio.create_task(_handle_rpc(rpc))
+            req_id = rpc.get("id")
+            # Send MCP progress notifications every 5 s while the tool runs.
+            # These are real data: events on the SSE stream — keeps LM Studio's
+            # internal tool-call timer alive even for slow tools (screenshot, etc.).
+            while not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                except asyncio.TimeoutError:
+                    if sid in _sessions and req_id is not None:
+                        await _sessions[sid].put({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/progress",
+                            "params": {
+                                "progressToken": str(req_id),
+                                "progress": 0,
+                                "total": 1,
+                            },
+                        })
+            response = task.result()
             if response is not None and sid in _sessions:
                 await _sessions[sid].put(response)
         except Exception:
