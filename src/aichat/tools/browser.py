@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "3"
+_REQUIRED_SERVER_VERSION = "4"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "3"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v3"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v4"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "3"
+_VERSION = "4"
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -100,21 +100,43 @@ async def _new_context():
     return _context
 
 
+_CHROMIUM_PATHS = [
+    # Playwright-managed headless Chromium (preferred — matches playwright version)
+    None,
+    # System Chromium fallback (available in the human_browser base image)
+    "/usr/bin/chromium",
+    "/usr/lib/chromium/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+]
+
+_LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--window-size=1920,1080",
+]
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _pw, _browser, _context, _page
     _pw = await async_playwright().start()
-    _browser = await _pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--window-size=1920,1080",
-        ],
-    )
+    last_exc: Exception | None = None
+    for exe in _CHROMIUM_PATHS:
+        try:
+            kwargs = {"headless": True, "args": _LAUNCH_ARGS}
+            if exe:
+                kwargs["executable_path"] = exe
+            _browser = await _pw.chromium.launch(**kwargs)
+            break
+        except Exception as exc:
+            last_exc = exc
+    else:
+        await _pw.stop()
+        raise RuntimeError(f"Could not launch Chromium: {last_exc}")
     await _new_context()
     _page = await _context.new_page()
     yield
@@ -158,9 +180,9 @@ async def _ensure_page():
 async def _extract_text(page) -> str:
     js = """() => {
         const b = document.body;
-        if (!b) return '';
+        if (!b) return \'\' ;
         b.querySelectorAll(
-            'script,style,nav,footer,header,aside,noscript'
+            \'script,style,nav,footer,header,aside,noscript\'
         ).forEach(e => e.remove());
         return b.innerText.trim().slice(0, 8000);
     }"""
@@ -175,30 +197,30 @@ async def _get_image_urls(page) -> list:
     js = """() => {
         const seen = new Set();
         const result = [];
-        for (const img of document.querySelectorAll('img[src]')) {
-            const src = img.src || '';
-            if (src.startsWith('http') && !seen.has(src)) {
+        for (const img of document.querySelectorAll(\'img[src]\')) {
+            const src = img.src || \'\' ;
+            if (src.startsWith(\'http\') && !seen.has(src)) {
                 seen.add(src);
                 result.push(src);
             }
         }
-        for (const el of document.querySelectorAll('[srcset]')) {
-            const srcset = el.getAttribute('srcset') || '';
-            for (const part of srcset.split(',')) {
-                const tokens = part.trim().split(' ').filter(function(t) {
+        for (const el of document.querySelectorAll(\'[srcset]\')) {
+            const srcset = el.getAttribute(\'srcset\') || \'\' ;
+            for (const part of srcset.split(\',\')) {
+                const tokens = part.trim().split(\' \').filter(function(t) {
                     return t.length > 0;
                 });
-                const url = tokens[0] || '';
-                if (url.startsWith('http') && !seen.has(url)) {
+                const url = tokens[0] || \'\' ;
+                if (url.startsWith(\'http\') && !seen.has(url)) {
                     seen.add(url);
                     result.push(url);
                 }
             }
         }
-        const og = document.querySelector('meta[property="og:image"]');
+        const og = document.querySelector(\'meta[property="og:image"]\');
         if (og) {
-            const c = og.getAttribute('content') || '';
-            if (c.startsWith('http') && !seen.has(c)) {
+            const c = og.getAttribute(\'content\') || \'\' ;
+            if (c.startsWith(\'http\') && !seen.has(c)) {
                 seen.add(c);
                 result.push(c);
             }
@@ -212,9 +234,10 @@ async def _get_image_urls(page) -> list:
 
 
 async def _safe_goto(page, url: str) -> None:
-    for wait in ("networkidle", "load", "domcontentloaded"):
+    """Navigate to url. \'load\' is fast and sufficient; networkidle can stall 30s+."""
+    for wait, ms in ((\"load\", 12000), (\"domcontentloaded\", 5000)):
         try:
-            await page.goto(url, wait_until=wait, timeout=30000)
+            await page.goto(url, wait_until=wait, timeout=ms)
             return
         except Exception:
             if page.is_closed():
@@ -332,12 +355,12 @@ async def screenshot(req: ScreenshotReq):
             except Exception as exc2:
                 nav_error = str(exc2)
     try:
-        # Simulate a human briefly reading/scrolling before the screenshot
-        await asyncio.sleep(_random.uniform(0.5, 1.5))
+        # Brief human-like pause before screenshot (reduced for speed)
+        await asyncio.sleep(_random.uniform(0.2, 0.5))
         scroll_px = _random.randint(80, 350)
         try:
             await page.evaluate(f"window.scrollBy(0, {scroll_px})")
-            await asyncio.sleep(_random.uniform(0.2, 0.6))
+            await asyncio.sleep(_random.uniform(0.1, 0.2))
         except Exception:
             pass
         await page.screenshot(path=req.path, full_page=False)
@@ -380,23 +403,23 @@ class SearchReq(BaseModel):
 
 @app.post("/search")
 async def search(req: SearchReq):
-    """Human-like search: navigate to DuckDuckGo, type with realistic delays, submit."""
+    """Human-like search: go to DDG homepage, fill search box, submit, wait for results URL."""
     try:
         page = await _ensure_page()
         await _safe_goto(page, "https://duckduckgo.com")
-        # Click search box, pause like a real user, then type character-by-character
-        await page.click("input[name='q']")
-        await asyncio.sleep(_random.uniform(0.3, 0.7))
-        await page.type("input[name='q']", req.query, delay=_random.randint(60, 140))
-        await asyncio.sleep(_random.uniform(0.3, 0.8))
+        # Fill the search box (instant, no typing delay — DDG homepage allows this)
+        await page.fill("input[name=\'q\']", req.query)
+        await asyncio.sleep(_random.uniform(0.2, 0.5))
         await page.keyboard.press("Enter")
+        # Wait for the URL to change to a search results URL (not networkidle which stalls)
         try:
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_url(
+                lambda u: "q=" in u and "duckduckgo.com" in u and u != "https://duckduckgo.com/",
+                timeout=8000,
+            )
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
-            try:
-                await page.wait_for_load_state("load", timeout=10000)
-            except Exception:
-                pass
+            await asyncio.sleep(2)  # fallback: just wait a moment
         content = await _extract_text(page)
         return {
             "query": req.query,

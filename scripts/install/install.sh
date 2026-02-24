@@ -79,6 +79,25 @@ if command -v docker >/dev/null 2>&1; then
       else
         log "human_browser already connected to ${AICHAT_NET}."
       fi
+      # Ensure browser_server.py is running inside human_browser (provides screenshot API on :7081).
+      # It may not be running after a container restart since the entrypoint only starts VNC/noVNC.
+      if ! docker exec human_browser python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen('http://localhost:7081/health', timeout=3)
+    raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+" 2>/dev/null; then
+        log "Starting browser_server.py inside human_browser (screenshot API)."
+        docker exec -d human_browser bash -c \
+          "DISPLAY=:99 HOME=/home/ai python3 /workspace/browser_server.py >> /workspace/browser_server.log 2>&1" \
+          || warn "Could not start browser_server.py in human_browser."
+        # Allow time for Playwright/Chromium startup
+        sleep 5
+      else
+        log "browser_server.py already running in human_browser."
+      fi
     else
       warn "human_browser container not found — screenshot tool will be unavailable until it is running."
     fi
