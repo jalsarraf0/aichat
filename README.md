@@ -356,6 +356,11 @@ docker logs human_browser
 `aichat-mcp` exposes all aichat tools over the network via the Model Context Protocol.
 It supports both SSE (legacy) and Streamable HTTP (MCP 2025-03-26) transports.
 
+Tool calls are **non-blocking** — both POST /messages (SSE transport) and POST /mcp
+(Streamable HTTP) return immediately (202 / SSE keepalives) and deliver results
+asynchronously. This prevents LM Studio from timing out on slow tools like
+`screenshot_search` (which can take up to 3 minutes for three browser screenshots).
+
 **LM Studio `mcp_servers.json` entry:**
 ```json
 {

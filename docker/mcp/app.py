@@ -744,17 +744,24 @@ async def mcp_post(request: Request) -> Response:
             status_code=400,
         )
 
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" in accept:
+        # Non-blocking: stream keepalives while the tool runs, yield result when done.
+        async def _stream_result(rpc: dict):
+            task = asyncio.create_task(_handle_rpc(rpc))
+            while not task.done():
+                yield ": keepalive\n\n"
+                await asyncio.sleep(5.0)
+            result = task.result()
+            if result is not None:
+                yield f"event: message\ndata: {json.dumps(result)}\n\n"
+        return StreamingResponse(_stream_result(rpc), media_type="text/event-stream",
+                                 headers=_SSE_HEADERS)
+
+    # JSON (non-SSE) path — synchronous; used only by non-LM-Studio clients.
     response = await _handle_rpc(rpc)
     if response is None:
         return Response(content="", status_code=202)
-
-    accept = request.headers.get("accept", "")
-    if "text/event-stream" in accept:
-        async def _single_event():
-            yield f"event: message\ndata: {json.dumps(response)}\n\n"
-        return StreamingResponse(_single_event(), media_type="text/event-stream",
-                                 headers=_SSE_HEADERS)
-
     return Response(content=json.dumps(response), media_type="application/json")
 
 
@@ -805,10 +812,15 @@ async def messages(request: Request, sessionId: str = "") -> Response:
             status_code=400,
         )
 
-    response = await _handle_rpc(rpc)
-    if response is not None and sessionId in _sessions:
-        await _sessions[sessionId].put(response)
+    async def _deliver(rpc: dict, sid: str) -> None:
+        try:
+            response = await _handle_rpc(rpc)
+            if response is not None and sid in _sessions:
+                await _sessions[sid].put(response)
+        except Exception:
+            pass
 
+    asyncio.create_task(_deliver(rpc, sessionId))
     return Response(content="", status_code=202)
 
 
