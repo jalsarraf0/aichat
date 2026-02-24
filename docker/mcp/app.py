@@ -34,6 +34,7 @@ import asyncio
 import base64
 import json
 import os
+import random
 import re
 import uuid
 from datetime import datetime
@@ -67,6 +68,25 @@ BROWSER_WORKSPACE = os.environ.get("BROWSER_WORKSPACE", "/browser-workspace")
 # Active SSE sessions: session_id -> asyncio.Queue
 _sessions: dict[str, asyncio.Queue] = {}
 
+# Realistic browser headers — used for all outbound httpx requests to reduce
+# bot-detection and rate-limit exposure.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
 
 # ---------------------------------------------------------------------------
 # Tool schemas exposed to MCP clients
@@ -339,27 +359,53 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception as exc:
                     return _text(f"Screenshot failed (browser unreachable): {exc}")
                 error = data.get("error", "")
+                image_urls = data.get("image_urls", [])
                 container_path = data.get("path", container_path)
-                if error and not container_path:
-                    return _text(f"Screenshot failed: {error}")
                 filename = os.path.basename(container_path)
                 host_path = f"/docker/human_browser/workspace/{filename}"
-                page = data.get("title", "") or url
-                # Always save fresh screenshot to database for later recall
-                try:
-                    await c.post(f"{DATABASE_URL}/images/store", json={
-                        "url": url,
-                        "host_path": host_path,
-                        "alt_text": f"Screenshot of {page}",
-                    })
-                except Exception:
-                    pass
+                local_path = os.path.join(BROWSER_WORKSPACE, filename)
+                page_title = data.get("title", "") or url
                 summary = (
-                    f"Screenshot of: {page}\n"
+                    f"Screenshot of: {page_title}\n"
                     f"URL: {url}\n"
                     f"File: {host_path}"
                 )
-                return _image_blocks(container_path, summary)
+                # Happy path — screenshot file was written
+                if os.path.isfile(local_path):
+                    try:
+                        await c.post(f"{DATABASE_URL}/images/store", json={
+                            "url": url,
+                            "host_path": host_path,
+                            "alt_text": f"Screenshot of {page_title}",
+                        })
+                    except Exception:
+                        pass
+                    return _image_blocks(container_path, summary)
+                # Screenshot file missing — browser was blocked or crashed.
+                # Try fetching a real image from the page DOM (browser v2+ returns image_urls).
+                img_hdrs = {
+                    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                }
+                for img_url in image_urls[:3]:
+                    try:
+                        ir = await c.get(img_url, headers=img_hdrs,
+                                         follow_redirects=True, timeout=15)
+                        if ir.status_code == 200:
+                            ct = ir.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                            b64 = base64.standard_b64encode(ir.content).decode("ascii")
+                            fallback_summary = (
+                                f"Screenshot of: {page_title}\n"
+                                f"URL: {url}\n"
+                                f"(screenshot blocked — showing page image)"
+                            )
+                            return [
+                                {"type": "text", "text": fallback_summary},
+                                {"type": "image", "data": b64, "mimeType": ct},
+                            ]
+                    except Exception:
+                        continue
+                return _text(f"Screenshot failed: {error or 'unknown error'}. URL: {url}")
 
             # ----------------------------------------------------------------
             if name == "fetch_image":
@@ -367,8 +413,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if not url:
                     return _text("fetch_image: 'url' is required")
                 try:
-                    r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"},
-                                    follow_redirects=True)
+                    img_fetch_headers = {
+                        "User-Agent": _BROWSER_HEADERS["User-Agent"],
+                        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                        "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+                    }
+                    r = await c.get(url, headers=img_fetch_headers, follow_redirects=True)
                     r.raise_for_status()
                     content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
                     img_data = r.content
@@ -411,11 +461,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text("screenshot_search: 'query' is required")
                 max_results = max(1, min(int(args.get("max_results", 3)), 5))
 
-                # Search DuckDuckGo HTML for result URLs
+                # Search DuckDuckGo HTML for result URLs (realistic headers)
                 try:
                     r = await c.get(
                         f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
-                        headers={"User-Agent": "Mozilla/5.0"},
+                        headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
                     html = r.text
@@ -439,7 +489,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 blocks: list[dict[str, Any]] = [
                     {"type": "text", "text": f"Visual search: '{query}' — screenshotting {len(urls)} result(s)...\n"}
                 ]
+                img_hdrs = {
+                    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                }
                 for i, url in enumerate(urls):
+                    # Human-like pause between page loads — avoid triggering rate limits
+                    if i > 0:
+                        await asyncio.sleep(random.uniform(2.0, 5.0))
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{i}"
                     cp = f"/workspace/screenshot_{ts}.png"
                     try:
@@ -450,24 +507,44 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         blocks.append({"type": "text", "text": f"Failed to screenshot {url}: {exc}"})
                         continue
                     err = data.get("error", "")
+                    s_image_urls = data.get("image_urls", [])
                     container_path = data.get("path", cp)
-                    if err and not container_path:
-                        blocks.append({"type": "text", "text": f"Failed: {url} — {err}"})
-                        continue
                     filename = os.path.basename(container_path)
                     host_path = f"/docker/human_browser/workspace/{filename}"
-                    page = data.get("title", "") or url
-                    # Always save fresh screenshot to database for recall
-                    try:
-                        await c.post(f"{DATABASE_URL}/images/store", json={
-                            "url": url,
-                            "host_path": host_path,
-                            "alt_text": f"Search: '{query}' — {page}",
-                        })
-                    except Exception:
-                        pass
-                    summary = f"{page}\n{url}\nFile: {host_path}"
-                    blocks.extend(_image_blocks(container_path, summary))
+                    local_path = os.path.join(BROWSER_WORKSPACE, filename)
+                    page_title = data.get("title", "") or url
+                    summary = f"{page_title}\n{url}\nFile: {host_path}"
+                    if os.path.isfile(local_path):
+                        try:
+                            await c.post(f"{DATABASE_URL}/images/store", json={
+                                "url": url,
+                                "host_path": host_path,
+                                "alt_text": f"Search: '{query}' — {page_title}",
+                            })
+                        except Exception:
+                            pass
+                        blocks.extend(_image_blocks(container_path, summary))
+                    else:
+                        # Screenshot failed — try image_urls fallback
+                        fetched = False
+                        for img_url in s_image_urls[:3]:
+                            try:
+                                ir = await c.get(img_url, headers=img_hdrs,
+                                                 follow_redirects=True, timeout=15)
+                                if ir.status_code == 200:
+                                    ct = ir.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                                    b64 = base64.standard_b64encode(ir.content).decode("ascii")
+                                    fb_summary = f"{page_title}\n{url}\n(screenshot blocked — showing page image)"
+                                    blocks.extend([
+                                        {"type": "text", "text": fb_summary},
+                                        {"type": "image", "data": b64, "mimeType": ct},
+                                    ])
+                                    fetched = True
+                                    break
+                            except Exception:
+                                continue
+                        if not fetched:
+                            blocks.append({"type": "text", "text": f"Failed: {url} — {err or 'screenshot unavailable'}"})
                 return blocks
 
             # ----------------------------------------------------------------
@@ -475,11 +552,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
-                # Tier 2: DuckDuckGo HTML
+                # Tier 2: DuckDuckGo HTML (realistic browser headers)
                 try:
                     r = await c.get(
                         f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
-                        headers={"User-Agent": "Mozilla/5.0"},
+                        headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
                     text = re.sub(r"<[^>]+>", " ", r.text)
@@ -487,11 +564,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"[Search via httpx (tier 2)]\n\n{text}")
                 except Exception:
                     pass
-                # Tier 3: DDG lite
+                # Tier 3: DDG lite (realistic browser headers)
                 try:
                     r = await c.get(
                         f"https://lite.duckduckgo.com/lite/?q={query.replace(' ', '+')}",
-                        headers={"User-Agent": "Mozilla/5.0"},
+                        headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
                     text = re.sub(r"<[^>]+>", " ", r.text)
@@ -515,7 +592,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception:
                     pass
                 # Fetch live
-                r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+                r = await c.get(url, headers=_BROWSER_HEADERS, follow_redirects=True)
                 text = r.text[:max_chars]
                 try:
                     await c.post(f"{DATABASE_URL}/cache/store", json={"url": url, "content": text})
