@@ -44,6 +44,14 @@ services:
       - memorydb:/data
     restart: unless-stopped
 
+  aichat-toolkit:
+    build: ./docker/toolkit
+    ports:
+      - "8095:8095"
+    volumes:
+      - ${HOME}/.config/aichat/tools:/data/tools
+    restart: unless-stopped
+
 volumes:
   rssdb:
   memorydb:

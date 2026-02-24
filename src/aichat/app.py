@@ -113,6 +113,7 @@ class AIChatApp(App):
         await self.update_status()
         self._refresh_sessions()
         asyncio.create_task(self._load_default_model())
+        asyncio.create_task(self.tools.refresh_custom_tools())
 
     def apply_theme(self, name: str) -> None:
         selected_name = name if name in THEMES else "cyberpunk"
@@ -363,12 +364,48 @@ class AIChatApp(App):
                     return
                 self._write_transcript("Assistant", "Usage: /memory recall [key] | /memory store <key> <value>")
                 return
+            if text.startswith("/tool"):
+                await self._handle_tool_command(text[5:].strip())
+                return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
             self._tool_log(f"[denied] {exc}")
         except Exception as exc:
             self._tool_log(f"[tool error] {exc}")
 
+
+    async def _handle_tool_command(self, sub: str) -> None:
+        parts = sub.split(maxsplit=1)
+        verb = parts[0].lower() if parts else ""
+        if verb == "list":
+            call = ToolCall(index=0, name="list_custom_tools", args={}, call_id="", label="list_custom_tools")
+            results = await self._run_tool_batch([call])
+            self._log_tool_results(results)
+            if any(not res.ok for res in results):
+                self._notify_tool_failures(results)
+            else:
+                self._write_transcript("Assistant", "Custom tools listed. See Tools panel.")
+            return
+        if verb == "delete":
+            tool_name = parts[1].strip() if len(parts) > 1 else ""
+            if not tool_name:
+                self._write_transcript("Assistant", "Usage: /tool delete <name>")
+                return
+            call = ToolCall(
+                index=0,
+                name="delete_custom_tool",
+                args={"tool_name": tool_name},
+                call_id="",
+                label="delete_custom_tool",
+            )
+            results = await self._run_tool_batch([call])
+            self._log_tool_results(results)
+            if any(not res.ok for res in results):
+                self._notify_tool_failures(results)
+            else:
+                self._write_transcript("Assistant", f"Deleted tool '{tool_name}'.")
+            return
+        self._write_transcript("Assistant", "Usage: /tool list | /tool delete <name>")
 
     async def _show_modal(self, screen: object) -> object:
         """Show a modal screen and await dismissal without requiring a Textual worker."""
@@ -537,6 +574,35 @@ class AIChatApp(App):
             key = str(args.get("key", "")).strip()
             payload = await self.tools.run_memory_recall(key, self.state.approval, self._confirm_tool)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "create_tool":
+            tool_name = str(args.get("tool_name", "")).strip()
+            description = str(args.get("description", "")).strip()
+            parameters = args.get("parameters_schema", {})
+            if not isinstance(parameters, dict):
+                parameters = {}
+            code = str(args.get("code", "")).strip()
+            if not tool_name or not code:
+                return "create_tool: missing 'tool_name' or 'code'"
+            payload = await self.tools.run_create_tool(
+                tool_name, description, parameters, code, self.state.approval, self._confirm_tool
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "list_custom_tools":
+            tools_list = await self.tools.run_list_custom_tools(self.state.approval, self._confirm_tool)
+            return json.dumps({"tools": tools_list}, ensure_ascii=False)
+        if name == "delete_custom_tool":
+            tool_name = str(args.get("tool_name", "")).strip()
+            if not tool_name:
+                return "delete_custom_tool: missing 'tool_name'"
+            payload = await self.tools.run_delete_custom_tool(
+                tool_name, self.state.approval, self._confirm_tool
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if self.tools.is_custom_tool(name):
+            payload = await self.tools.run_custom_tool(
+                name, dict(args), self.state.approval, self._confirm_tool
+            )
+            return payload.get("result", "(no output)")
         return f"unknown tool '{name}'"
 
     async def _run_followup_response(self) -> None:
@@ -560,6 +626,11 @@ class AIChatApp(App):
             " If a request is ambiguous, choose the most likely interpretation, state the key"
             " assumption briefly, answer fully, and ask one short clarifying question."
             " Be natural, conversational, and helpful."
+            " You can create new persistent tools at any time using the create_tool function."
+            " Created tools run in an isolated Docker container and are available immediately"
+            " in this session and all future sessions."
+            " Use list_custom_tools to see what tools you have already created,"
+            " and delete_custom_tool to remove ones you no longer need."
         )
         if self.state.concise_mode:
             return (
