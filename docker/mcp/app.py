@@ -168,7 +168,7 @@ _TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "Topic or query to search and screenshot."},
                 "max_results": {
                     "type": "integer",
-                    "description": "Number of result pages to screenshot (default 3, max 3).",
+                    "description": "Number of result pages to screenshot (default 3, max 5).",
                 },
             },
             "required": ["query"],
@@ -639,7 +639,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 if not query:
                     return _text("screenshot_search: 'query' is required")
-                max_results = max(1, min(int(args.get("max_results", 3)), 3))
+                max_results = max(1, min(int(args.get("max_results", 3)), 5))
 
                 # Search DuckDuckGo HTML for result URLs (realistic headers)
                 try:

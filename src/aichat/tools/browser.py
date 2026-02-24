@@ -677,13 +677,15 @@ class BrowserTool:
                 break
         return await self._httpx_fetch(url)
 
-    async def screenshot(self, url: str | None = None) -> dict:
+    async def screenshot(self, url: str | None = None, find_text: str | None = None) -> dict:
         base = await self._ensure_server()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = f"/workspace/screenshot_{ts}.png"
         payload: dict = {"path": path}
         if url:
             payload["url"] = url
+        if find_text:
+            payload["find_text"] = find_text
         async with httpx.AsyncClient(timeout=45.0) as c:
             r = await c.post(f"{base}/screenshot", json=payload)
         r.raise_for_status()

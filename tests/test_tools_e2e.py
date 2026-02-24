@@ -921,6 +921,33 @@ class TestBrowserToolUnit:
         assert "selector" in params
         assert "value" in params
         assert "code" in params
+        assert "find_text" in params, "browser tool schema missing 'find_text' parameter"
+
+    @pytest.mark.asyncio
+    async def test_run_browser_screenshot_passes_find_text(self):
+        """run_browser(screenshot, find_text=...) forwards find_text to BrowserTool."""
+        mgr = ToolManager()
+        captured_kwargs: list[dict] = []
+
+        async def _fake_screenshot(url=None, find_text=None):
+            captured_kwargs.append({"url": url, "find_text": find_text})
+            return {
+                "path": "/workspace/screenshot_test.png",
+                "title": "Test",
+                "url": url or "https://example.com",
+                "host_path": "/docker/human_browser/workspace/screenshot_test.png",
+                "clipped": bool(find_text),
+            }
+
+        with patch.object(mgr.browser, "screenshot", side_effect=_fake_screenshot):
+            with patch.object(mgr.db, "store_image", new=AsyncMock(return_value={"ok": True})):
+                result = await mgr.run_browser(
+                    "screenshot", ApprovalMode.AUTO, None,
+                    url="https://example.com", find_text="Introduction",
+                )
+        assert "path" in result
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0]["find_text"] == "Introduction"
 
 
 # ---------------------------------------------------------------------------
@@ -1294,3 +1321,57 @@ class TestMCPScreenshot:
         # content must be a list of blocks, not a string
         assert isinstance(result["content"], list)
         assert result["content"][0]["type"] == "text"
+
+    @pytest.mark.asyncio
+    async def test_mcp_web_search_returns_text_block(self):
+        """web_search tool in stdio MCP server returns a text content block."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        mock_search_result = {
+            "query": "python asyncio",
+            "tier": 1,
+            "tier_name": "browser",
+            "url": "https://duckduckgo.com/?q=python+asyncio",
+            "content": "Python asyncio documentation and examples.",
+        }
+        with patch.object(mgr, "run_web_search", new=AsyncMock(return_value=mock_search_result)):
+            blocks = await mcp._call_tool("web_search", {"query": "python asyncio"})
+        assert isinstance(blocks, list)
+        assert blocks[0]["type"] == "text"
+        assert "asyncio" in blocks[0]["text"].lower() or "browser" in blocks[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_screenshot_find_text_passed(self):
+        """screenshot tool with find_text passes it through to run_browser."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        captured_kwargs: list[dict] = []
+
+        async def _fake_run_browser(action, mode, confirmer, url=None, find_text=None, **kw):
+            captured_kwargs.append({"action": action, "url": url, "find_text": find_text})
+            return {
+                "path": "/workspace/s.png",
+                "title": "Test",
+                "url": url or "",
+                "host_path": "",
+                "clipped": bool(find_text),
+            }
+
+        with patch.object(mgr, "run_browser", side_effect=_fake_run_browser):
+            await mcp._call_tool("screenshot", {"url": "https://example.com", "find_text": "API"})
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0]["find_text"] == "API"
+
+    def test_mcp_stdio_tool_schemas_complete(self):
+        """stdio MCP server exposes all expected tools."""
+        import aichat.mcp_server as mcp
+        names = {t["name"] for t in mcp._TOOL_SCHEMAS}
+        expected = {
+            "browser", "screenshot", "fetch_image", "screenshot_search",
+            "web_fetch", "web_search", "memory_store", "memory_recall",
+            "db_store_article", "db_search", "db_cache_store", "db_cache_get",
+            "db_store_image", "db_list_images", "researchbox_search", "researchbox_push",
+            "shell_exec", "create_tool", "list_custom_tools", "delete_custom_tool",
+        }
+        missing = expected - names
+        assert not missing, f"stdio MCP missing tools: {missing}"

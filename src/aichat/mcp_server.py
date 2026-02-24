@@ -64,7 +64,9 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "browser",
         "description": (
             "Control a real Chromium browser in the human_browser Docker container "
-            "(ID a12fdfeaaf78). Actions: navigate, read, screenshot, click, fill, eval."
+            "(ID a12fdfeaaf78). Actions: navigate, read, screenshot, click, fill, eval. "
+            "The browser keeps state between calls so you can navigate, click, fill, and read "
+            "in sequence. Use 'find_text' with screenshot to zoom into a specific page section."
         ),
         "inputSchema": {
             "type": "object",
@@ -74,10 +76,17 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "enum": ["navigate", "read", "screenshot", "click", "fill", "eval"],
                     "description": "Which browser action to perform.",
                 },
-                "url":      {"type": "string", "description": "URL for navigate/screenshot."},
-                "selector": {"type": "string", "description": "CSS selector for click/fill."},
-                "value":    {"type": "string", "description": "Text to type (fill only)."},
-                "code":     {"type": "string", "description": "JavaScript to evaluate (eval only)."},
+                "url":       {"type": "string", "description": "URL for navigate/screenshot."},
+                "selector":  {"type": "string", "description": "CSS selector for click/fill."},
+                "value":     {"type": "string", "description": "Text to type (fill only)."},
+                "code":      {"type": "string", "description": "JavaScript to evaluate (eval only)."},
+                "find_text": {
+                    "type": "string",
+                    "description": (
+                        "Optional, screenshot only. Scroll to the first occurrence of this text "
+                        "and clip the screenshot to show just that region."
+                    ),
+                },
             },
             "required": ["action"],
         },
@@ -87,12 +96,19 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": (
             "Take a screenshot of any URL using the real Chromium browser and return it as an "
             "inline image. The screenshot is automatically saved to the PostgreSQL image registry. "
-            "Use this when you want to visually inspect a web page."
+            "Use 'find_text' to zoom into a specific section of the page."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "Full URL to screenshot (http/https)."},
+                "find_text": {
+                    "type": "string",
+                    "description": (
+                        "Optional. A word or phrase to search for on the page. "
+                        "The screenshot will be clipped to show just the matching region."
+                    ),
+                },
             },
             "required": ["url"],
         },
@@ -271,6 +287,83 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "web_search",
+        "description": (
+            "Search the web for a query using a tiered strategy: real Chromium browser "
+            "(Tier 1, human-like DuckDuckGo search) → direct httpx fetch (Tier 2) → "
+            "DuckDuckGo lite API (Tier 3). Returns search results page text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query":     {"type": "string", "description": "The search query."},
+                "max_chars": {"type": "integer", "description": "Max chars to return (default 4000, max 16000)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "create_tool",
+        "description": (
+            "Create a new persistent custom tool that runs in the aichat-toolkit Docker "
+            "sandbox. The tool is saved to disk and immediately available for use in this "
+            "and all future sessions. Tools can make HTTP calls (httpx), process data, "
+            "call APIs, run shell commands (subprocess), and read user repos at /data/repos."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Snake_case identifier (e.g. 'get_stock_price').",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the tool does.",
+                },
+                "parameters_schema": {
+                    "type": "object",
+                    "description": (
+                        "JSON Schema object for the tool's inputs. Example: "
+                        '{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}'
+                    ),
+                },
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python implementation — the body of `async def run(**kwargs) -> str:`. "
+                        "Available: asyncio, json, re, os, math, datetime, pathlib, shlex, "
+                        "subprocess, httpx. Must return a string."
+                    ),
+                },
+            },
+            "required": ["tool_name", "description", "parameters_schema", "code"],
+        },
+    },
+    {
+        "name": "list_custom_tools",
+        "description": "List all custom tools previously created, with names, descriptions, and parameter schemas.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "delete_custom_tool",
+        "description": "Permanently delete a custom tool you previously created.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Name of the tool to delete.",
+                },
+            },
+            "required": ["tool_name"],
+        },
+    },
+    {
         "name": "shell_exec",
         "description": "Run a shell command on the host machine.",
         "inputSchema": {
@@ -311,6 +404,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
     try:
         if name == "browser":
             action = str(arguments.get("action", ""))
+            find_text = str(arguments["find_text"]).strip() if arguments.get("find_text") else None
             result = await mgr.run_browser(
                 action=action,
                 mode=_APPROVAL,
@@ -319,6 +413,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 selector=arguments.get("selector"),
                 value=arguments.get("value"),
                 code=arguments.get("code"),
+                find_text=find_text,
             )
             if action == "screenshot":
                 host_path = result.get("host_path", "")
@@ -338,20 +433,24 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             url = str(arguments.get("url", "")).strip()
             if not url:
                 return _text("screenshot: 'url' is required")
+            find_text = str(arguments["find_text"]).strip() if arguments.get("find_text") else None
             result = await mgr.run_browser(
                 action="screenshot",
                 mode=_APPROVAL,
                 confirmer=None,
                 url=url,
+                find_text=find_text,
             )
             host_path = result.get("host_path", "")
             error = result.get("error", "")
             if error and not host_path:
                 return _text(f"Screenshot failed: {error}")
             page = result.get("title", "") or result.get("url", url)
+            clipped = result.get("clipped", False)
+            clip_note = f"\nZoomed to: '{find_text}'" if clipped and find_text else ""
             summary = (
                 f"Screenshot of: {page}\n"
-                f"URL: {url}\n"
+                f"URL: {url}{clip_note}\n"
                 f"File: {host_path}"
             )
             return _image_content_blocks(host_path, summary)
@@ -495,6 +594,35 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 str(arguments.get("topic", "")),
                 _APPROVAL, None,
             )
+            return _text(json.dumps(result, ensure_ascii=False))
+
+        if name == "web_search":
+            query = str(arguments.get("query", "")).strip()
+            max_chars = int(arguments.get("max_chars", 4000))
+            max_chars = max(500, min(max_chars, 16000))
+            result = await mgr.run_web_search(query, max_chars, _APPROVAL, None)
+            content = result.get("content", "")
+            tier = result.get("tier_name", "")
+            header = f"[{tier}]\n\n" if tier else ""
+            return _text(f"{header}{content}" if content else "(no results)")
+
+        if name == "create_tool":
+            tool_name = str(arguments.get("tool_name", "")).strip()
+            description = str(arguments.get("description", "")).strip()
+            parameters_schema = arguments.get("parameters_schema", {})
+            code = str(arguments.get("code", "")).strip()
+            result = await mgr.run_create_tool(
+                tool_name, description, parameters_schema, code, _APPROVAL, None,
+            )
+            return _text(json.dumps(result, ensure_ascii=False))
+
+        if name == "list_custom_tools":
+            tools = await mgr.run_list_custom_tools(_APPROVAL, None)
+            return _text(json.dumps({"tools": tools}, ensure_ascii=False))
+
+        if name == "delete_custom_tool":
+            tool_name = str(arguments.get("tool_name", "")).strip()
+            result = await mgr.run_delete_custom_tool(tool_name, _APPROVAL, None)
             return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "shell_exec":

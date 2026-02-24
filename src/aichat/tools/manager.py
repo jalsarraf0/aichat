@@ -675,6 +675,7 @@ class ToolManager:
         selector: str | None = None,
         value: str | None = None,
         code: str | None = None,
+        find_text: str | None = None,
     ) -> dict:
         await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
         try:
@@ -683,7 +684,7 @@ class ToolManager:
                     return {"error": "url is required for navigate"}
                 return await self.browser.navigate(url)
             if action == "screenshot":
-                result = await self.browser.screenshot(url)
+                result = await self.browser.screenshot(url, find_text=find_text)
                 # Auto-persist screenshot metadata to the image database
                 host_path = result.get("host_path", "")
                 if host_path and not result.get("error"):
@@ -1170,6 +1171,14 @@ class ToolManager:
                             "code": {
                                 "type": "string",
                                 "description": "JavaScript expression to evaluate (eval only).",
+                            },
+                            "find_text": {
+                                "type": "string",
+                                "description": (
+                                    "Optional, screenshot only. A word or phrase to search for "
+                                    "on the page — the screenshot will be zoomed/clipped to show "
+                                    "just the region containing this text."
+                                ),
                             },
                         },
                         "required": ["action"],

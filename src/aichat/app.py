@@ -839,6 +839,7 @@ class AIChatApp(App):
                 selector=str(args["selector"]).strip() if args.get("selector") else None,
                 value=str(args["value"]) if args.get("value") is not None else None,
                 code=str(args["code"]).strip() if args.get("code") else None,
+                find_text=str(args["find_text"]).strip() if args.get("find_text") else None,
             )
             if action == "screenshot":
                 return self._format_screenshot_result(payload)
