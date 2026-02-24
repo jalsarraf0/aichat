@@ -33,9 +33,7 @@ from textual.widgets import Static
 # ---------------------------------------------------------------------------
 
 SERVICES = {
-    "fetch":       "http://localhost:8093/health",
     "memory":      "http://localhost:8094/health",
-    "rssfeed":     "http://localhost:8091/health",
     # researchbox has no /health — probe its actual search endpoint
     "researchbox": "http://localhost:8092/search-feeds?topic=test",
     "toolkit":     "http://localhost:8095/health",
@@ -50,9 +48,24 @@ def _is_up(url: str) -> bool:
         return False
 
 
+def _is_database_up() -> bool:
+    """Check that the *new* aichat-database service (not old rssfeed) is running."""
+    try:
+        r = httpx.get("http://localhost:8091/health", timeout=2)
+        if r.status_code != 200:
+            return False
+        # New service returns {"ok": true, "articles": N, "cached_pages": N}
+        # Old rssfeed returned {"ok": true, "last_purge_at": ...}
+        data = r.json()
+        return "articles" in data and "cached_pages" in data
+    except Exception:
+        return False
+
+
 SERVICE_STATUS: dict[str, bool] = {
     name: _is_up(url) for name, url in SERVICES.items()
 }
+SERVICE_STATUS["database"] = _is_database_up()
 
 
 def skip_if_down(service: str):
@@ -70,13 +83,13 @@ class TestXmlArgParsingE2E:
     """Confirm parse_tool_args handles all formats the LLM might emit."""
 
     def test_json_format(self):
-        args, err = parse_tool_args("rss_latest", '{"topic": "Iran"}')
+        args, err = parse_tool_args("db_search", '{"topic": "Iran"}')
         assert err is None
         assert args["topic"] == "Iran"
 
     def test_xml_format_single(self):
         args, err = parse_tool_args(
-            "rss_latest",
+            "db_search",
             "<arg_key>topic</arg_key><arg_value>Iran%20News</arg_value>",
         )
         assert err is None
@@ -93,7 +106,7 @@ class TestXmlArgParsingE2E:
         assert args["max_chars"] == 2000
 
     def test_yaml_format(self):
-        args, err = parse_tool_args("rss_latest", "topic: AI news")
+        args, err = parse_tool_args("db_search", "topic: AI news")
         assert err is None
         assert args["topic"] == "AI news"
 
@@ -108,19 +121,16 @@ class TestXmlArgParsingE2E:
 # ---------------------------------------------------------------------------
 
 class TestServiceHealth:
-    @skip_if_down("fetch")
-    def test_fetch_health(self):
-        r = httpx.get("http://localhost:8093/health", timeout=3)
+    @skip_if_down("database")
+    def test_database_health(self):
+        r = httpx.get("http://localhost:8091/health", timeout=3)
         assert r.status_code == 200
+        data = r.json()
+        assert data.get("ok") is True
 
     @skip_if_down("memory")
     def test_memory_health(self):
         r = httpx.get("http://localhost:8094/health", timeout=3)
-        assert r.status_code == 200
-
-    @skip_if_down("rssfeed")
-    def test_rssfeed_health(self):
-        r = httpx.get("http://localhost:8091/health", timeout=3)
         assert r.status_code == 200
 
     @skip_if_down("researchbox")
@@ -139,24 +149,44 @@ class TestServiceHealth:
 # Live service integration (real HTTP calls)
 # ---------------------------------------------------------------------------
 
-class TestFetchToolLive:
-    @skip_if_down("fetch")
+class TestDatabaseToolLive:
+    @skip_if_down("database")
     @pytest.mark.asyncio
-    async def test_fetch_example_com(self):
-        from aichat.tools.fetch import FetchTool
-        tool = FetchTool()
-        result = await tool.fetch_url("https://example.com", max_chars=500)
-        assert "text" in result
-        assert len(result["text"]) > 0
-        assert "example" in result["text"].lower()
+    async def test_store_and_search_article(self):
+        from aichat.tools.database import DatabaseTool
+        tool = DatabaseTool()
+        result = await tool.store_article(
+            url="https://example.com/e2e-test",
+            title="E2E Test Article",
+            content="This is an e2e test article about technology.",
+            topic="e2e_test",
+        )
+        assert result.get("status") == "stored"
+        search = await tool.search_articles(topic="e2e_test")
+        urls = [a["url"] for a in search.get("articles", [])]
+        assert "https://example.com/e2e-test" in urls
 
-    @skip_if_down("fetch")
+    @skip_if_down("database")
     @pytest.mark.asyncio
-    async def test_fetch_truncation(self):
-        from aichat.tools.fetch import FetchTool
-        tool = FetchTool()
-        result = await tool.fetch_url("https://example.com", max_chars=50)
-        assert result.get("truncated") is True or len(result.get("text", "")) <= 100
+    async def test_cache_store_and_get(self):
+        from aichat.tools.database import DatabaseTool
+        tool = DatabaseTool()
+        await tool.cache_store(
+            url="https://example.com/cache-test",
+            content="Cached page content",
+            title="Cache Test",
+        )
+        result = await tool.cache_get("https://example.com/cache-test")
+        assert result.get("found") is True
+        assert "Cached page content" in result.get("content", "")
+
+    @skip_if_down("database")
+    @pytest.mark.asyncio
+    async def test_cache_check_missing(self):
+        from aichat.tools.database import DatabaseTool
+        tool = DatabaseTool()
+        result = await tool.cache_check("https://this-url-does-not-exist-in-cache.example.com")
+        assert result.get("cached") is False
 
 
 class TestMemoryToolLive:
@@ -176,16 +206,6 @@ class TestMemoryToolLive:
         from aichat.tools.memory import MemoryTool
         tool = MemoryTool()
         result = await tool.recall("")
-        assert isinstance(result, dict)
-
-
-class TestRSSToolLive:
-    @skip_if_down("rssfeed")
-    @pytest.mark.asyncio
-    async def test_news_latest_returns_dict(self):
-        from aichat.tools.rss import RSSTool
-        tool = RSSTool()
-        result = await tool.news_latest("technology")
         assert isinstance(result, dict)
 
 
@@ -234,14 +254,15 @@ class TestToolManagerDispatch:
 
     @pytest.mark.asyncio
     async def test_run_web_fetch_mocked(self):
+        """web_fetch is now routed through the browser (human_browser / a12fdfeaaf78)."""
         mgr = ToolManager()
-        with patch.object(mgr.fetch, "fetch_url", new=AsyncMock(
-            return_value={"text": "Example Domain", "truncated": False, "char_count": 14}
+        with patch.object(mgr.browser, "navigate", new=AsyncMock(
+            return_value={"title": "Example Domain", "url": "https://example.com", "content": "Example Domain"}
         )):
             result = await mgr.run_web_fetch(
                 "https://example.com", 4000, ApprovalMode.AUTO, None
             )
-            assert "Example Domain" in json.dumps(result)
+            assert "Example Domain" in result.get("text", "")
 
     @pytest.mark.asyncio
     async def test_run_memory_store_mocked(self):
@@ -262,13 +283,25 @@ class TestToolManagerDispatch:
             assert result["value"] == "stored value"
 
     @pytest.mark.asyncio
-    async def test_run_rss_mocked(self):
+    async def test_run_db_store_article_mocked(self):
         mgr = ToolManager()
-        with patch.object(mgr.rss, "news_latest", new=AsyncMock(
-            return_value={"items": [{"title": "AI News"}]}
+        with patch.object(mgr.db, "store_article", new=AsyncMock(
+            return_value={"status": "stored", "url": "https://example.com"}
         )):
-            result = await mgr.run_rss("AI", ApprovalMode.AUTO, None)
-            assert result["items"][0]["title"] == "AI News"
+            result = await mgr.run_db_store_article(
+                "https://example.com", "Title", "Content", "tech",
+                ApprovalMode.AUTO, None,
+            )
+            assert result["status"] == "stored"
+
+    @pytest.mark.asyncio
+    async def test_run_db_search_mocked(self):
+        mgr = ToolManager()
+        with patch.object(mgr.db, "search_articles", new=AsyncMock(
+            return_value={"articles": [{"url": "https://example.com", "title": "Title"}]}
+        )):
+            result = await mgr.run_db_search("tech", "", ApprovalMode.AUTO, None)
+            assert "articles" in result
 
     @pytest.mark.asyncio
     async def test_run_researchbox_mocked(self):
@@ -283,7 +316,7 @@ class TestToolManagerDispatch:
     async def test_tool_denied_mode(self):
         mgr = ToolManager()
         with pytest.raises(ToolDeniedError):
-            await mgr.run_rss("topic", ApprovalMode.DENY, None)
+            await mgr.run_researchbox("topic", ApprovalMode.DENY, None)
 
     @pytest.mark.asyncio
     async def test_dangerous_shell_blocked_regardless_of_mode(self):
@@ -366,9 +399,10 @@ class TestTUIToolDispatch:
 
     @pytest.mark.asyncio
     async def test_slash_fetch_shows_bubble(self):
+        # /fetch now routes through the browser (human_browser / a12fdfeaaf78)
         app = _make_app()
-        with patch("aichat.tools.fetch.FetchTool.fetch_url", new=AsyncMock(
-            return_value={"text": "Example page content", "truncated": False, "char_count": 20}
+        with patch.object(app.tools.browser, "navigate", new=AsyncMock(
+            return_value={"title": "Example Domain", "url": "https://example.com", "content": "Example page content"}
         )):
             async with app.run_test(size=(180, 50)) as pilot:
                 await pilot.pause(1.0)
@@ -403,8 +437,8 @@ class TestTUIToolDispatch:
     @pytest.mark.asyncio
     async def test_slash_rss_shows_bubble(self):
         app = _make_app()
-        with patch("aichat.tools.rss.RSSTool.news_latest", new=AsyncMock(
-            return_value={"items": [{"title": "Tech Story"}]}
+        with patch.object(app.tools.db, "search_articles", new=AsyncMock(
+            return_value={"articles": [{"url": "https://t.com", "title": "Tech Story"}]}
         )):
             async with app.run_test(size=(180, 50)) as pilot:
                 await pilot.pause(1.0)
@@ -459,8 +493,8 @@ class TestTUIToolDispatch:
             return {"content": "The page title is: Example Domain.", "tool_calls": []}
 
         app.client.chat_once_with_tools = _chat_with_tools
-        with patch("aichat.tools.fetch.FetchTool.fetch_url", new=AsyncMock(
-            return_value={"text": "Example Domain page", "truncated": False, "char_count": 19}
+        with patch.object(app.tools.browser, "navigate", new=AsyncMock(
+            return_value={"title": "Example Domain", "url": "https://example.com", "content": "Example Domain page"}
         )):
             async with app.run_test(size=(180, 50)) as pilot:
                 await pilot.pause(1.0)
@@ -523,7 +557,7 @@ class TestTUIToolDispatch:
                     "tool_calls": [{
                         "id": "c1",
                         "function": {
-                            "name": "rss_latest",
+                            "name": "db_search",
                             "arguments": (
                                 "<arg_key>topic</arg_key>"
                                 "<arg_value>Iran%20News</arg_value>"
@@ -535,8 +569,8 @@ class TestTUIToolDispatch:
 
         app.client.chat_once_with_tools = _chat_with_tools_xml
 
-        with patch("aichat.tools.rss.RSSTool.news_latest", new=AsyncMock(
-            return_value={"items": [{"title": "Iran story"}]}
+        with patch.object(app.tools.db, "search_articles", new=AsyncMock(
+            return_value={"articles": [{"title": "Iran story", "url": "https://example.com"}]}
         )):
             async with app.run_test(size=(180, 50)) as pilot:
                 await pilot.pause(1.0)
@@ -562,7 +596,7 @@ class TestTUIToolDispatch:
                 },
             }],
         })
-        with patch("aichat.tools.fetch.FetchTool.fetch_url", side_effect=Exception("service down")):
+        with patch.object(app.tools.browser, "navigate", side_effect=Exception("browser down")):
             async with app.run_test(size=(180, 50)) as pilot:
                 await pilot.pause(1.0)
                 await _type_and_send(pilot, "fetch something")
@@ -580,7 +614,7 @@ class TestTUIToolDispatch:
         # LLM returns XML-style junk in the content field
         app.client.chat_once_with_tools = AsyncMock(return_value={
             "content": (
-                "rss_latest topic</arg_key> Iran%20News</arg_value>"
+                "db_search topic</arg_key> Iran%20News</arg_value>"
             ),
             "tool_calls": [],
         })

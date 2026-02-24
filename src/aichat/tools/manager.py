@@ -10,10 +10,9 @@ from enum import Enum
 
 from ..state import ApprovalMode
 from .browser import BrowserTool
-from .fetch import FetchTool
+from .database import DatabaseTool
 from .memory import MemoryTool
 from .researchbox import ResearchboxTool
-from .rss import RSSTool
 from .shell import ShellTool
 from .toolkit import ToolkitTool
 
@@ -59,7 +58,6 @@ def _is_dangerous(command: str) -> bool:
 
 class ToolName(str, Enum):
     SHELL = "shell"
-    RSS = "rss"
     RESEARCHBOX = "researchbox"
     RESEARCHBOX_PUSH = "researchbox_push"
     WEB_FETCH = "web_fetch"
@@ -69,17 +67,22 @@ class ToolName(str, Enum):
     LIST_CUSTOM_TOOLS = "list_custom_tools"
     DELETE_CUSTOM_TOOL = "delete_custom_tool"
     BROWSER = "browser"
+    DB_STORE_ARTICLE = "db_store_article"
+    DB_SEARCH = "db_search"
+    DB_CACHE_STORE = "db_cache_store"
+    DB_CACHE_GET = "db_cache_get"
 
 
 class ToolManager:
     def __init__(self, max_tool_calls_per_turn: int = 1) -> None:
         self.shell = ShellTool()
-        self.rss = RSSTool()
         self.researchbox = ResearchboxTool()
-        self.fetch = FetchTool()
         self.memory = MemoryTool()
         self.toolkit = ToolkitTool()
+        # human_browser container (a12fdfeaaf78) — default for ALL web operations.
         self.browser = BrowserTool()
+        # PostgreSQL-backed storage/cache (replaces rssfeed + fetch services).
+        self.db = DatabaseTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
@@ -240,15 +243,6 @@ class ToolManager:
             "exit $status"
         )
 
-    async def run_rss(
-        self,
-        topic: str,
-        mode: ApprovalMode,
-        confirmer: Callable[[str], Awaitable[bool]] | None,
-    ) -> dict:
-        await self._check_approval(mode, ToolName.RSS.value, confirmer)
-        return await self.rss.news_latest(topic)
-
     async def run_researchbox(
         self,
         topic: str,
@@ -275,8 +269,25 @@ class ToolManager:
         mode: ApprovalMode,
         confirmer: Callable[[str], Awaitable[bool]] | None,
     ) -> dict:
+        """Fetch a URL using the human_browser container (a12fdfeaaf78).
+
+        Returns the same shape as the old aichat-fetch service so all callers
+        remain compatible: {"text": ..., "truncated": ..., "char_count": ...}.
+        """
         await self._check_approval(mode, ToolName.WEB_FETCH.value, confirmer)
-        return await self.fetch.fetch_url(url, max_chars=max_chars)
+        result = await self.browser.navigate(url)
+        content = result.get("content", "")
+        truncated = False
+        if len(content) > max_chars:
+            content = content[:max_chars]
+            truncated = True
+        return {
+            "url": result.get("url", url),
+            "title": result.get("title", ""),
+            "text": content,
+            "char_count": len(content),
+            "truncated": truncated,
+        }
 
     async def run_memory_store(
         self,
@@ -296,6 +307,52 @@ class ToolManager:
     ) -> dict:
         await self._check_approval(mode, ToolName.MEMORY_RECALL.value, confirmer)
         return await self.memory.recall(key)
+
+    # ------------------------------------------------------------------
+    # Database tools (PostgreSQL storage / web cache)
+    # ------------------------------------------------------------------
+
+    async def run_db_store_article(
+        self,
+        url: str,
+        title: str,
+        content: str,
+        topic: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_STORE_ARTICLE.value, confirmer)
+        return await self.db.store_article(url, title=title, content=content, topic=topic)
+
+    async def run_db_search(
+        self,
+        topic: str,
+        q: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_SEARCH.value, confirmer)
+        return await self.db.search_articles(topic=topic or None, q=q or None)
+
+    async def run_db_cache_store(
+        self,
+        url: str,
+        content: str,
+        title: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_CACHE_STORE.value, confirmer)
+        return await self.db.cache_store(url, content, title=title or None)
+
+    async def run_db_cache_get(
+        self,
+        url: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DB_CACHE_GET.value, confirmer)
+        return await self.db.cache_get(url)
 
     # ------------------------------------------------------------------
     # Toolkit meta-tools (create / list / delete / call custom tools)
@@ -378,7 +435,12 @@ class ToolManager:
                 if not code:
                     return {"error": "code is required for eval"}
                 return await self.browser.eval_js(code)
-            return {"error": f"Unknown action '{action}'. Valid: navigate, read, screenshot, click, fill, eval"}
+            return {
+                "error": (
+                    f"Unknown action '{action}'. "
+                    "Valid: navigate, read, screenshot, click, fill, eval"
+                )
+            }
         except Exception as exc:
             return {"error": str(exc)}
 
@@ -391,61 +453,26 @@ class ToolManager:
 
     def tool_definitions(self, shell_enabled: bool) -> list[dict[str, object]]:
         tools: list[dict[str, object]] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "rss_latest",
-                    "description": "Fetch the latest RSS items for a topic from the docker rssfeed service.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "topic": {"type": "string", "description": "Topic to query for recent items."}
-                        },
-                        "required": ["topic"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "researchbox_search",
-                    "description": "Search for RSS feed sources for a topic via the docker researchbox service.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "topic": {"type": "string", "description": "Topic to search for feeds."}
-                        },
-                        "required": ["topic"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "researchbox_push",
-                    "description": "Fetch an RSS feed and store items in the docker rssfeed service.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "feed_url": {"type": "string", "description": "RSS feed URL to ingest."},
-                            "topic": {"type": "string", "description": "Topic label to store items under."},
-                        },
-                        "required": ["feed_url", "topic"],
-                    },
-                },
-            },
+            # ----------------------------------------------------------
+            # Web browsing — all web operations go through human_browser
+            # ----------------------------------------------------------
             {
                 "type": "function",
                 "function": {
                     "name": "web_fetch",
                     "description": (
-                        "Fetch a web page and return its readable text content. "
-                        "Use this to read documentation, articles, GitHub files, or any URL."
+                        "Fetch a web page using the real Chromium browser "
+                        "(human_browser container, ID a12fdfeaaf78) and return its "
+                        "readable text content. Use this to read documentation, "
+                        "articles, GitHub files, or any URL."
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "url": {"type": "string", "description": "The full URL to fetch (http/https)."},
+                            "url": {
+                                "type": "string",
+                                "description": "The full URL to fetch (http/https).",
+                            },
                             "max_chars": {
                                 "type": "integer",
                                 "description": "Maximum characters to return (default 4000, max 16000).",
@@ -455,6 +482,137 @@ class ToolManager:
                     },
                 },
             },
+            # ----------------------------------------------------------
+            # RSS/feed discovery (researchbox)
+            # ----------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "researchbox_search",
+                    "description": "Search for RSS feed sources for a topic via the docker researchbox service.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {
+                                "type": "string",
+                                "description": "Topic to search for feeds.",
+                            }
+                        },
+                        "required": ["topic"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "researchbox_push",
+                    "description": (
+                        "Fetch an RSS feed and store its articles in the PostgreSQL "
+                        "database for later retrieval and comparison."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "feed_url": {
+                                "type": "string",
+                                "description": "RSS feed URL to ingest.",
+                            },
+                            "topic": {
+                                "type": "string",
+                                "description": "Topic label to store articles under.",
+                            },
+                        },
+                        "required": ["feed_url", "topic"],
+                    },
+                },
+            },
+            # ----------------------------------------------------------
+            # PostgreSQL storage / cache
+            # ----------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_store_article",
+                    "description": (
+                        "Store an article (URL, title, content, topic) in the "
+                        "PostgreSQL database for long-term retrieval and comparison "
+                        "with future results."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url":     {"type": "string", "description": "Article URL."},
+                            "title":   {"type": "string", "description": "Article title."},
+                            "content": {"type": "string", "description": "Article text content."},
+                            "topic":   {"type": "string", "description": "Topic label."},
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_search",
+                    "description": (
+                        "Search previously stored articles in the PostgreSQL database. "
+                        "Use to compare new web results against what was stored before."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {
+                                "type": "string",
+                                "description": "Filter by topic (optional).",
+                            },
+                            "q": {
+                                "type": "string",
+                                "description": "Full-text search query (optional).",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_cache_store",
+                    "description": (
+                        "Cache a web page's content in PostgreSQL so it can be retrieved "
+                        "later without re-fetching."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url":     {"type": "string", "description": "Page URL."},
+                            "content": {"type": "string", "description": "Page content to cache."},
+                            "title":   {"type": "string", "description": "Page title (optional)."},
+                        },
+                        "required": ["url", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "db_cache_get",
+                    "description": (
+                        "Retrieve a previously cached web page from PostgreSQL. "
+                        "Returns {found: false} if the URL has not been cached yet."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "Page URL to look up."},
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            # ----------------------------------------------------------
+            # Memory
+            # ----------------------------------------------------------
             {
                 "type": "function",
                 "function": {
@@ -466,7 +624,7 @@ class ToolManager:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "key": {"type": "string", "description": "Short label for this memory entry."},
+                            "key":   {"type": "string", "description": "Short label for this memory entry."},
                             "value": {"type": "string", "description": "Content to remember."},
                         },
                         "required": ["key", "value"],
@@ -561,7 +719,10 @@ class ToolManager:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "tool_name": {"type": "string", "description": "Name of the tool to delete."}
+                            "tool_name": {
+                                "type": "string",
+                                "description": "Name of the tool to delete.",
+                            }
                         },
                         "required": ["tool_name"],
                     },
@@ -569,14 +730,17 @@ class ToolManager:
             },
         ]
 
+        # Browser — human_browser container (ID a12fdfeaaf78)
         tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": "browser",
                     "description": (
-                        "Control a real Chromium browser running in the human_browser Docker container "
-                        "via Playwright. The browser keeps its state between calls (same session), so you "
+                        "Control a real Chromium browser running in the human_browser "
+                        "Docker container (ID a12fdfeaaf78) via Playwright. "
+                        "This is the default for ALL web-related operations. "
+                        "The browser keeps its state between calls (same session), so you "
                         "can navigate to a page, then click a button, then read the result. "
                         "Actions: "
                         "navigate — go to a URL and return page title + text; "
@@ -627,7 +791,10 @@ class ToolManager:
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "command": {"type": "string", "description": "Shell command to execute."}
+                                "command": {
+                                    "type": "string",
+                                    "description": "Shell command to execute.",
+                                }
                             },
                             "required": ["command"],
                         },

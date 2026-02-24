@@ -49,7 +49,7 @@ from .tools.manager import ToolDeniedError, ToolManager
 from .transcript import TranscriptStore
 from .ui.keybind_bar import KeybindBar
 from .ui.keybinds import binding_list, render_keybinds
-from .ui.modals import ChoiceModal, PersonalityAddModal, RssIngestModal, SearchModal, SettingsModal
+from .ui.modals import ChoiceModal, PersonalityAddModal, SearchModal, SettingsModal
 
 
 class ChatMessage(Widget):
@@ -291,49 +291,26 @@ class AIChatApp(App):
                     return
                 await self._create_project(name)
                 return
-            if text.startswith("/rss "):
-                args = text[5:].strip()
-                if not args:
-                    self._write_transcript("Assistant", "RSS command requires a topic.")
+            if text.startswith("/rss ") or text == "/rss":
+                # /rss <topic> now searches the PostgreSQL database for stored articles
+                topic = text[4:].strip() if text.startswith("/rss ") else ""
+                if not topic:
+                    self._write_transcript("Assistant", "Usage: /rss <topic>  — search stored articles by topic.\nTo store new feeds use: /rss store <topic>")
                     return
-                if args.startswith("store "):
-                    topic = args[6:].strip()
-                    if not topic:
+                if topic.startswith("store "):
+                    feed_topic = topic[6:].strip()
+                    if not feed_topic:
                         self._write_transcript("Assistant", "Usage: /rss store <topic>")
                         return
-                    await self._rss_store_topic(topic)
+                    await self._rss_store_topic(feed_topic)
                     return
-                if args.startswith("ingest "):
-                    remainder = args[7:].strip()
-                    if not remainder or " " not in remainder:
-                        self._write_transcript("Assistant", "Usage: /rss ingest <topic> <feed_url>")
-                        return
-                    topic, feed_url = remainder.split(maxsplit=1)
-                    call = ToolCall(
-                        index=0,
-                        name="researchbox_push",
-                        args={"feed_url": feed_url, "topic": topic},
-                        call_id="",
-                        label="researchbox_push",
-                    )
-                    results = await self._run_tool_batch([call])
-                    self._log_tool_results(results)
-                    if any(not res.ok for res in results):
-                        self._notify_tool_failures(results)
-                    else:
-                        self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
-                    return
-                if args == "ingest":
-                    await self._rss_ingest_modal()
-                    return
-                topic = args
-                call = ToolCall(index=0, name="rss_latest", args={"topic": topic}, call_id="", label="rss_latest")
+                call = ToolCall(index=0, name="db_search", args={"topic": topic}, call_id="", label="db_search")
                 results = await self._run_tool_batch([call])
                 self._log_tool_results(results)
                 if any(not res.ok for res in results):
                     self._notify_tool_failures(results)
                 else:
-                    self._write_transcript("Assistant", "RSS fetched. See Tools panel for details.")
+                    self._write_transcript("Assistant", "Database search complete. See Tools panel for details.")
                 return
             if text.startswith("/researchbox "):
                 topic = text[13:].strip()
@@ -347,6 +324,23 @@ class AIChatApp(App):
                     self._notify_tool_failures(results)
                 else:
                     self._write_transcript("Assistant", "Researchbox search complete. See Tools panel for details.")
+                return
+            if text.startswith("/db ") or text == "/db":
+                args_str = text[4:].strip() if text.startswith("/db ") else ""
+                if args_str.startswith("search "):
+                    q = args_str[7:].strip()
+                    if not q:
+                        self._write_transcript("Assistant", "Usage: /db search <query>")
+                        return
+                    call = ToolCall(index=0, name="db_search", args={"q": q}, call_id="", label="db_search")
+                    results = await self._run_tool_batch([call])
+                    self._log_tool_results(results)
+                    if any(not res.ok for res in results):
+                        self._notify_tool_failures(results)
+                    else:
+                        self._write_transcript("Assistant", "Database search complete. See Tools panel for details.")
+                    return
+                self._write_transcript("Assistant", "Usage: /db search <query>")
                 return
             if text.startswith("/endpoint"):
                 new_url = text[len("/endpoint"):].strip()
@@ -367,13 +361,14 @@ class AIChatApp(App):
                 if not url:
                     self._write_transcript("Assistant", "Usage: /fetch <url>")
                     return
+                # web_fetch is routed through the human_browser container (a12fdfeaaf78)
                 call = ToolCall(index=0, name="web_fetch", args={"url": url}, call_id="", label="web_fetch")
                 results = await self._run_tool_batch([call])
                 self._log_tool_results(results)
                 if any(not res.ok for res in results):
                     self._notify_tool_failures(results)
                 else:
-                    self._write_transcript("Assistant", "Fetched. See Tools panel for content.")
+                    self._write_transcript("Assistant", "Fetched via browser. See Tools panel for content.")
                 return
             if text.startswith("/memory "):
                 args_str = text[8:].strip()
@@ -562,12 +557,6 @@ class AIChatApp(App):
         await self._run_followup_response()
 
     async def _execute_tool_call(self, name: str, args: dict[str, object]) -> str:
-        if name == "rss_latest":
-            topic = str(args.get("topic", "")).strip()
-            if not topic:
-                return "rss_latest: missing 'topic'"
-            payload = await self.tools.run_rss(topic, self.state.approval, self._confirm_tool)
-            return json.dumps(payload, ensure_ascii=False)
         if name == "researchbox_search":
             topic = str(args.get("topic", "")).strip()
             if not topic:
@@ -644,6 +633,43 @@ class AIChatApp(App):
             payload = await self.tools.run_delete_custom_tool(
                 tool_name, self.state.approval, self._confirm_tool
             )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "db_store_article":
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "db_store_article: missing 'url'"
+            payload = await self.tools.run_db_store_article(
+                url,
+                str(args.get("title", "")),
+                str(args.get("content", "")),
+                str(args.get("topic", "")),
+                self.state.approval,
+                self._confirm_tool,
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "db_search":
+            payload = await self.tools.run_db_search(
+                str(args.get("topic", "")),
+                str(args.get("q", "")),
+                self.state.approval,
+                self._confirm_tool,
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "db_cache_store":
+            url = str(args.get("url", "")).strip()
+            content = str(args.get("content", "")).strip()
+            if not url or not content:
+                return "db_cache_store: missing 'url' or 'content'"
+            payload = await self.tools.run_db_cache_store(
+                url, content, str(args.get("title", "")),
+                self.state.approval, self._confirm_tool,
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "db_cache_get":
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "db_cache_get: missing 'url'"
+            payload = await self.tools.run_db_cache_get(url, self.state.approval, self._confirm_tool)
             return json.dumps(payload, ensure_ascii=False)
         if name == "browser":
             action = str(args.get("action", "")).strip()
@@ -843,6 +869,7 @@ class AIChatApp(App):
             scroll.remove_children()
 
     async def _rss_store_topic(self, topic: str) -> None:
+        """Discover feeds for a topic and store their articles in PostgreSQL."""
         search_call = ToolCall(
             index=0,
             name="researchbox_search",
@@ -892,36 +919,13 @@ class AIChatApp(App):
             self._notify_tool_failures(push_results)
             self._write_transcript(
                 "Assistant",
-                "If feeds fail to ingest, try https://rssfinder.app/ or https://rss.app/rss-feed and use /rss ingest.",
+                "If feeds fail to store, try https://rssfinder.app/ or https://rss.app/rss-feed.",
             )
             return
         self._write_transcript(
             "Assistant",
-            f"Stored {len(push_calls)} feed(s) for '{topic}'. See Tools panel.",
+            f"Stored {len(push_calls)} feed(s) for '{topic}' in PostgreSQL. See Tools panel.",
         )
-
-    async def _rss_ingest_modal(self) -> None:
-        values = await self._show_modal(RssIngestModal())
-        if not isinstance(values, dict) or not values:
-            return
-        topic = str(values.get("topic", "")).strip()
-        feed_url = str(values.get("feed_url", "")).strip()
-        if not topic or not feed_url:
-            self._write_transcript("Assistant", "Usage: /rss ingest <topic> <feed_url>")
-            return
-        call = ToolCall(
-            index=0,
-            name="researchbox_push",
-            args={"feed_url": feed_url, "topic": topic},
-            call_id="",
-            label="researchbox_push",
-        )
-        results = await self._run_tool_batch([call])
-        self._log_tool_results(results)
-        if any(not res.ok for res in results):
-            self._notify_tool_failures(results)
-            return
-        self._write_transcript("Assistant", f"Stored feed for '{topic}'. See Tools panel.")
 
     async def _handle_personality_command(self, text: str) -> None:
         parts = text.split(maxsplit=2)

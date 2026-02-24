@@ -15,8 +15,10 @@ done
 
 if command -v docker >/dev/null 2>&1; then
   if docker compose version >/dev/null 2>&1; then
-    log "Stopping docker-backed tools (docker compose down --volumes --remove-orphans)."
-    if ! docker compose down --volumes --remove-orphans; then
+    # Preserve the PostgreSQL data volume (aichatdb) so stored articles, images,
+    # and web-cache survive reinstalls.  Use --volumes only for the memory store.
+    log "Stopping docker-backed tools (preserving aichatdb PostgreSQL volume)."
+    if ! docker compose down --remove-orphans; then
       warn "Docker compose failed to stop containers. Check docker permissions and that the daemon is running."
     fi
   else
