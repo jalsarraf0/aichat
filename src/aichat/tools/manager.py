@@ -76,6 +76,7 @@ class ToolName(str, Enum):
     DB_STORE_IMAGE = "db_store_image"
     DB_LIST_IMAGES = "db_list_images"
     SCREENSHOT_SEARCH = "screenshot_search"
+    FETCH_IMAGE = "fetch_image"
 
 
 class ToolManager:
@@ -395,6 +396,53 @@ class ToolManager:
     ) -> dict:
         await self._check_approval(mode, ToolName.DB_LIST_IMAGES.value, confirmer)
         return await self.db.list_images(limit=limit)
+
+    async def run_fetch_image(
+        self,
+        url: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Download an image URL and save it to the workspace; returns host_path + metadata."""
+        import httpx as _httpx
+        from datetime import datetime as _dt
+        import os as _os
+
+        await self._check_approval(mode, ToolName.FETCH_IMAGE.value, confirmer)
+
+        # Derive a clean filename from the URL
+        raw_name = url.split("?")[0].split("/")[-1] or "image"
+        if "." not in raw_name:
+            raw_name += ".jpg"
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"img_{ts}_{raw_name}"
+        host_path = f"/docker/human_browser/workspace/{filename}"
+
+        try:
+            async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                data = r.content
+
+            _os.makedirs(_os.path.dirname(host_path), exist_ok=True)
+            with open(host_path, "wb") as fh:
+                fh.write(data)
+
+            try:
+                await self.db.store_image(url=url, host_path=host_path,
+                                          alt_text=f"Image from {url}")
+            except Exception:
+                pass
+
+            return {
+                "url": url,
+                "host_path": host_path,
+                "content_type": content_type,
+                "size": len(data),
+            }
+        except Exception as exc:
+            return {"url": url, "error": str(exc)}
 
     async def run_screenshot_search(
         self,
@@ -792,6 +840,28 @@ class ToolManager:
                             },
                         },
                         "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fetch_image",
+                    "description": (
+                        "Download an image directly from a URL (jpg, png, gif, webp, etc.) "
+                        "and save it to disk. Returns the file path so the user can open it. "
+                        "Use this when the user provides a direct image URL and wants to view "
+                        "or save it, rather than screenshotting a whole web page."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "Direct URL to the image file (http/https).",
+                            },
+                        },
+                        "required": ["url"],
                     },
                 },
             },

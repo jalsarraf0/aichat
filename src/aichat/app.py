@@ -468,6 +468,38 @@ class AIChatApp(App):
         lines += ["", "Open with `xdg-open <path>` or `eog <path>`."]
         return "\n".join(lines)
 
+    def _format_fetch_image_result(self, payload: dict) -> str:
+        """Format a fetch_image result for the TUI."""
+        error = payload.get("error", "")
+        if error:
+            return f"fetch_image failed: {error}"
+        host_path = payload.get("host_path", "")
+        url = payload.get("url", "")
+        content_type = payload.get("content_type", "")
+        size = payload.get("size", 0)
+        lines = ["**Image saved.**", ""]
+        if host_path:
+            lines += [f"**File:** `{host_path}`", ""]
+        if url:
+            lines += [f"**Source:** {url}", ""]
+        if content_type or size:
+            meta = []
+            if content_type:
+                meta.append(content_type)
+            if size:
+                meta.append(f"{size:,} bytes")
+            lines += [f"**Info:** {' — '.join(meta)}", ""]
+        if host_path:
+            lines += [
+                "**Open with:**",
+                "```",
+                f"xdg-open {host_path}",
+                "```",
+                "",
+                "_Saved to the image database. Use `/screenshots` to list all saved images._",
+            ]
+        return "\n".join(lines)
+
     def _format_screenshot_search_result(self, payload: dict) -> str:
         """Format the result of screenshot_search for the TUI."""
         query = payload.get("query", "")
@@ -807,6 +839,12 @@ class AIChatApp(App):
             if action == "screenshot":
                 return self._format_screenshot_result(payload)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "fetch_image":
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "fetch_image: 'url' is required"
+            payload = await self.tools.run_fetch_image(url, self.state.approval, self._confirm_tool)
+            return self._format_fetch_image_result(payload)
         if name == "screenshot_search":
             query = str(args.get("query", "")).strip()
             if not query:
