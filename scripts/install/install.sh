@@ -66,6 +66,22 @@ if command -v docker >/dev/null 2>&1; then
     if ! docker compose up -d --build; then
       warn "Docker compose failed to start containers. Check docker permissions and that the daemon is running."
     fi
+    # Connect human_browser to the aichat compose network so the MCP container
+    # can reach it by hostname (human_browser:7081) for screenshot capture.
+    AICHAT_NET="$(docker compose ps -q 2>/dev/null | head -1 | xargs -r docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null | head -1 || echo '')"
+    if [[ -z "$AICHAT_NET" ]]; then
+      AICHAT_NET="aichat_default"
+    fi
+    if docker inspect human_browser >/dev/null 2>&1; then
+      if ! docker inspect human_browser --format '{{json .NetworkSettings.Networks}}' | grep -q "\"${AICHAT_NET}\""; then
+        log "Connecting human_browser to ${AICHAT_NET} for MCP screenshot access."
+        docker network connect "$AICHAT_NET" human_browser 2>/dev/null || warn "Could not connect human_browser to ${AICHAT_NET} (may already be connected)."
+      else
+        log "human_browser already connected to ${AICHAT_NET}."
+      fi
+    else
+      warn "human_browser container not found — screenshot tool will be unavailable until it is running."
+    fi
   else
     warn "Docker is installed, but the 'docker compose' plugin is unavailable or permission was denied."
   fi

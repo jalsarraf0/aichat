@@ -46,6 +46,12 @@ services:
       DATABASE_URL: http://aichat-database:8091
       MEMORY_URL:   http://aichat-memory:8094
       RESEARCH_URL: http://aichat-researchbox:8092
+      # human_browser is connected to this network by the install script
+      # so it is reachable by hostname from within the container.
+      BROWSER_URL:  http://human_browser:7081
+    volumes:
+      # Read the screenshot PNGs that the browser server writes to /workspace
+      - /docker/human_browser/workspace:/browser-workspace:ro
     depends_on:
       - aichat-database
       - aichat-memory
