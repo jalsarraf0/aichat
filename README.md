@@ -49,7 +49,7 @@ aichat
 bash uninstall.sh
 ```
 
-Removes the virtualenv, launcher, and brings down Docker containers with `docker compose down --volumes --remove-orphans`.
+Removes the virtualenv, launcher, and brings down Docker containers with `docker compose down --remove-orphans`. The PostgreSQL data volume (`aichatdb`) is preserved so stored articles and web cache survive reinstalls.
 
 ---
 
@@ -363,6 +363,12 @@ docker logs human_browser
 
 `aichat-mcp` exposes all aichat tools over the network via the Model Context Protocol.
 It supports both SSE (legacy) and Streamable HTTP (MCP 2025-03-26) transports.
+
+Available MCP tools: `screenshot`, `fetch_image`, `screenshot_search`, `web_search`,
+`web_fetch`, `browser` (navigate/read/click/fill/eval), `db_store_article`, `db_search`,
+`db_cache_store`, `db_cache_get`, `db_store_image`, `db_list_images`, `memory_store`,
+`memory_recall`, `researchbox_search`, `researchbox_push`, `create_tool`,
+`list_custom_tools`, `delete_custom_tool`, `call_custom_tool`.
 
 Tool calls are **non-blocking** — both POST /messages (SSE transport) and POST /mcp
 (Streamable HTTP) return immediately (202 / SSE keepalives) and deliver results

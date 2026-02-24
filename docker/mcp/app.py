@@ -67,6 +67,7 @@ app.add_middleware(
 DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-memory:8094")
 RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-researchbox:8092")
+TOOLKIT_URL   = os.environ.get("TOOLKIT_URL",  "http://aichat-toolkit:8095")
 # human_browser browser-server API — reachable after install connects it to this network.
 BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
 # Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
@@ -167,7 +168,7 @@ _TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "Topic or query to search and screenshot."},
                 "max_results": {
                     "type": "integer",
-                    "description": "Number of result pages to screenshot (default 3, max 5).",
+                    "description": "Number of result pages to screenshot (default 3, max 3).",
                 },
             },
             "required": ["query"],
@@ -323,6 +324,131 @@ _TOOLS: list[dict[str, Any]] = [
                 "topic":    {"type": "string"},
             },
             "required": ["feed_url", "topic"],
+        },
+    },
+    {
+        "name": "browser",
+        "description": (
+            "Control a real Chromium browser running in the human_browser Docker container "
+            "via Playwright. The browser keeps its state between calls (same live session), "
+            "so you can navigate to a page, click a button, fill a form, then read the result. "
+            "Actions: "
+            "navigate — go to a URL and return page title + readable text; "
+            "read — return the current page title + text without navigating; "
+            "click — click a CSS selector and return updated content; "
+            "fill — type text into a CSS selector input; "
+            "eval — run a JavaScript expression and return its result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["navigate", "read", "click", "fill", "eval"],
+                    "description": "Which browser action to perform.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "URL to navigate to (navigate action only).",
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector for click / fill actions.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Text to type into the element (fill action only).",
+                },
+                "code": {
+                    "type": "string",
+                    "description": "JavaScript expression to evaluate (eval action only).",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "create_tool",
+        "description": (
+            "Create a new persistent custom tool that runs inside the aichat-toolkit Docker "
+            "sandbox. The tool is saved to disk and immediately available — in this session "
+            "and all future sessions. Use this when you need a capability not covered by "
+            "built-in tools. Tools can make HTTP calls (httpx), process data, call APIs, "
+            "run shell commands (subprocess/asyncio.create_subprocess_exec), and read files "
+            "from user repos at /data/repos."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Snake_case identifier (e.g. 'get_stock_price').",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the tool does — shown when deciding which tool to call.",
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": (
+                        "JSON Schema object for the tool's inputs. Example: "
+                        '{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}'
+                    ),
+                },
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python implementation — the body of `async def run(**kwargs) -> str:`. "
+                        "Available: asyncio, json, re, os, math, datetime, pathlib, shlex, "
+                        "subprocess, httpx. Access parameters via kwargs. Must return a string."
+                    ),
+                },
+            },
+            "required": ["tool_name", "description", "code"],
+        },
+    },
+    {
+        "name": "list_custom_tools",
+        "description": "List all custom tools previously created, with names, descriptions, and parameter schemas.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "delete_custom_tool",
+        "description": "Permanently delete a custom tool you previously created.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Name of the tool to delete.",
+                },
+            },
+            "required": ["tool_name"],
+        },
+    },
+    {
+        "name": "call_custom_tool",
+        "description": (
+            "Call a previously created custom tool by name. "
+            "Use list_custom_tools first to see available tool names and their parameter schemas."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Name of the custom tool to call.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Parameters to pass to the tool (must match its schema).",
+                },
+            },
+            "required": ["tool_name"],
         },
     },
 ]
@@ -513,7 +639,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 if not query:
                     return _text("screenshot_search: 'query' is required")
-                max_results = max(1, min(int(args.get("max_results", 1)), 3))
+                max_results = max(1, min(int(args.get("max_results", 3)), 3))
 
                 # Search DuckDuckGo HTML for result URLs (realistic headers)
                 try:
@@ -769,8 +895,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     alt = img.get("alt_text", "")
                     ts = img.get("stored_at", "")[:19].replace("T", " ")
                     lines.append(f"  {hp}" + (f"  [{alt}]" if alt else "") + (f"  {ts}" if ts else ""))
-                # Inline the most recent image
-                most_recent = images[0].get("path", "") or ""  # container path if available
+                # Inline the most recent image — derive container path from host_path basename
+                hp0 = images[0].get("host_path", "") or ""
+                most_recent = f"/workspace/{os.path.basename(hp0)}" if hp0 else ""
                 return _image_blocks(most_recent, "\n".join(lines))
 
             # ----------------------------------------------------------------
@@ -788,6 +915,122 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
             if name == "researchbox_push":
                 r = await c.post(f"{RESEARCH_URL}/push-feed", json=args)
+                return _text(json.dumps(r.json()))
+
+            # ----------------------------------------------------------------
+            if name == "browser":
+                action = str(args.get("action", "")).strip()
+                if not action:
+                    return _text("browser: 'action' is required")
+                if action == "navigate":
+                    url = str(args.get("url", "")).strip()
+                    if not url:
+                        return _text("browser navigate: 'url' is required")
+                    try:
+                        nav_r = await asyncio.wait_for(
+                            c.post(f"{BROWSER_URL}/navigate", json={"url": url}),
+                            timeout=20.0,
+                        )
+                        data = nav_r.json()
+                        content = data.get("content", "")
+                        title = data.get("title", "")
+                        final_url = data.get("url", url)
+                        header = f"Title: {title}\nURL: {final_url}\n\n" if title else ""
+                        return _text((header + content)[:8000])
+                    except Exception as exc:
+                        return _text(f"browser navigate failed: {exc}")
+                if action == "read":
+                    try:
+                        read_r = await c.get(f"{BROWSER_URL}/read", timeout=10.0)
+                        data = read_r.json()
+                        content = data.get("content", "")
+                        title = data.get("title", "")
+                        header = f"Title: {title}\n\n" if title else ""
+                        return _text((header + content)[:8000])
+                    except Exception as exc:
+                        return _text(f"browser read failed: {exc}")
+                if action == "click":
+                    selector = str(args.get("selector", "")).strip()
+                    if not selector:
+                        return _text("browser click: 'selector' is required")
+                    try:
+                        click_r = await c.post(
+                            f"{BROWSER_URL}/click", json={"selector": selector}, timeout=10.0
+                        )
+                        data = click_r.json()
+                        return _text(data.get("content", "Clicked."))
+                    except Exception as exc:
+                        return _text(f"browser click failed: {exc}")
+                if action == "fill":
+                    selector = str(args.get("selector", "")).strip()
+                    value = str(args.get("value", ""))
+                    if not selector:
+                        return _text("browser fill: 'selector' is required")
+                    try:
+                        fill_r = await c.post(
+                            f"{BROWSER_URL}/fill",
+                            json={"selector": selector, "value": value},
+                            timeout=10.0,
+                        )
+                        data = fill_r.json()
+                        return _text(data.get("content", "Filled."))
+                    except Exception as exc:
+                        return _text(f"browser fill failed: {exc}")
+                if action == "eval":
+                    code = str(args.get("code", "")).strip()
+                    if not code:
+                        return _text("browser eval: 'code' is required")
+                    try:
+                        eval_r = await c.post(
+                            f"{BROWSER_URL}/eval", json={"code": code}, timeout=10.0
+                        )
+                        data = eval_r.json()
+                        return _text(str(data.get("result", "")))
+                    except Exception as exc:
+                        return _text(f"browser eval failed: {exc}")
+                return _text(f"browser: unknown action '{action}'")
+
+            # ----------------------------------------------------------------
+            if name == "create_tool":
+                tool_name = str(args.get("tool_name", "")).strip()
+                description = str(args.get("description", "")).strip()
+                parameters = args.get("parameters", {})
+                code = str(args.get("code", "")).strip()
+                if not tool_name or not description or not code:
+                    return _text("create_tool: 'tool_name', 'description', and 'code' are required")
+                r = await c.post(
+                    f"{TOOLKIT_URL}/register",
+                    json={
+                        "tool_name": tool_name,
+                        "description": description,
+                        "parameters": parameters,
+                        "code": code,
+                    },
+                    timeout=10.0,
+                )
+                return _text(json.dumps(r.json()))
+
+            if name == "list_custom_tools":
+                r = await c.get(f"{TOOLKIT_URL}/tools", timeout=10.0)
+                return _text(json.dumps(r.json()))
+
+            if name == "delete_custom_tool":
+                tool_name = str(args.get("tool_name", "")).strip()
+                if not tool_name:
+                    return _text("delete_custom_tool: 'tool_name' is required")
+                r = await c.delete(f"{TOOLKIT_URL}/tool/{tool_name}", timeout=10.0)
+                return _text(json.dumps(r.json()))
+
+            if name == "call_custom_tool":
+                tool_name = str(args.get("tool_name", "")).strip()
+                params = args.get("params", {})
+                if not tool_name:
+                    return _text("call_custom_tool: 'tool_name' is required")
+                r = await c.post(
+                    f"{TOOLKIT_URL}/call/{tool_name}",
+                    json={"params": params},
+                    timeout=30.0,
+                )
                 return _text(json.dumps(r.json()))
 
             return _text(f"Unknown tool: {name}")
