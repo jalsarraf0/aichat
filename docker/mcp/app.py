@@ -65,15 +65,25 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "screenshot",
         "description": (
-            "Take a screenshot of any URL using the real Chromium browser and return it as an "
-            "inline image rendered directly in the chat. The screenshot is also saved to the "
-            "PostgreSQL image registry for later retrieval. "
-            "Use this whenever you want to visually inspect a web page."
+            "Take a screenshot of a specific URL using the real Chromium browser and return it "
+            "as an inline image rendered directly in the chat. "
+            "The screenshot is also saved to the PostgreSQL image registry. "
+            "IMPORTANT: Always use the exact URL from the user's request or from a prior "
+            "web_search result. Never substitute a placeholder like example.com. "
+            "If the user asks to screenshot a topic or site name rather than a full URL, "
+            "call web_search first to find the correct URL, then call screenshot with that URL."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Full URL to screenshot (http/https)."},
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "The exact URL to screenshot (must start with http:// or https://). "
+                        "Do NOT use example.com or any placeholder — use the real URL from "
+                        "the user's message or from a web_search result."
+                    ),
+                },
             },
             "required": ["url"],
         },
@@ -81,9 +91,10 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "web_search",
         "description": (
-            "Search the web using a tiered strategy: "
-            "Tier 2 — direct httpx HTTP fetch of DuckDuckGo HTML; "
-            "Tier 3 — DuckDuckGo lite API. Returns results text."
+            "Search the web and return result text. Use this to find the correct URL for a "
+            "site or topic before calling screenshot. "
+            "Tier 2 — direct httpx fetch of DuckDuckGo HTML; "
+            "Tier 3 — DuckDuckGo lite API fallback."
         ),
         "inputSchema": {
             "type": "object",
