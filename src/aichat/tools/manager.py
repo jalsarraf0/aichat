@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from enum import Enum
 
 from ..state import ApprovalMode
+from .browser import BrowserTool
 from .fetch import FetchTool
 from .memory import MemoryTool
 from .researchbox import ResearchboxTool
@@ -67,6 +68,7 @@ class ToolName(str, Enum):
     CREATE_TOOL = "create_tool"
     LIST_CUSTOM_TOOLS = "list_custom_tools"
     DELETE_CUSTOM_TOOL = "delete_custom_tool"
+    BROWSER = "browser"
 
 
 class ToolManager:
@@ -77,6 +79,7 @@ class ToolManager:
         self.fetch = FetchTool()
         self.memory = MemoryTool()
         self.toolkit = ToolkitTool()
+        self.browser = BrowserTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
@@ -343,6 +346,42 @@ class ToolManager:
         await self._check_approval(mode, tool_name, confirmer)
         return await self.toolkit.call_tool(tool_name, params)
 
+    async def run_browser(
+        self,
+        action: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+        url: str | None = None,
+        selector: str | None = None,
+        value: str | None = None,
+        code: str | None = None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
+        try:
+            if action == "navigate":
+                if not url:
+                    return {"error": "url is required for navigate"}
+                return await self.browser.navigate(url)
+            if action == "screenshot":
+                return await self.browser.screenshot(url)
+            if action == "click":
+                if not selector:
+                    return {"error": "selector is required for click"}
+                return await self.browser.click(selector)
+            if action == "fill":
+                if not selector or value is None:
+                    return {"error": "selector and value are required for fill"}
+                return await self.browser.fill(selector, value)
+            if action == "read":
+                return await self.browser.read()
+            if action == "eval":
+                if not code:
+                    return {"error": "code is required for eval"}
+                return await self.browser.eval_js(code)
+            return {"error": f"Unknown action '{action}'. Valid: navigate, read, screenshot, click, fill, eval"}
+        except Exception as exc:
+            return {"error": str(exc)}
+
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
 
@@ -529,6 +568,54 @@ class ToolManager:
                 },
             },
         ]
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser",
+                    "description": (
+                        "Control a real Chromium browser running in the human_browser Docker container "
+                        "via Playwright. The browser keeps its state between calls (same session), so you "
+                        "can navigate to a page, then click a button, then read the result. "
+                        "Actions: "
+                        "navigate — go to a URL and return page title + text; "
+                        "read — return the current page title + text without navigating; "
+                        "screenshot — capture the page as a PNG saved to /workspace (returns file path); "
+                        "click — click a CSS selector; "
+                        "fill — type a value into a CSS selector input; "
+                        "eval — run a JavaScript expression and return its result."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["navigate", "read", "screenshot", "click", "fill", "eval"],
+                                "description": "Which browser action to perform.",
+                            },
+                            "url": {
+                                "type": "string",
+                                "description": "URL to navigate to (navigate / screenshot).",
+                            },
+                            "selector": {
+                                "type": "string",
+                                "description": "CSS selector for click / fill.",
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "Text to type into the element (fill only).",
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": "JavaScript expression to evaluate (eval only).",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
+            }
+        )
 
         if shell_enabled:
             tools.append(
