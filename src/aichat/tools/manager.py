@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from enum import Enum
 
 from ..state import ApprovalMode
+from .fetch import FetchTool
+from .memory import MemoryTool
 from .researchbox import ResearchboxTool
 from .rss import RSSTool
 from .shell import ShellTool
@@ -21,6 +23,9 @@ class ToolName(str, Enum):
     RSS = "rss"
     RESEARCHBOX = "researchbox"
     RESEARCHBOX_PUSH = "researchbox_push"
+    WEB_FETCH = "web_fetch"
+    MEMORY_STORE = "memory_store"
+    MEMORY_RECALL = "memory_recall"
 
 
 class ToolManager:
@@ -28,6 +33,8 @@ class ToolManager:
         self.shell = ShellTool()
         self.rss = RSSTool()
         self.researchbox = ResearchboxTool()
+        self.fetch = FetchTool()
+        self.memory = MemoryTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
 
@@ -184,6 +191,35 @@ class ToolManager:
         await self._check_approval(mode, ToolName.RESEARCHBOX_PUSH.value, confirmer)
         return await self.researchbox.rb_push_feeds(feed_url, topic)
 
+    async def run_web_fetch(
+        self,
+        url: str,
+        max_chars: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.WEB_FETCH.value, confirmer)
+        return await self.fetch.fetch_url(url, max_chars=max_chars)
+
+    async def run_memory_store(
+        self,
+        key: str,
+        value: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.MEMORY_STORE.value, confirmer)
+        return await self.memory.store(key, value)
+
+    async def run_memory_recall(
+        self,
+        key: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.MEMORY_RECALL.value, confirmer)
+        return await self.memory.recall(key)
+
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
 
@@ -229,6 +265,67 @@ class ToolManager:
                             "topic": {"type": "string", "description": "Topic label to store items under."},
                         },
                         "required": ["feed_url", "topic"],
+                    },
+                },
+            },
+        ]
+        tools += [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": (
+                        "Fetch a web page and return its readable text content. "
+                        "Use this to read documentation, articles, GitHub files, or any URL."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "The full URL to fetch (http/https)."},
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "Maximum characters to return (default 4000, max 16000).",
+                            },
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_store",
+                    "description": (
+                        "Store a note or fact in persistent memory for recall later. "
+                        "Storing the same key overwrites the previous value."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "Short label for this memory entry."},
+                            "value": {"type": "string", "description": "Content to remember."},
+                        },
+                        "required": ["key", "value"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_recall",
+                    "description": (
+                        "Retrieve notes from persistent memory. "
+                        "Provide a key to look up a specific entry, or leave empty to list all stored keys."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": {
+                                "type": "string",
+                                "description": "Key to look up (omit or empty string to list all).",
+                            }
+                        },
+                        "required": [],
                     },
                 },
             },

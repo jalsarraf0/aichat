@@ -13,6 +13,10 @@ class SanitizedResponse:
 _THINK_RE = re.compile(r"(?is)<think>.*?</think>")
 _ANALYSIS_RE = re.compile(r"(?is)<analysis>.*?</analysis>")
 _LEADING_TAG_RE = re.compile(r"^\s*(<[^>\n]+>\s*)+", re.MULTILINE)
+# GLM-4 and similar models wrap final answers in box tokens.
+_BOX_RE = re.compile(r"<\|begin_of_box\|>(.*?)<\|end_of_box\|>", re.DOTALL)
+# Generic pipe-delimited special tokens, e.g. <|im_start|>, <|eot_id|>
+_PIPE_TOKEN_RE = re.compile(r"<\|[a-z_]+\|>")
 
 
 def sanitize_response(text: str) -> SanitizedResponse:
@@ -20,6 +24,10 @@ def sanitize_response(text: str) -> SanitizedResponse:
     cleaned = _THINK_RE.sub("", raw)
     cleaned = _ANALYSIS_RE.sub("", cleaned)
     cleaned = cleaned.replace("</think>", "").replace("<think>", "")
+    # Unwrap GLM-4 box tokens — keep the content inside.
+    cleaned = _BOX_RE.sub(lambda m: m.group(1), cleaned)
+    # Strip leftover pipe-delimited special tokens.
+    cleaned = _PIPE_TOKEN_RE.sub("", cleaned)
     cleaned = _LEADING_TAG_RE.sub("", cleaned)
     lines = [line.rstrip() for line in cleaned.splitlines()]
     cleaned = "\n".join(lines).strip()
