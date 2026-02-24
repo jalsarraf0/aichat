@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "2"
+_REQUIRED_SERVER_VERSION = "3"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,10 +40,11 @@ _REQUIRED_SERVER_VERSION = "2"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v2"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v3"""
 from __future__ import annotations
 
 import asyncio
+import random as _random
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -52,14 +53,36 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "2"
+_VERSION = "3"
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-_STEALTH_JS = (
-    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-)
+# Extended stealth: hide automation signals, spoof navigator properties,
+# restore chrome runtime so sites don\'t detect a bare Chromium shell.
+_STEALTH_JS = """
+Object.defineProperty(navigator, \'webdriver\', {get: () => undefined});
+Object.defineProperty(navigator, \'plugins\', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, \'languages\', {get: () => [\'en-US\', \'en\']});
+window.chrome = {runtime: {}};
+try {
+    const origQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (p) =>
+        p.name === \'notifications\'
+        ? Promise.resolve({state: Notification.permission})
+        : origQuery(p);
+} catch(_) {}
+"""
+
+# Pool of common desktop viewport sizes — picked randomly each new context
+# to avoid the fixed-1920×1080 fingerprint.
+_VIEWPORTS = [
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1920, "height": 1080},
+    {"width": 1280, "height": 720},
+    {"width": 1536, "height": 864},
+]
 
 _pw = _browser = _context = _page = None
 _page_lock = None  # asyncio.Lock — created lazily inside first async call
@@ -67,9 +90,10 @@ _page_lock = None  # asyncio.Lock — created lazily inside first async call
 
 async def _new_context():
     global _context
+    vp = _random.choice(_VIEWPORTS)
     _context = await _browser.new_context(
         user_agent=_UA,
-        viewport={"width": 1920, "height": 1080},
+        viewport=vp,
         locale="en-US",
     )
     await _context.add_init_script(_STEALTH_JS)
@@ -308,6 +332,14 @@ async def screenshot(req: ScreenshotReq):
             except Exception as exc2:
                 nav_error = str(exc2)
     try:
+        # Simulate a human briefly reading/scrolling before the screenshot
+        await asyncio.sleep(_random.uniform(0.5, 1.5))
+        scroll_px = _random.randint(80, 350)
+        try:
+            await page.evaluate(f"window.scrollBy(0, {scroll_px})")
+            await asyncio.sleep(_random.uniform(0.2, 0.6))
+        except Exception:
+            pass
         await page.screenshot(path=req.path, full_page=False)
         result = {"path": req.path, "title": await page.title(), "url": page.url}
         if nav_error:
@@ -348,11 +380,15 @@ class SearchReq(BaseModel):
 
 @app.post("/search")
 async def search(req: SearchReq):
-    """Human-like search: navigate to DuckDuckGo, type query, submit, return results."""
+    """Human-like search: navigate to DuckDuckGo, type with realistic delays, submit."""
     try:
         page = await _ensure_page()
         await _safe_goto(page, "https://duckduckgo.com")
-        await page.fill("input[name='q']", req.query)
+        # Click search box, pause like a real user, then type character-by-character
+        await page.click("input[name='q']")
+        await asyncio.sleep(_random.uniform(0.3, 0.7))
+        await page.type("input[name='q']", req.query, delay=_random.randint(60, 140))
+        await asyncio.sleep(_random.uniform(0.3, 0.8))
         await page.keyboard.press("Enter")
         try:
             await page.wait_for_load_state("networkidle", timeout=15000)

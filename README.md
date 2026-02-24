@@ -217,7 +217,15 @@ docker run -d --name human_browser \
 
 On first use, aichat automatically deploys the Playwright API server into the container and starts it. No manual steps needed after the container is running.
 
-The browser server **auto-upgrades** when a newer version is detected — simply use aichat and it will redeploy transparently. Anti-bot stealth headers are applied automatically (spoofed user-agent, disabled `webdriver` flag).
+The browser server **auto-upgrades** when a newer version is detected — simply use aichat and it will redeploy transparently. The v3 server includes:
+
+- **Extended stealth**: spoofs `navigator.plugins`, `navigator.languages`, `window.chrome.runtime`, and the Permissions API — not just the `webdriver` flag
+- **Randomized viewport**: picks from common desktop sizes (1366×768, 1440×900, 1920×1080, etc.) to avoid a fixed fingerprint
+- **Human-like typing**: DuckDuckGo searches use `page.type()` with random per-keystroke delays (60–140 ms) and a natural pause before submitting
+- **Pre-screenshot scroll**: simulates a user scrolling the page before capturing
+- **Image fallback pipeline**: if a screenshot is blocked, the tool extracts `<img>` URLs from the page DOM and returns the first downloadable image inline
+
+All httpx-based fetches (web_search, screenshot_search, web_fetch) use full Chrome browser headers (`Accept`, `Sec-Fetch-*`, `DNT`, etc.) and, for screenshot_search, a 2–5 second random pause between consecutive page loads to avoid triggering rate limits.
 
 **Actions:**
 
@@ -232,7 +240,7 @@ The browser server **auto-upgrades** when a newer version is detected — simply
 
 The browser session persists between calls — navigate, click, fill, read all operate on the same live page.
 
-If a screenshot fails (e.g. the page blocks headless browsers), the tool automatically falls back to downloading image URLs found in the page DOM.
+If a screenshot fails (e.g. the page blocks headless browsers), the MCP server and aichat TUI both automatically fall back to fetching a real image from the page DOM and returning it inline.
 
 The noVNC web UI is accessible at `http://localhost:36411` to watch the browser in real time.
 
