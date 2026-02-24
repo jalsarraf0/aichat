@@ -46,6 +46,7 @@ services:
       DATABASE_URL: http://aichat-database:8091
       MEMORY_URL:   http://aichat-memory:8094
       RESEARCH_URL: http://aichat-researchbox:8092
+      TOOLKIT_URL:  http://aichat-toolkit:8095
       # human_browser is connected to this network by the install script
       # so it is reachable by hostname from within the container.
       BROWSER_URL:  http://human_browser:7081
