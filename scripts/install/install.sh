@@ -53,6 +53,9 @@ if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
   warn "export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
+log "Creating aichat config directories."
+mkdir -p "${HOME}/.config/aichat/tools"
+
 if command -v docker >/dev/null 2>&1; then
   if ! groups | tr ' ' '\n' | grep -qx docker; then
     warn "Docker is installed, but your user may not be in the 'docker' group."

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ from .memory import MemoryTool
 from .researchbox import ResearchboxTool
 from .rss import RSSTool
 from .shell import ShellTool
+from .toolkit import ToolkitTool
 
 
 class ToolDeniedError(RuntimeError):
@@ -26,6 +28,9 @@ class ToolName(str, Enum):
     WEB_FETCH = "web_fetch"
     MEMORY_STORE = "memory_store"
     MEMORY_RECALL = "memory_recall"
+    CREATE_TOOL = "create_tool"
+    LIST_CUSTOM_TOOLS = "list_custom_tools"
+    DELETE_CUSTOM_TOOL = "delete_custom_tool"
 
 
 class ToolManager:
@@ -35,11 +40,37 @@ class ToolManager:
         self.researchbox = ResearchboxTool()
         self.fetch = FetchTool()
         self.memory = MemoryTool()
+        self.toolkit = ToolkitTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
+        # name → {description, parameters} for custom tools loaded from toolkit
+        self._custom_tools: dict[str, dict] = {}
 
     def reset_turn(self) -> None:
         self._calls_this_turn = 0
+
+    # ------------------------------------------------------------------
+    # Custom tool registry
+    # ------------------------------------------------------------------
+
+    async def refresh_custom_tools(self) -> None:
+        """Reload custom tool metadata from the toolkit service."""
+        try:
+            tools = await self.toolkit.list_tools()
+            self._custom_tools = {
+                t["name"]: {"description": t["description"], "parameters": t["parameters"]}
+                for t in tools
+            }
+        except Exception:
+            # Toolkit service unavailable — keep last known state
+            pass
+
+    def is_custom_tool(self, name: str) -> bool:
+        return name in self._custom_tools
+
+    # ------------------------------------------------------------------
+    # Approval gate
+    # ------------------------------------------------------------------
 
     async def _check_approval(
         self,
@@ -55,6 +86,10 @@ class ToolManager:
             if confirmer is None or not await confirmer(tool):
                 raise ToolDeniedError(f"Tool '{tool}' rejected by user")
         self._calls_this_turn += 1
+
+    # ------------------------------------------------------------------
+    # Built-in tools
+    # ------------------------------------------------------------------
 
     async def run_shell(
         self,
@@ -122,7 +157,6 @@ class ToolManager:
                         on_output(before)
                 cwd_value = after.strip() or None
                 buffer = ""
-                # ignore anything after marker
                 continue
             if len(buffer) > len(marker_token):
                 safe = buffer[:-len(marker_token)]
@@ -220,8 +254,61 @@ class ToolManager:
         await self._check_approval(mode, ToolName.MEMORY_RECALL.value, confirmer)
         return await self.memory.recall(key)
 
+    # ------------------------------------------------------------------
+    # Toolkit meta-tools (create / list / delete / call custom tools)
+    # ------------------------------------------------------------------
+
+    async def run_create_tool(
+        self,
+        tool_name: str,
+        description: str,
+        parameters: dict,
+        code: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.CREATE_TOOL.value, confirmer)
+        result = await self.toolkit.register_tool(tool_name, description, parameters, code)
+        await self.refresh_custom_tools()
+        return result
+
+    async def run_list_custom_tools(
+        self,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> list[dict]:
+        await self._check_approval(mode, ToolName.LIST_CUSTOM_TOOLS.value, confirmer)
+        tools = await self.toolkit.list_tools()
+        await self.refresh_custom_tools()
+        return tools
+
+    async def run_delete_custom_tool(
+        self,
+        tool_name: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.DELETE_CUSTOM_TOOL.value, confirmer)
+        result = await self.toolkit.delete_tool(tool_name)
+        await self.refresh_custom_tools()
+        return result
+
+    async def run_custom_tool(
+        self,
+        tool_name: str,
+        params: dict,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, tool_name, confirmer)
+        return await self.toolkit.call_tool(tool_name, params)
+
     def active_sessions(self) -> list[str]:
         return [f"shell:{sid}" for sid in self.shell.sessions]
+
+    # ------------------------------------------------------------------
+    # Tool definitions (sent to LLM each turn)
+    # ------------------------------------------------------------------
 
     def tool_definitions(self, shell_enabled: bool) -> list[dict[str, object]]:
         tools: list[dict[str, object]] = [
@@ -268,8 +355,6 @@ class ToolManager:
                     },
                 },
             },
-        ]
-        tools += [
             {
                 "type": "function",
                 "function": {
@@ -329,7 +414,79 @@ class ToolManager:
                     },
                 },
             },
+            # ----------------------------------------------------------
+            # Toolkit meta-tools
+            # ----------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_tool",
+                    "description": (
+                        "Create a new persistent custom tool that runs in an isolated Docker container. "
+                        "The tool is saved to disk and immediately available for use — in this session "
+                        "and all future sessions. Use this whenever you need a capability not covered "
+                        "by the built-in tools. You can make HTTP calls (httpx), process data, parse "
+                        "HTML, call APIs, etc. Tools persist across restarts."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {
+                                "type": "string",
+                                "description": "Snake_case identifier (e.g. 'search_wikipedia', 'get_stock_price').",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "What the tool does — shown to you when deciding which tool to call.",
+                            },
+                            "parameters_schema": {
+                                "type": "object",
+                                "description": (
+                                    "JSON Schema object for the tool's inputs. Example: "
+                                    '{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}'
+                                ),
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": (
+                                    "Python implementation — the body of `async def run(**kwargs) -> str:`. "
+                                    "Available: asyncio, json, re, os, math, datetime, pathlib, httpx. "
+                                    "Access parameters via kwargs. Must return a string."
+                                ),
+                            },
+                        },
+                        "required": ["tool_name", "description", "parameters_schema", "code"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_custom_tools",
+                    "description": "List all custom tools you have created, with their names, descriptions, and parameter schemas.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_custom_tool",
+                    "description": "Permanently delete a custom tool you previously created.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {"type": "string", "description": "Name of the tool to delete."}
+                        },
+                        "required": ["tool_name"],
+                    },
+                },
+            },
         ]
+
         if shell_enabled:
             tools.append(
                 {
@@ -347,4 +504,21 @@ class ToolManager:
                     },
                 }
             )
+
+        # Append any currently registered custom tools so the LLM can call them
+        for name, meta in self._custom_tools.items():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": meta.get("description", "Custom tool."),
+                        "parameters": meta.get(
+                            "parameters",
+                            {"type": "object", "properties": {}, "required": []},
+                        ),
+                    },
+                }
+            )
+
         return tools
