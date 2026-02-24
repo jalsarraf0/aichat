@@ -355,6 +355,51 @@ class TestToolManagerDispatch:
             result = await mgr.run_delete_custom_tool("my_tool", ApprovalMode.AUTO, None)
             assert result["status"] == "deleted"
 
+    @pytest.mark.asyncio
+    async def test_run_web_search_tier1_mocked(self):
+        """web_search tier 1: browser returns content → used directly."""
+        mgr = ToolManager()
+        with patch.object(mgr.search_tool, "search", new=AsyncMock(
+            return_value={
+                "query": "python asyncio",
+                "tier": 1,
+                "tier_name": "browser (human-like)",
+                "url": "https://duckduckgo.com/?q=python+asyncio",
+                "content": "Python asyncio documentation...",
+            }
+        )):
+            result = await mgr.run_web_search("python asyncio", 4000, ApprovalMode.AUTO, None)
+            assert result["tier"] == 1
+            assert "asyncio" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_run_web_search_fallback_to_tier2(self):
+        """web_search: browser fails → tier 2 httpx result returned."""
+        mgr = ToolManager()
+        with patch.object(mgr.search_tool, "search", new=AsyncMock(
+            return_value={
+                "query": "python asyncio",
+                "tier": 2,
+                "tier_name": "httpx (programmatic)",
+                "url": "https://html.duckduckgo.com/html/?q=python+asyncio",
+                "content": "asyncio results...",
+            }
+        )):
+            result = await mgr.run_web_search("python asyncio", 4000, ApprovalMode.AUTO, None)
+            assert result["tier"] == 2
+
+    @pytest.mark.asyncio
+    async def test_run_web_search_denied_raises(self):
+        mgr = ToolManager()
+        with pytest.raises(ToolDeniedError):
+            await mgr.run_web_search("query", 4000, ApprovalMode.DENY, None)
+
+    def test_web_search_tool_definition_present(self):
+        mgr = ToolManager()
+        defs = mgr.tool_definitions(shell_enabled=False)
+        names = [d["function"]["name"] for d in defs]
+        assert "web_search" in names, f"'web_search' not in tool definitions: {names}"
+
 
 # ---------------------------------------------------------------------------
 # TUI integration: every tool dispatch path exercised via mocked LLM
@@ -396,6 +441,22 @@ async def _wait_bubble(app, pilot, minimum=1, iters=40):
 
 class TestTUIToolDispatch:
     """Each tool slash-command produces a result bubble without crashing."""
+
+    @pytest.mark.asyncio
+    async def test_slash_search_shows_bubble(self):
+        app = _make_app()
+        with patch.object(app.tools.search_tool, "search", new=AsyncMock(
+            return_value={
+                "query": "python asyncio",
+                "tier": 1, "tier_name": "browser (human-like)",
+                "url": "https://duckduckgo.com/", "content": "Python asyncio docs",
+            }
+        )):
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.pause(1.0)
+                await _type_and_send(pilot, "/search python asyncio")
+                bubbles = await _wait_bubble(app, pilot)
+                assert any("chat-assistant" in b.classes for b in bubbles)
 
     @pytest.mark.asyncio
     async def test_slash_fetch_shows_bubble(self):
@@ -468,6 +529,46 @@ class TestTUIToolDispatch:
                 await pilot.pause(1.0)
                 await _type_and_send(pilot, "/tool list")
                 bubbles = await _wait_bubble(app, pilot)
+                assert any("chat-assistant" in b.classes for b in bubbles)
+
+    @pytest.mark.asyncio
+    async def test_llm_tool_call_web_search_roundtrip(self):
+        """LLM returns a web_search tool call → search runs → followup response → bubble."""
+        app = _make_app()
+        call_count = 0
+
+        async def _chat_with_search(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "s1",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query":"python asyncio tutorial","max_chars":500}',
+                        },
+                    }],
+                }
+            return {"content": "Here are some asyncio tutorials.", "tool_calls": []}
+
+        app.client.chat_once_with_tools = _chat_with_search
+        with patch.object(app.tools.search_tool, "search", new=AsyncMock(
+            return_value={
+                "query": "python asyncio tutorial",
+                "tier": 1, "tier_name": "browser (human-like)",
+                "url": "https://duckduckgo.com/", "content": "Python asyncio tutorial results",
+            }
+        )):
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.pause(1.0)
+                await _type_and_send(pilot, "find asyncio tutorials")
+                for _ in range(50):
+                    await pilot.pause(0.4)
+                    if not app.state.busy:
+                        break
+                bubbles = list(app.query(".chat-msg"))
                 assert any("chat-assistant" in b.classes for b in bubbles)
 
     @pytest.mark.asyncio
@@ -897,3 +998,111 @@ class TestBrowserTUIDispatch:
                         break
                 bubbles = list(app.query(".chat-msg"))
                 assert len(bubbles) >= 1
+
+
+# ---------------------------------------------------------------------------
+# WebSearchTool — unit tests (mocked)
+# ---------------------------------------------------------------------------
+
+class TestWebSearchToolUnit:
+    """WebSearchTool tiered fallback logic, all I/O mocked."""
+
+    @pytest.mark.asyncio
+    async def test_tier1_success(self):
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", new=AsyncMock(
+            return_value={"query": "test", "url": "https://ddg.com", "content": "result text"}
+        )):
+            result = await tool.search("test")
+        assert result["tier"] == 1
+        assert result["content"] == "result text"
+
+    @pytest.mark.asyncio
+    async def test_tier1_fails_falls_back_to_tier2(self):
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", side_effect=RuntimeError("browser down")):
+            with patch.object(tool, "_tier2_httpx", new=AsyncMock(
+                return_value={"url": "https://ddg.com", "content": "tier2 results"}
+            )):
+                result = await tool.search("test")
+        assert result["tier"] == 2
+
+    @pytest.mark.asyncio
+    async def test_tier1_and_2_fail_falls_back_to_tier3(self):
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", side_effect=RuntimeError("browser down")):
+            with patch.object(tool, "_tier2_httpx", side_effect=RuntimeError("httpx down")):
+                with patch.object(tool, "_tier3_api", new=AsyncMock(
+                    return_value={"url": "https://lite.ddg.com", "content": "tier3 results"}
+                )):
+                    result = await tool.search("test")
+        assert result["tier"] == 3
+
+    @pytest.mark.asyncio
+    async def test_all_tiers_fail_returns_error(self):
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", side_effect=RuntimeError("browser down")):
+            with patch.object(tool, "_tier2_httpx", side_effect=RuntimeError("httpx down")):
+                with patch.object(tool, "_tier3_api", side_effect=RuntimeError("api down")):
+                    result = await tool.search("test")
+        assert result["tier"] == 0
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_max_chars_truncation(self):
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        long_content = "x" * 10000
+        with patch.object(browser, "search", new=AsyncMock(
+            return_value={"query": "test", "url": "https://ddg.com", "content": long_content}
+        )):
+            result = await tool.search("test", max_chars=500)
+        assert len(result["content"]) == 500
+
+    @pytest.mark.asyncio
+    async def test_browser_search_error_field_triggers_fallback(self):
+        """If browser returns {"error": ...} with no content, tier 1 fails gracefully."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", new=AsyncMock(
+            return_value={"error": "page load failed", "content": "", "query": "test"}
+        )):
+            with patch.object(tool, "_tier2_httpx", new=AsyncMock(
+                return_value={"url": "https://ddg.com", "content": "tier2 fallback content"}
+            )):
+                result = await tool.search("test")
+        assert result["tier"] == 2
+
+
+# ---------------------------------------------------------------------------
+# WebSearchTool — live e2e (skipped if browser not running)
+# ---------------------------------------------------------------------------
+
+class TestWebSearchLive:
+    @skip_no_browser
+    @pytest.mark.asyncio
+    async def test_live_search_returns_content(self):
+        """Tier 1 live: real browser navigates DuckDuckGo for 'python asyncio'."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        result = await tool.search("python asyncio", max_chars=2000)
+        assert result.get("tier", 0) >= 1, "Expected at least one tier to succeed"
+        assert result.get("content"), "Expected non-empty search results"

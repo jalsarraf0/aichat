@@ -13,6 +13,7 @@ from .browser import BrowserTool
 from .database import DatabaseTool
 from .memory import MemoryTool
 from .researchbox import ResearchboxTool
+from .search import WebSearchTool
 from .shell import ShellTool
 from .toolkit import ToolkitTool
 
@@ -66,6 +67,7 @@ class ToolName(str, Enum):
     CREATE_TOOL = "create_tool"
     LIST_CUSTOM_TOOLS = "list_custom_tools"
     DELETE_CUSTOM_TOOL = "delete_custom_tool"
+    WEB_SEARCH = "web_search"
     BROWSER = "browser"
     DB_STORE_ARTICLE = "db_store_article"
     DB_SEARCH = "db_search"
@@ -81,6 +83,8 @@ class ToolManager:
         self.toolkit = ToolkitTool()
         # human_browser container (a12fdfeaaf78) — default for ALL web operations.
         self.browser = BrowserTool()
+        # Tiered search: browser (human-like) → httpx → DDG lite API.
+        self.search_tool = WebSearchTool(self.browser)
         # PostgreSQL-backed storage/cache (replaces rssfeed + fetch services).
         self.db = DatabaseTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
@@ -289,6 +293,21 @@ class ToolManager:
             "truncated": truncated,
         }
 
+    async def run_web_search(
+        self,
+        query: str,
+        max_chars: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Search the web using tiered strategy: browser → httpx → DDG lite API.
+
+        Returns {query, tier, tier_name, url, content[, error]}.
+        """
+        await self._check_approval(mode, ToolName.WEB_SEARCH.value, confirmer)
+        max_chars = max(500, min(max_chars, 16000))
+        return await self.search_tool.search(query, max_chars=max_chars)
+
     async def run_memory_store(
         self,
         key: str,
@@ -453,6 +472,37 @@ class ToolManager:
 
     def tool_definitions(self, shell_enabled: bool) -> list[dict[str, object]]:
         tools: list[dict[str, object]] = [
+            # ----------------------------------------------------------
+            # Web search — tiered: browser (human-like) → httpx → DDG lite
+            # ----------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": (
+                        "Search the web for a query using a tiered strategy. "
+                        "Tier 1 (preferred): opens a real Chromium browser (human_browser / a12fdfeaaf78), "
+                        "navigates to DuckDuckGo, types the query and presses Enter — exactly as a human would. "
+                        "If the browser is unavailable or times out, falls back to a direct HTTP fetch "
+                        "(Tier 2), then to the DuckDuckGo lite API (Tier 3). "
+                        "Returns the search results page text and which tier was used."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query.",
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "Maximum characters to return (default 4000, max 16000).",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
             # ----------------------------------------------------------
             # Web browsing — all web operations go through human_browser
             # ----------------------------------------------------------
