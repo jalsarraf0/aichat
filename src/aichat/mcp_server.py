@@ -83,6 +83,41 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "screenshot",
+        "description": (
+            "Take a screenshot of any URL using the real Chromium browser and return it as an "
+            "inline image. The screenshot is automatically saved to the PostgreSQL image registry. "
+            "Use this when you want to visually inspect a web page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to screenshot (http/https)."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "screenshot_search",
+        "description": (
+            "Search the web for a topic or query, screenshot the most relevant result pages, "
+            "save them to the PostgreSQL image registry, and return all screenshots inline. "
+            "Use this when the user asks to 'find a picture of X', 'show me X', or wants to "
+            "visually browse search results. Makes a best-effort: returns whatever succeeds."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic or query to search and screenshot."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of result pages to screenshot (default 3, max 5).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "web_fetch",
         "description": (
             "Fetch a web page using the real Chromium browser (human_browser / a12fdfeaaf78) "
@@ -283,6 +318,51 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 )
                 return _image_content_blocks(host_path, summary)
             return _text(json.dumps(result, ensure_ascii=False))
+
+        if name == "screenshot":
+            url = str(arguments.get("url", "")).strip()
+            if not url:
+                return _text("screenshot: 'url' is required")
+            result = await mgr.run_browser(
+                action="screenshot",
+                mode=_APPROVAL,
+                confirmer=None,
+                url=url,
+            )
+            host_path = result.get("host_path", "")
+            error = result.get("error", "")
+            if error and not host_path:
+                return _text(f"Screenshot failed: {error}")
+            page = result.get("title", "") or result.get("url", url)
+            summary = (
+                f"Screenshot of: {page}\n"
+                f"URL: {url}\n"
+                f"File: {host_path}"
+            )
+            return _image_content_blocks(host_path, summary)
+
+        if name == "screenshot_search":
+            query = str(arguments.get("query", "")).strip()
+            if not query:
+                return _text("screenshot_search: 'query' is required")
+            max_results = min(int(arguments.get("max_results", 3)), 5)
+            result = await mgr.run_screenshot_search(query, max_results, _APPROVAL, None)
+            error = result.get("error", "")
+            screenshots = result.get("screenshots", [])
+            if error and not screenshots:
+                return _text(f"Screenshot search failed: {error}")
+            blocks: list[dict[str, Any]] = [{"type": "text", "text": f"Visual search: '{query}' — {len(screenshots)} result(s)\n"}]
+            for shot in screenshots:
+                host_path = shot.get("host_path", "")
+                url_s = shot.get("url", "")
+                title = shot.get("title", "")
+                err = shot.get("error", "")
+                if err and not host_path:
+                    blocks.append({"type": "text", "text": f"Failed: {url_s} — {err}"})
+                else:
+                    summary = f"{title or url_s}\n{url_s}\nFile: {host_path}"
+                    blocks.extend(_image_content_blocks(host_path, summary))
+            return blocks
 
         if name == "web_fetch":
             url = str(arguments.get("url", "")).strip()

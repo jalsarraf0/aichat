@@ -468,6 +468,37 @@ class AIChatApp(App):
         lines += ["", "Open with `xdg-open <path>` or `eog <path>`."]
         return "\n".join(lines)
 
+    def _format_screenshot_search_result(self, payload: dict) -> str:
+        """Format the result of screenshot_search for the TUI."""
+        query = payload.get("query", "")
+        error = payload.get("error", "")
+        screenshots = payload.get("screenshots", [])
+        if error and not screenshots:
+            return f"Screenshot search failed: {error}"
+        lines = [f"**Visual search: '{query}'**", ""]
+        if not screenshots:
+            lines.append("No results found.")
+            return "\n".join(lines)
+        for i, shot in enumerate(screenshots, 1):
+            url = shot.get("url", "")
+            title = shot.get("title", "")
+            host_path = shot.get("host_path", "")
+            err = shot.get("error", "")
+            if err and not host_path:
+                lines.append(f"{i}. {url or '(unknown)'} — failed: {err}")
+            else:
+                lines.append(f"**{i}. {title or url}**")
+                if url:
+                    lines.append(f"   URL: {url}")
+                if host_path:
+                    lines += [
+                        f"   File: `{host_path}`",
+                        f"   Open: `xdg-open {host_path}`",
+                    ]
+            lines.append("")
+        lines.append("_All screenshots saved. Use `/screenshots` to list them._")
+        return "\n".join(lines)
+
     async def _handle_screenshots_command(self) -> None:
         """List all saved screenshots from the database."""
         call = ToolCall(
@@ -776,6 +807,15 @@ class AIChatApp(App):
             if action == "screenshot":
                 return self._format_screenshot_result(payload)
             return json.dumps(payload, ensure_ascii=False)
+        if name == "screenshot_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return "screenshot_search: 'query' is required"
+            max_results = int(args.get("max_results", 3))
+            payload = await self.tools.run_screenshot_search(
+                query, max_results, self.state.approval, self._confirm_tool
+            )
+            return self._format_screenshot_search_result(payload)
         if name == "db_store_image":
             url = str(args.get("url", "")).strip()
             if not url:

@@ -75,6 +75,7 @@ class ToolName(str, Enum):
     DB_CACHE_GET = "db_cache_get"
     DB_STORE_IMAGE = "db_store_image"
     DB_LIST_IMAGES = "db_list_images"
+    SCREENSHOT_SEARCH = "screenshot_search"
 
 
 class ToolManager:
@@ -394,6 +395,64 @@ class ToolManager:
     ) -> dict:
         await self._check_approval(mode, ToolName.DB_LIST_IMAGES.value, confirmer)
         return await self.db.list_images(limit=limit)
+
+    async def run_screenshot_search(
+        self,
+        query: str,
+        max_results: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Search DDG for query, screenshot top result pages, save to DB, return list."""
+        import httpx as _httpx
+        import re as _re
+
+        await self._check_approval(mode, ToolName.SCREENSHOT_SEARCH.value, confirmer)
+        max_results = max(1, min(max_results, 5))
+
+        # Search DuckDuckGo HTML for result URLs
+        try:
+            async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+                r = await c.get(
+                    f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+            html = r.text
+        except Exception as exc:
+            return {"error": f"Search failed: {exc}", "query": query, "screenshots": []}
+
+        # Extract result URLs — DDG HTML encodes them as uddg=<url-encoded> redirect params
+        from urllib.parse import unquote as _unquote
+        raw = _re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
+        seen: set[str] = set()
+        urls: list[str] = []
+        for encoded in raw:
+            decoded = _unquote(encoded)
+            if decoded not in seen:
+                seen.add(decoded)
+                urls.append(decoded)
+        urls = urls[:max_results]
+
+        if not urls:
+            return {"error": "No URLs found in search results.", "query": query, "screenshots": []}
+
+        screenshots: list[dict] = []
+        for url in urls:
+            try:
+                result = await self.browser.screenshot(url)
+                host_path = result.get("host_path", "")
+                if host_path and not result.get("error"):
+                    try:
+                        page_url = result.get("url") or url
+                        alt = f"Search: '{query}' — {result.get('title', page_url)}"
+                        await self.db.store_image(url=page_url, host_path=host_path, alt_text=alt)
+                    except Exception:
+                        pass
+                screenshots.append(result)
+            except Exception as exc:
+                screenshots.append({"url": url, "error": str(exc)})
+
+        return {"query": query, "urls": urls, "screenshots": screenshots}
 
     # ------------------------------------------------------------------
     # Toolkit meta-tools (create / list / delete / call custom tools)
@@ -733,6 +792,33 @@ class ToolManager:
                             },
                         },
                         "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "screenshot_search",
+                    "description": (
+                        "Search the web for a topic, screenshot the top result pages, "
+                        "and tell the user exactly where each screenshot file was saved. "
+                        "Use this when the user says 'find a picture of X', 'show me X', "
+                        "'screenshot search results for X', or wants to visually browse a topic. "
+                        "Best-effort: returns whatever screenshots succeed even if some fail."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The topic or query to search and screenshot.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "How many result pages to screenshot (default 3, max 5).",
+                            },
+                        },
+                        "required": ["query"],
                     },
                 },
             },
