@@ -58,13 +58,15 @@ Removes the virtualenv, launcher, and brings down Docker containers with `docker
 Config is stored at `~/.config/aichat/config.yml` and is created automatically on first run.
 
 ```yaml
-base_url: http://localhost:1234   # LM Studio API endpoint
-model: mistralai/magistral-small-2509 # Model ID (auto-selected if not found)
-theme: cyberpunk                      # cyberpunk | dark | light | synth
-approval: AUTO                        # AUTO | ASK | DENY
-shell_enabled: true                   # Enable/disable shell tool
-concise_mode: false                   # Shorter responses
+base_url: http://localhost:1234        # LM Studio API endpoint
+model: mistralai/magistral-small-2509  # Model ID (auto-selected if not found)
+theme: cyberpunk                       # cyberpunk | dark | light | synth
+approval: AUTO                         # AUTO | ASK | DENY
+shell_enabled: true                    # Enable/disable shell tool
+concise_mode: false                    # Shorter responses
 active_personality: linux-shell-programming
+context_length: 35063                  # Model context window (tokens); history trimmed to fit
+max_response_tokens: 4096              # Tokens reserved for the assistant response
 ```
 
 **Override the LM Studio URL** without editing the file:
@@ -226,6 +228,12 @@ The browser server **auto-upgrades** when a newer version is detected — simply
 - **Image fallback pipeline**: if a screenshot is blocked, the tool extracts `<img>` URLs from the page DOM and returns the first downloadable image inline
 
 All httpx-based fetches (web_search, screenshot_search, web_fetch) use full Chrome browser headers (`Accept`, `Sec-Fetch-*`, `DNT`, etc.) and, for screenshot_search, a 2–5 second random pause between consecutive page loads to avoid triggering rate limits.
+
+**web_search** uses a three-tier approach: Chromium browser (Tier 1, most reliable) → DuckDuckGo HTML via httpx (Tier 2) → DDG lite fallback (Tier 3).
+
+**screenshot_search** uses a three-tier URL extraction strategy: DDG `uddg=` redirect params → direct `href` links → Chromium browser DOM eval. Screenshots are compressed to JPEG at max 1280×1024 before base64-encoding for LM Studio compatibility.
+
+**fetch_image** retries once on 429 responses, respecting the `Retry-After` header.
 
 **Actions:**
 

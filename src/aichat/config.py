@@ -27,7 +27,11 @@ class AppConfig:
     active_personality: str = DEFAULT_PERSONALITY_ID
     personalities: list[dict[str, str]] = field(default_factory=default_personalities)
     project_root: str = str(Path.home() / "git")
-    config_version: int = 5
+    # Context window management — set to your model's context length.
+    # History is trimmed to fit within context_length - max_response_tokens tokens.
+    context_length: int = 35063        # mistralai/magistral-small-2509 default
+    max_response_tokens: int = 4096    # tokens reserved for the assistant's response
+    config_version: int = 6
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -69,6 +73,11 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         merged["active_personality"] = defaults["active_personality"]
     if not isinstance(merged.get("project_root"), str) or not merged["project_root"].strip():
         merged["project_root"] = defaults["project_root"]
+    # Context window settings (added in config_version 6)
+    raw_ctx = merged.get("context_length", defaults["context_length"])
+    merged["context_length"] = int(raw_ctx) if isinstance(raw_ctx, (int, float)) and int(raw_ctx) > 0 else defaults["context_length"]
+    raw_mrt = merged.get("max_response_tokens", defaults["max_response_tokens"])
+    merged["max_response_tokens"] = int(raw_mrt) if isinstance(raw_mrt, (int, float)) and int(raw_mrt) > 0 else defaults["max_response_tokens"]
     merged["config_version"] = defaults["config_version"]
     return merged
 

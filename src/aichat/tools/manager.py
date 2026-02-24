@@ -57,6 +57,25 @@ def _is_dangerous(command: str) -> bool:
     return bool(_DANGEROUS_RE.search(command))
 
 
+# Realistic browser headers for all outbound HTTP requests — reduces bot detection
+# and rate-limit exposure compared to minimal "Mozilla/5.0" user-agent strings.
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Upgrade-Insecure-Requests": "1",
+}
+_IMG_FETCH_HEADERS = {
+    **_FETCH_HEADERS,
+    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+}
+
+
 class ToolName(str, Enum):
     SHELL = "shell"
     RESEARCHBOX = "researchbox"
@@ -418,31 +437,45 @@ class ToolManager:
         filename = f"img_{ts}_{raw_name}"
         host_path = f"/docker/human_browser/workspace/{filename}"
 
-        try:
-            async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-                r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                r.raise_for_status()
-                content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-                data = r.content
-
-            _os.makedirs(_os.path.dirname(host_path), exist_ok=True)
-            with open(host_path, "wb") as fh:
-                fh.write(data)
-
+        last_exc: Exception | None = None
+        content_type = "image/jpeg"
+        data = b""
+        for attempt in range(2):
             try:
-                await self.db.store_image(url=url, host_path=host_path,
-                                          alt_text=f"Image from {url}")
-            except Exception:
-                pass
+                async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                    r = await c.get(url, headers=_IMG_FETCH_HEADERS)
+                    if r.status_code == 429 and attempt == 0:
+                        retry_after = min(int(r.headers.get("retry-after", "15")), 30)
+                        await asyncio.sleep(retry_after)
+                        continue
+                    r.raise_for_status()
+                    content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                    data = r.content
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    await asyncio.sleep(3)
+                    continue
+        else:
+            return {"url": url, "error": str(last_exc)}
 
-            return {
-                "url": url,
-                "host_path": host_path,
-                "content_type": content_type,
-                "size": len(data),
-            }
-        except Exception as exc:
-            return {"url": url, "error": str(exc)}
+        _os.makedirs(_os.path.dirname(host_path), exist_ok=True)
+        with open(host_path, "wb") as fh:
+            fh.write(data)
+
+        try:
+            await self.db.store_image(url=url, host_path=host_path,
+                                      alt_text=f"Image from {url}")
+        except Exception:
+            pass
+
+        return {
+            "url": url,
+            "host_path": host_path,
+            "content_type": content_type,
+            "size": len(data),
+        }
 
     async def _fetch_image_from_urls(
         self,
@@ -458,7 +491,7 @@ class ToolManager:
         for img_url in image_urls[:3]:
             try:
                 async with httpx_module.AsyncClient(timeout=15, follow_redirects=True) as c:
-                    r = await c.get(img_url, headers={"User-Agent": "Mozilla/5.0"})
+                    r = await c.get(img_url, headers=_IMG_FETCH_HEADERS)
                     r.raise_for_status()
                     ts = _dt.now().strftime("%Y%m%d_%H%M%S")
                     ext = img_url.split("?")[0].rsplit(".", 1)[-1][:5] or "jpg"
@@ -496,18 +529,19 @@ class ToolManager:
         await self._check_approval(mode, ToolName.SCREENSHOT_SEARCH.value, confirmer)
         max_results = max(1, min(max_results, 5))
 
-        # Search DuckDuckGo HTML for result URLs
+        # Search DuckDuckGo HTML for result URLs (full browser headers to avoid rate-limiting)
+        html = ""
         try:
             async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
                 r = await c.get(
                     f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
-                    headers={"User-Agent": "Mozilla/5.0"},
+                    headers=_FETCH_HEADERS,
                 )
             html = r.text
-        except Exception as exc:
-            return {"error": f"Search failed: {exc}", "query": query, "screenshots": []}
+        except Exception:
+            pass
 
-        # Extract result URLs — DDG HTML encodes them as uddg=<url-encoded> redirect params
+        # Tier 1: DDG uddg= redirect params (stable HTML endpoint format)
         from urllib.parse import unquote as _unquote
         raw = _re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
         seen: set[str] = set()
@@ -518,6 +552,41 @@ class ToolManager:
                 seen.add(decoded)
                 urls.append(decoded)
         urls = urls[:max_results]
+
+        # Tier 2: direct href links (fallback if DDG changed format or rate-limited)
+        if not urls and html:
+            href_raw = _re.findall(r'href=["\']?(https?://[^"\'>\s]+)', html)
+            urls = list(dict.fromkeys(
+                u for u in href_raw
+                if not any(d in u for d in ('duckduckgo.com', 'ddg.gg', 'duck.co'))
+            ))[:max_results]
+
+        # Tier 3: browser search + DOM eval (Chromium w/ anti-detection, most reliable)
+        if not urls:
+            try:
+                await self.browser.search(query)
+                ev_result = await self.browser.eval_js(r"""
+                    JSON.stringify(
+                        Array.from(document.links)
+                            .map(a => {
+                                try {
+                                    const u = new URL(a.href);
+                                    if (u.hostname === 'duckduckgo.com' && u.pathname === '/l/')
+                                        return u.searchParams.get('uddg') || null;
+                                    if (u.hostname !== 'duckduckgo.com' && u.hostname !== 'duck.co')
+                                        return a.href;
+                                    return null;
+                                } catch(e) { return null; }
+                            })
+                            .filter(u => u && u.startsWith('http'))
+                            .filter((u, i, arr) => arr.indexOf(u) === i)
+                            .slice(0, 5)
+                    )
+                """)
+                extracted = json.loads(ev_result.get("result", "[]"))
+                urls = [u for u in extracted if u][:max_results]
+            except Exception:
+                pass
 
         if not urls:
             return {"error": "No URLs found in search results.", "query": query, "screenshots": []}
