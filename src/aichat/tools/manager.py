@@ -444,6 +444,44 @@ class ToolManager:
         except Exception as exc:
             return {"url": url, "error": str(exc)}
 
+    async def _fetch_image_from_urls(
+        self,
+        image_urls: list[str],
+        page_url: str,
+        query: str,
+        httpx_module,
+    ) -> dict | None:
+        """Try each image URL in order; download first success and save to workspace."""
+        import os as _os
+        from datetime import datetime as _dt
+
+        for img_url in image_urls[:3]:
+            try:
+                async with httpx_module.AsyncClient(timeout=15, follow_redirects=True) as c:
+                    r = await c.get(img_url, headers={"User-Agent": "Mozilla/5.0"})
+                    r.raise_for_status()
+                    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                    ext = img_url.split("?")[0].rsplit(".", 1)[-1][:5] or "jpg"
+                    filename = f"img_{ts}.{ext}"
+                    host_path = f"/docker/human_browser/workspace/{filename}"
+                    _os.makedirs(_os.path.dirname(host_path), exist_ok=True)
+                    with open(host_path, "wb") as fh:
+                        fh.write(r.content)
+                    try:
+                        alt = f"Search: '{query}' — image from {page_url}"
+                        await self.db.store_image(url=img_url, host_path=host_path, alt_text=alt)
+                    except Exception:
+                        pass
+                    return {
+                        "url": page_url,
+                        "host_path": host_path,
+                        "image_url": img_url,
+                        "content_type": r.headers.get("content-type", "image/jpeg"),
+                    }
+            except Exception:
+                continue
+        return None
+
     async def run_screenshot_search(
         self,
         query: str,
@@ -496,7 +534,15 @@ class ToolManager:
                         await self.db.store_image(url=page_url, host_path=host_path, alt_text=alt)
                     except Exception:
                         pass
-                screenshots.append(result)
+                    screenshots.append(result)
+                elif result.get("image_urls"):
+                    # Screenshot failed but browser loaded the page — try fetching an image directly
+                    fallback = await self._fetch_image_from_urls(
+                        result["image_urls"], url, query, _httpx
+                    )
+                    screenshots.append(fallback or result)
+                else:
+                    screenshots.append(result)
             except Exception as exc:
                 screenshots.append({"url": url, "error": str(exc)})
 
