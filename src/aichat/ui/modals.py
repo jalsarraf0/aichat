@@ -185,7 +185,8 @@ class SettingsModal(ModalScreen[dict]):
             options = [(self.current["model"], self.current["model"])]
         with Vertical(id="settings-modal"):
             yield Label("Settings")
-            yield Label(f"Base URL: {self.current['base_url']} (fixed)")
+            yield Label("Base URL (LM Studio endpoint)")
+            yield Input(value=self.current["base_url"], id="base_url")
             yield Select(options, value=self.current["model"], id="model")
             yield Select.from_values(self.themes, value=self.current["theme"], id="theme")
             yield Select.from_values(["DENY", "ASK", "AUTO"], value=self.current["approval"], id="approval")
@@ -214,7 +215,7 @@ class SettingsModal(ModalScreen[dict]):
         if event.button.id == "save":
             self.dismiss(
                 {
-                    "base_url": self.current["base_url"],
+                    "base_url": self.query_one("#base_url", Input).value.strip() or self.current["base_url"],
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),
@@ -227,7 +228,7 @@ class SettingsModal(ModalScreen[dict]):
         if event.key == "ctrl+s":
             self.dismiss(
                 {
-                    "base_url": self.current["base_url"],
+                    "base_url": self.query_one("#base_url", Input).value.strip() or self.current["base_url"],
                     "model": str(self.query_one("#model", Select).value),
                     "theme": str(self.query_one("#theme", Select).value),
                     "approval": str(self.query_one("#approval", Select).value),

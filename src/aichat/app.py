@@ -38,7 +38,7 @@ class PromptInput(TextArea):
         await super()._on_key(event)
 
 from .client import LLMClient, LLMClientError
-from .config import LM_STUDIO_BASE_URL, load_config, save_config
+from .config import load_config, save_config
 from .model_labels import model_options
 from .personalities import DEFAULT_PERSONALITY_ID, merge_personalities
 from .sanitizer import sanitize_response
@@ -61,8 +61,8 @@ class AIChatApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self._project_root = Path("~/git")
         cfg = load_config()
+        self._project_root = Path(cfg.get("project_root", str(Path.home() / "git")))
         self.personalities: list[dict[str, str]] = merge_personalities(cfg.get("personalities", []))
         self.state = AppState(
             model=cfg["model"],
@@ -306,6 +306,63 @@ class AIChatApp(App):
                 else:
                     self._write_transcript("Assistant", "Researchbox search complete. See Tools panel for details.")
                 return
+            if text.startswith("/endpoint"):
+                new_url = text[len("/endpoint"):].strip()
+                if not new_url:
+                    self._write_transcript("Assistant", f"Current endpoint: {self.state.base_url}\nUsage: /endpoint <url>  (e.g. /endpoint http://localhost:1234)")
+                    return
+                if not new_url.startswith(("http://", "https://")):
+                    self._write_transcript("Assistant", "Endpoint must start with http:// or https://")
+                    return
+                self.state.base_url = new_url
+                self.client = LLMClient(new_url)
+                self._persist_config()
+                await self.update_status()
+                self._write_transcript("Assistant", f"Endpoint set to {new_url}")
+                return
+            if text.startswith("/fetch "):
+                url = text[7:].strip()
+                if not url:
+                    self._write_transcript("Assistant", "Usage: /fetch <url>")
+                    return
+                call = ToolCall(index=0, name="web_fetch", args={"url": url}, call_id="", label="web_fetch")
+                results = await self._run_tool_batch([call])
+                self._log_tool_results(results)
+                if any(not res.ok for res in results):
+                    self._notify_tool_failures(results)
+                else:
+                    self._write_transcript("Assistant", "Fetched. See Tools panel for content.")
+                return
+            if text.startswith("/memory "):
+                args_str = text[8:].strip()
+                parts = args_str.split(maxsplit=1)
+                sub = parts[0] if parts else ""
+                if sub == "recall":
+                    key = parts[1].strip() if len(parts) > 1 else ""
+                    call = ToolCall(index=0, name="memory_recall", args={"key": key}, call_id="", label="memory_recall")
+                    results = await self._run_tool_batch([call])
+                    self._log_tool_results(results)
+                    if any(not res.ok for res in results):
+                        self._notify_tool_failures(results)
+                    else:
+                        self._write_transcript("Assistant", "Memory recalled. See Tools panel.")
+                    return
+                if sub == "store":
+                    remainder = parts[1].strip() if len(parts) > 1 else ""
+                    if " " not in remainder:
+                        self._write_transcript("Assistant", "Usage: /memory store <key> <value>")
+                        return
+                    key, value = remainder.split(maxsplit=1)
+                    call = ToolCall(index=0, name="memory_store", args={"key": key, "value": value}, call_id="", label="memory_store")
+                    results = await self._run_tool_batch([call])
+                    self._log_tool_results(results)
+                    if any(not res.ok for res in results):
+                        self._notify_tool_failures(results)
+                    else:
+                        self._write_transcript("Assistant", f"Stored memory key '{key}'.")
+                    return
+                self._write_transcript("Assistant", "Usage: /memory recall [key] | /memory store <key> <value>")
+                return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
             self._tool_log(f"[denied] {exc}")
@@ -458,6 +515,28 @@ class AIChatApp(App):
                 self.state.cwd = new_cwd
                 await self.update_status()
             return output or "(no output)"
+        if name == "web_fetch":
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "web_fetch: missing 'url'"
+            max_chars = int(args.get("max_chars", 4000))
+            max_chars = max(500, min(max_chars, 16000))
+            payload = await self.tools.run_web_fetch(url, max_chars, self.state.approval, self._confirm_tool)
+            text = payload.get("text", "")
+            truncated = payload.get("truncated", False)
+            suffix = "\n...[truncated]" if truncated else ""
+            return f"{text}{suffix}" if text else "(no content)"
+        if name == "memory_store":
+            key = str(args.get("key", "")).strip()
+            value = str(args.get("value", "")).strip()
+            if not key or not value:
+                return "memory_store: missing 'key' or 'value'"
+            payload = await self.tools.run_memory_store(key, value, self.state.approval, self._confirm_tool)
+            return json.dumps(payload, ensure_ascii=False)
+        if name == "memory_recall":
+            key = str(args.get("key", "")).strip()
+            payload = await self.tools.run_memory_recall(key, self.state.approval, self._confirm_tool)
+            return json.dumps(payload, ensure_ascii=False)
         return f"unknown tool '{name}'"
 
     async def _run_followup_response(self) -> None:
@@ -476,7 +555,7 @@ class AIChatApp(App):
         base = "You are a helpful assistant."
         persona = self._current_personality_prompt()
         base += (
-            f" {persona} When creating new projects, use ~/git/<project>."
+            f" {persona} When creating new projects, use {self._project_root}/<project>."
             " Use exact names and paths requested by the user; do not invent or alter names."
             " If a request is ambiguous, choose the most likely interpretation, state the key"
             " assumption briefly, answer fully, and ask one short clarifying question."
@@ -829,6 +908,7 @@ class AIChatApp(App):
                 "concise_mode": self.state.concise_mode,
                 "active_personality": self.state.personality_id,
                 "personalities": merge_personalities(self.personalities),
+                "project_root": str(self._project_root),
             }
         )
 
@@ -1049,19 +1129,22 @@ class AIChatApp(App):
             if not isinstance(values, dict) or not values:
                 return
             selected_model = str(values["model"])
-            if await self.client.health():
+            new_url = str(values.get("base_url", self.state.base_url)).strip() or self.state.base_url
+            # Build the client against the *new* URL so health/ensure_model checks use it.
+            new_client = LLMClient(new_url)
+            if await new_client.health():
                 try:
-                    await self.client.ensure_model(selected_model)
+                    await new_client.ensure_model(selected_model)
                 except LLMClientError as exc:
-                    self.notify(str(exc), severity="error")
-                    return
-            self.state.base_url = LM_STUDIO_BASE_URL
+                    self.notify(str(exc), severity="warning")
+                    # Don't abort — user may have intentionally switched endpoints.
+            self.state.base_url = new_url
             self.state.model = selected_model
             self.state.approval = ApprovalMode(str(values["approval"]))
             self.state.shell_enabled = bool(values.get("shell_enabled", self.state.shell_enabled))
             self.state.concise_mode = bool(values.get("concise_mode", self.state.concise_mode))
             self.system_prompt = self._build_system_prompt()
-            self.client = LLMClient(self.state.base_url)
+            self.client = new_client
             self._apply_theme_with_fallback(str(values["theme"]))
             self._persist_config()
             await self.update_status()

@@ -30,5 +30,20 @@ services:
     ports:
       - "8092:8092"
 
+  aichat-fetch:
+    build: ./docker/fetch
+    ports:
+      - "8093:8093"
+    restart: unless-stopped
+
+  aichat-memory:
+    build: ./docker/memory
+    ports:
+      - "8094:8094"
+    volumes:
+      - memorydb:/data
+    restart: unless-stopped
+
 volumes:
   rssdb:
+  memorydb:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,14 +10,15 @@ import yaml
 from .state import ApprovalMode
 from .personalities import DEFAULT_PERSONALITY_ID, default_personalities, merge_personalities, normalize_personalities
 
-LM_STUDIO_BASE_URL = "http://localhost:1234"
+# Default LM Studio endpoint – override via LM_STUDIO_URL env var or config file.
+_DEFAULT_BASE_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234")
 
 CONFIG_PATH = Path.home() / ".config" / "aichat" / "config.yml"
 
 
 @dataclass(frozen=True)
 class AppConfig:
-    base_url: str = "http://localhost:1234"
+    base_url: str = _DEFAULT_BASE_URL
     model: str = "local-model"
     theme: str = "cyberpunk"
     approval: str = ApprovalMode.ASK.value
@@ -24,6 +26,7 @@ class AppConfig:
     shell_enabled: bool = True
     active_personality: str = DEFAULT_PERSONALITY_ID
     personalities: list[dict[str, str]] = field(default_factory=default_personalities)
+    project_root: str = str(Path.home() / "git")
     config_version: int = 5
 
 
@@ -35,8 +38,9 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         cfg_version = int(raw_version)
     else:
         cfg_version = 1
-    # Enforce LM Studio endpoint only.
-    merged["base_url"] = LM_STUDIO_BASE_URL
+    # Validate base_url is a non-empty string; keep user value or fall back to default.
+    if not isinstance(merged.get("base_url"), str) or not merged["base_url"].strip():
+        merged["base_url"] = defaults["base_url"]
     if not isinstance(merged["model"], str) or not merged["model"].strip():
         merged["model"] = defaults["model"]
     if not isinstance(merged["theme"], str) or not merged["theme"].strip():
@@ -63,6 +67,8 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     ids = {p.get("id") for p in merged["personalities"] if isinstance(p, dict)}
     if active not in ids:
         merged["active_personality"] = defaults["active_personality"]
+    if not isinstance(merged.get("project_root"), str) or not merged["project_root"].strip():
+        merged["project_root"] = defaults["project_root"]
     merged["config_version"] = defaults["config_version"]
     return merged
 
