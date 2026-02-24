@@ -159,6 +159,35 @@ async def screenshot(req: ScreenshotReq):
     return {"path": req.path, "title": await _page.title(), "url": _page.url}
 
 
+class SearchReq(BaseModel):
+    query: str
+    engine: str = "duckduckgo"
+
+
+@app.post("/search")
+async def search(req: SearchReq):
+    """Human-like search: navigate to DuckDuckGo, type query, submit, return results."""
+    try:
+        try:
+            await _page.goto("https://duckduckgo.com", wait_until="networkidle", timeout=20000)
+        except Exception:
+            await _page.goto("https://duckduckgo.com", wait_until="load", timeout=20000)
+        await _page.fill("input[name='q']", req.query)
+        await _page.keyboard.press("Enter")
+        try:
+            await _page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            await _page.wait_for_load_state("load", timeout=10000)
+        content = await _extract_text(_page)
+        return {
+            "query": req.query,
+            "url": _page.url,
+            "content": content,
+        }
+    except Exception as exc:
+        return {"error": str(exc), "query": req.query, "content": ""}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7081, log_level="warning")
@@ -330,5 +359,13 @@ class BrowserTool:
         base = await self._ensure_server()
         async with httpx.AsyncClient(timeout=15.0) as c:
             r = await c.post(f"{base}/eval", json={"code": code})
+        r.raise_for_status()
+        return r.json()
+
+    async def search(self, query: str) -> dict:
+        """Human-like search: go to DuckDuckGo, type query, press Enter, return results."""
+        base = await self._ensure_server()
+        async with httpx.AsyncClient(timeout=45.0) as c:
+            r = await c.post(f"{base}/search", json={"query": query})
         r.raise_for_status()
         return r.json()

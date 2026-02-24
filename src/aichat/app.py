@@ -356,6 +356,19 @@ class AIChatApp(App):
                 await self.update_status()
                 self._write_transcript("Assistant", f"Endpoint set to {new_url}")
                 return
+            if text.startswith("/search ") or text == "/search":
+                query = text[8:].strip() if text.startswith("/search ") else ""
+                if not query:
+                    self._write_transcript("Assistant", "Usage: /search <query>")
+                    return
+                call = ToolCall(index=0, name="web_search", args={"query": query}, call_id="", label="web_search")
+                results = await self._run_tool_batch([call])
+                self._log_tool_results(results)
+                if any(not res.ok for res in results):
+                    self._notify_tool_failures(results)
+                else:
+                    self._write_transcript("Assistant", "Search complete. See Tools panel for results.")
+                return
             if text.startswith("/fetch "):
                 url = text[7:].strip()
                 if not url:
@@ -588,6 +601,20 @@ class AIChatApp(App):
                 self.state.cwd = new_cwd
                 await self.update_status()
             return output or "(no output)"
+        if name == "web_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return "web_search: missing 'query'"
+            max_chars = int(args.get("max_chars", 4000))
+            payload = await self.tools.run_web_search(query, max_chars, self.state.approval, self._confirm_tool)
+            tier = payload.get("tier", 0)
+            tier_name = payload.get("tier_name", "unknown")
+            content = payload.get("content", "")
+            error = payload.get("error", "")
+            if error and not content:
+                return f"web_search failed: {error}"
+            header = f"[Search via {tier_name} (tier {tier})]\n\n"
+            return f"{header}{content}" if content else "(no results)"
         if name == "web_fetch":
             url = str(args.get("url", "")).strip()
             if not url:

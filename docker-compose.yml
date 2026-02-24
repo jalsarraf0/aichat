@@ -38,6 +38,22 @@ services:
     ports:
       - "8092:8092"
 
+  # MCP HTTP/SSE server — exposes all aichat tools to LM Studio and other
+  # MCP clients over the network.  Reachable at http://<host-ip>:8096/sse
+  aichat-mcp:
+    build: ./docker/mcp
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+      MEMORY_URL:   http://aichat-memory:8094
+      RESEARCH_URL: http://aichat-researchbox:8092
+    depends_on:
+      - aichat-database
+      - aichat-memory
+      - aichat-researchbox
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+
   aichat-memory:
     build: ./docker/memory
     ports:
