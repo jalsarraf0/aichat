@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "4"
+_REQUIRED_SERVER_VERSION = "5"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "4"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v4"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v5"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "4"
+_VERSION = "5"
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -336,6 +336,7 @@ async def evaluate(req: EvalReq):
 class ScreenshotReq(BaseModel):
     url: Optional[str] = None
     path: str = "/workspace/screenshot.png"
+    find_text: Optional[str] = None   # scroll to first occurrence of this text before screenshotting
 
 
 @app.post("/screenshot")
@@ -357,14 +358,65 @@ async def screenshot(req: ScreenshotReq):
     try:
         # Brief human-like pause before screenshot (reduced for speed)
         await asyncio.sleep(_random.uniform(0.2, 0.5))
-        scroll_px = _random.randint(80, 350)
-        try:
-            await page.evaluate(f"window.scrollBy(0, {scroll_px})")
-            await asyncio.sleep(_random.uniform(0.1, 0.2))
-        except Exception:
-            pass
-        await page.screenshot(path=req.path, full_page=False)
-        result = {"path": req.path, "title": await page.title(), "url": page.url}
+
+        clipped = False
+        if req.find_text:
+            # Zoom: find the element containing the text, scroll to it, then clip
+            # the screenshot to show just that region with context padding.
+            try:
+                import json as _json
+                found = await page.evaluate(
+                    """(searchText) => {
+                        const walker = document.createTreeWalker(
+                            document.body, NodeFilter.SHOW_TEXT, null, false);
+                        const lower = searchText.toLowerCase();
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (node.nodeValue && node.nodeValue.toLowerCase().includes(lower)) {
+                                const el = node.parentElement;
+                                el.scrollIntoView({behavior: \'instant\', block: \'center\'});
+                                const r = el.getBoundingClientRect();
+                                return {x: r.left, y: r.top, w: r.width, h: r.height,
+                                        found: true};
+                            }
+                        }
+                        return {found: false};
+                    }""",
+                    req.find_text,
+                )
+                await asyncio.sleep(_random.uniform(0.1, 0.2))
+                if found.get("found"):
+                    pad = 60
+                    vp = page.viewport_size or {"width": 1280, "height": 900}
+                    x = max(0, found["x"] - pad)
+                    y = max(0, found["y"] - pad)
+                    w = min(vp["width"] - x, max(found["w"] + 2 * pad, 400))
+                    h = min(vp["height"] - y, max(found["h"] + 2 * pad, 200))
+                    await page.screenshot(
+                        path=req.path,
+                        clip={"x": x, "y": y, "width": w, "height": h},
+                    )
+                    clipped = True
+                else:
+                    # Text not found — fall through to normal scroll+screenshot
+                    scroll_px = _random.randint(80, 350)
+                    await page.evaluate(f"window.scrollBy(0, {scroll_px})")
+                    await asyncio.sleep(_random.uniform(0.1, 0.2))
+                    await page.screenshot(path=req.path, full_page=False)
+            except Exception:
+                # Fallback to normal screenshot on any error
+                await page.screenshot(path=req.path, full_page=False)
+        else:
+            scroll_px = _random.randint(80, 350)
+            try:
+                await page.evaluate(f"window.scrollBy(0, {scroll_px})")
+                await asyncio.sleep(_random.uniform(0.1, 0.2))
+            except Exception:
+                pass
+            await page.screenshot(path=req.path, full_page=False)
+
+        result = {"path": req.path, "title": await page.title(), "url": page.url,
+                  "clipped": clipped}
         if nav_error:
             result["nav_error"] = nav_error
         return result
