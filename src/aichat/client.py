@@ -51,8 +51,8 @@ class LLMClient:
         if models and model not in models:
             raise ModelNotFoundError(f"Model '{model}' not available. Available: {', '.join(models)}")
 
-    async def chat_once(self, model: str, messages: list[dict[str, Any]]) -> str:
-        response = await self.chat_once_with_tools(model, messages)
+    async def chat_once(self, model: str, messages: list[dict[str, Any]], max_tokens: int | None = None) -> str:
+        response = await self.chat_once_with_tools(model, messages, max_tokens=max_tokens)
         return response.get("content", "")
 
     async def chat_once_with_tools(
@@ -61,12 +61,15 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         await self.ensure_model(model)
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         response = await self._request("POST", "/v1/chat/completions", json=payload)
         try:
             message = response.json()["choices"][0]["message"]
@@ -84,12 +87,15 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.ensure_model(model)
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 async with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:
@@ -118,7 +124,7 @@ class LLMClient:
         except httpx.HTTPError as exc:
             raise LLMClientError(f"Streaming network error: {exc}") from exc
 
-    async def chat_stream(self, model: str, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
-        async for event in self.chat_stream_events(model, messages):
+    async def chat_stream(self, model: str, messages: list[dict[str, Any]], max_tokens: int | None = None) -> AsyncIterator[str]:
+        async for event in self.chat_stream_events(model, messages, max_tokens=max_tokens):
             if event.get("type") == "content":
                 yield event.get("value", "")

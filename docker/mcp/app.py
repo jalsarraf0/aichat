@@ -46,6 +46,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+try:
+    from PIL import Image as _PilImage
+    import io as _io
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 app = FastAPI(title="aichat-mcp")
 
 # Allow all origins so LM Studio (Electron/WebView2) can connect without CORS issues.
@@ -320,20 +327,35 @@ def _text(s: str) -> list[dict[str, Any]]:
 
 
 def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
-    """Return MCP content blocks: text summary + inline base64 PNG (if readable)."""
+    """Return MCP content blocks: text summary + inline base64 image (compressed for LM Studio)."""
     blocks: list[dict[str, Any]] = [{"type": "text", "text": summary}]
+    if not container_path:
+        return blocks
     # container_path is e.g. /workspace/screenshot.png inside human_browser.
     # The workspace is bind-mounted at BROWSER_WORKSPACE inside this container.
-    if container_path:
-        filename = os.path.basename(container_path)
-        local_path = os.path.join(BROWSER_WORKSPACE, filename)
-        if os.path.isfile(local_path):
-            try:
-                with open(local_path, "rb") as fh:
-                    b64 = base64.standard_b64encode(fh.read()).decode("ascii")
-                blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
-            except Exception:
-                pass
+    filename = os.path.basename(container_path)
+    local_path = os.path.join(BROWSER_WORKSPACE, filename)
+    if not os.path.isfile(local_path):
+        return blocks
+    try:
+        if _HAS_PIL:
+            # Resize to max 1280×1024 and compress as JPEG — large PNGs can exceed
+            # LM Studio's MCP message size limit and fail to render.
+            with _PilImage.open(local_path) as img:
+                img = img.convert("RGB")  # strip alpha channel (JPEG doesn't support it)
+                if img.width > 1280 or img.height > 1024:
+                    img.thumbnail((1280, 1024), _PilImage.LANCZOS)
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=82)
+            b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
+            mime = "image/jpeg"
+        else:
+            with open(local_path, "rb") as fh:
+                b64 = base64.standard_b64encode(fh.read()).decode("ascii")
+            mime = "image/png"
+        blocks.append({"type": "image", "data": b64, "mimeType": mime})
+    except Exception:
+        pass
     return blocks
 
 
@@ -412,18 +434,34 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 url = str(args.get("url", "")).strip()
                 if not url:
                     return _text("fetch_image: 'url' is required")
-                try:
-                    img_fetch_headers = {
-                        "User-Agent": _BROWSER_HEADERS["User-Agent"],
-                        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                        "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
-                    }
-                    r = await c.get(url, headers=img_fetch_headers, follow_redirects=True)
-                    r.raise_for_status()
-                    content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-                    img_data = r.content
-                except Exception as exc:
-                    return _text(f"fetch_image failed: {exc}")
+                img_fetch_headers = {
+                    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+                    "Accept-Encoding": _BROWSER_HEADERS["Accept-Encoding"],
+                    "DNT": "1",
+                }
+                last_exc: Exception | None = None
+                content_type = "image/jpeg"
+                img_data = b""
+                for attempt in range(2):
+                    try:
+                        r = await c.get(url, headers=img_fetch_headers, follow_redirects=True)
+                        if r.status_code == 429 and attempt == 0:
+                            retry_after = min(int(r.headers.get("retry-after", "15")), 30)
+                            await asyncio.sleep(retry_after)
+                            continue
+                        r.raise_for_status()
+                        content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                        img_data = r.content
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt == 0:
+                            await asyncio.sleep(3)
+                            continue
+                else:
+                    return _text(f"fetch_image failed: {last_exc}")
                 # Derive host_path for DB metadata (workspace is writable via host bind-mount)
                 raw_name = url.split("?")[0].split("/")[-1] or "image"
                 if "." not in raw_name:
@@ -472,7 +510,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception as exc:
                     return _text(f"Search failed: {exc}")
 
-                # Extract result URLs — DDG HTML encodes them as uddg=<url-encoded> redirects
+                # Tier 1: DDG uddg= redirect params (stable HTML endpoint format)
                 raw = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
                 seen_u: set[str] = set()
                 urls: list[str] = []
@@ -482,6 +520,44 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         seen_u.add(decoded)
                         urls.append(decoded)
                 urls = urls[:max_results]
+
+                # Tier 2: direct href links (fallback if DDG changed format or rate-limited)
+                if not urls:
+                    href_raw = re.findall(r'href=["\']?(https?://[^"\'>\s]+)', html)
+                    urls = list(dict.fromkeys(
+                        u for u in href_raw
+                        if not any(d in u for d in ('duckduckgo.com', 'ddg.gg', 'duck.co'))
+                    ))[:max_results]
+
+                # Tier 3: browser search + DOM eval (Chromium w/ anti-detection, most reliable)
+                if not urls:
+                    try:
+                        await asyncio.wait_for(
+                            c.post(f"{BROWSER_URL}/search", json={"query": query}),
+                            timeout=35.0,
+                        )
+                        ev = await c.post(f"{BROWSER_URL}/eval", json={"code": r"""
+                            JSON.stringify(
+                                Array.from(document.links)
+                                    .map(a => {
+                                        try {
+                                            const u = new URL(a.href);
+                                            if (u.hostname === 'duckduckgo.com' && u.pathname === '/l/')
+                                                return u.searchParams.get('uddg') || null;
+                                            if (u.hostname !== 'duckduckgo.com' && u.hostname !== 'duck.co')
+                                                return a.href;
+                                            return null;
+                                        } catch(e) { return null; }
+                                    })
+                                    .filter(u => u && u.startsWith('http'))
+                                    .filter((u, i, arr) => arr.indexOf(u) === i)
+                                    .slice(0, 5)
+                            )
+                        """}, timeout=10)
+                        extracted = json.loads(ev.json().get("result", "[]"))
+                        urls = [u for u in extracted if u][:max_results]
+                    except Exception:
+                        pass
 
                 if not urls:
                     return _text(f"No URLs found in search results for: {query}")
@@ -552,6 +628,17 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query = str(args.get("query", "")).strip()
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
+                # Tier 1: human_browser (Chromium — most reliable, anti-detection, human-like)
+                try:
+                    br = await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/search", json={"query": query}),
+                        timeout=30.0,
+                    )
+                    data = br.json()
+                    if data.get("content"):
+                        return _text(f"[Search via browser (tier 1)]\n\n{data['content'][:max_chars]}")
+                except Exception:
+                    pass
                 # Tier 2: DuckDuckGo HTML (realistic browser headers)
                 try:
                     r = await c.get(

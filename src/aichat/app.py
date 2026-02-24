@@ -95,6 +95,8 @@ class AIChatApp(App):
             personality_id=cfg.get("active_personality", DEFAULT_PERSONALITY_ID),
             cwd=str(Path.cwd()),
         )
+        self._context_length: int = int(cfg.get("context_length", 35063))
+        self._max_response_tokens: int = int(cfg.get("max_response_tokens", 4096))
         self.client = LLMClient(self.state.base_url)
         self.tools = ToolManager(max_tool_calls_per_turn=self.state.max_tool_calls_per_turn)
         self.transcript_store = TranscriptStore()
@@ -231,6 +233,7 @@ class AIChatApp(App):
                     self.state.model,
                     self._llm_messages(),
                     tools=tools,
+                    max_tokens=self._max_response_tokens or None,
                 )
                 content = response.get("content", "")
                 tool_calls = response.get("tool_calls", [])
@@ -637,6 +640,7 @@ class AIChatApp(App):
             self.state.model,
             self._llm_messages(),
             tools=tools,
+            max_tokens=self._max_response_tokens or None,
         ):
             if event.get("type") == "content":
                 chunk = str(event.get("value", ""))
@@ -880,14 +884,45 @@ class AIChatApp(App):
     async def _run_followup_response(self) -> None:
         content = ""
         if self.state.streaming:
-            async for chunk in self.client.chat_stream(self.state.model, self._llm_messages()):
+            async for chunk in self.client.chat_stream(self.state.model, self._llm_messages(),
+                                                        max_tokens=self._max_response_tokens or None):
                 content += chunk
         else:
-            content = await self.client.chat_once(self.state.model, self._llm_messages())
+            content = await self.client.chat_once(self.state.model, self._llm_messages(),
+                                                   max_tokens=self._max_response_tokens or None)
         self._finalize_assistant_response(content)
 
     def _llm_messages(self) -> list[dict[str, object]]:
-        return [{"role": "system", "content": self.system_prompt}, *[m.as_chat_dict() for m in self.messages]]
+        system_msg: dict[str, object] = {"role": "system", "content": self.system_prompt}
+        history = [m.as_chat_dict() for m in self.messages]
+
+        ctx = self._context_length
+        reserve = self._max_response_tokens
+        if not ctx or not reserve or ctx <= reserve:
+            return [system_msg, *history]
+
+        # Token budget for conversation history (rough: 1 token ≈ 4 chars)
+        def _est(text: str) -> int:
+            return max(1, len(text) // 4) + 4  # chars/4 + per-message overhead
+
+        budget = ctx - reserve - _est(self.system_prompt)
+
+        trimmed: list[dict[str, object]] = []
+        used = 0
+        for msg in reversed(history):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                tokens = _est(content)
+            elif isinstance(content, list):
+                tokens = sum(_est(str(b.get("text", b) if isinstance(b, dict) else b)) for b in content) + 4
+            else:
+                tokens = 50
+            if used + tokens > budget and trimmed:
+                break  # oldest messages dropped to stay within context budget
+            trimmed.insert(0, msg)
+            used += tokens
+
+        return [system_msg, *trimmed]
 
     def _build_system_prompt(self) -> str:
         base = "You are a helpful assistant."
