@@ -9,7 +9,7 @@ A local-first AI chat TUI (Terminal User Interface) built with [Textual](https:/
 | Requirement | Details |
 |---|---|
 | Python | 3.12 or newer |
-| LM Studio | Running at `http://localhost:1234` (configurable) |
+| LM Studio | Running locally or remotely (configurable via `base_url`) |
 | Docker + Compose | Required for all tool services |
 | `docker` group | Your user must be in the `docker` group |
 | human_browser container | Required for the `browser` tool (see below) |
@@ -59,7 +59,7 @@ Config is stored at `~/.config/aichat/config.yml` and is created automatically o
 
 ```yaml
 base_url: http://localhost:1234   # LM Studio API endpoint
-model: local-model                    # Model ID (auto-selected if not found)
+model: mistralai/magistral-small-2509 # Model ID (auto-selected if not found)
 theme: cyberpunk                      # cyberpunk | dark | light | synth
 approval: AUTO                        # AUTO | ASK | DENY
 shell_enabled: true                   # Enable/disable shell tool
@@ -217,6 +217,8 @@ docker run -d --name human_browser \
 
 On first use, aichat automatically deploys the Playwright API server into the container and starts it. No manual steps needed after the container is running.
 
+The browser server **auto-upgrades** when a newer version is detected — simply use aichat and it will redeploy transparently. Anti-bot stealth headers are applied automatically (spoofed user-agent, disabled `webdriver` flag).
+
 **Actions:**
 
 | Action | Required params | Description |
@@ -229,6 +231,8 @@ On first use, aichat automatically deploys the Playwright API server into the co
 | `eval` | `code` | Run a JavaScript expression; returns its result |
 
 The browser session persists between calls — navigate, click, fill, read all operate on the same live page.
+
+If a screenshot fails (e.g. the page blocks headless browsers), the tool automatically falls back to downloading image URLs found in the page DOM.
 
 The noVNC web UI is accessible at `http://localhost:36411` to watch the browser in real time.
 
@@ -313,12 +317,12 @@ All services start automatically with `docker compose up -d --build`.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `aichat-rssfeed-db` | 5432 | PostgreSQL backing the RSS feed store |
-| `aichat-rssfeed` | 8091 | RSS feed API |
-| `aichat-researchbox` | 8092 | Feed discovery / research |
-| `aichat-fetch` | 8093 | Web page fetcher |
+| `aichat-db` | 5432 | PostgreSQL — stores articles, images, and web cache |
+| `aichat-database` | 8091 | FastAPI REST wrapper for PostgreSQL |
+| `aichat-researchbox` | 8092 | RSS/feed discovery service |
 | `aichat-memory` | 8094 | Persistent key-value memory store |
 | `aichat-toolkit` | 8095 | Dynamic tool execution sandbox |
+| `aichat-mcp` | 8096 | MCP HTTP/SSE server (LM Studio / Claude Desktop integration) |
 | `human_browser` | 36411 | Chromium browser + noVNC (managed separately) |
 
 **Start all services:**
@@ -336,6 +340,31 @@ docker compose down
 docker compose logs -f aichat-toolkit
 docker logs human_browser
 ```
+
+---
+
+## MCP Server (LM Studio / Claude Desktop)
+
+`aichat-mcp` exposes all aichat tools over the network via the Model Context Protocol.
+It supports both SSE (legacy) and Streamable HTTP (MCP 2025-03-26) transports.
+
+**LM Studio `mcp_servers.json` entry:**
+```json
+{
+  "mcpServers": {
+    "aichat": {
+      "url": "http://<YOUR_MACHINE_IP>:8096/sse"
+    }
+  }
+}
+```
+
+**Health check:**
+```bash
+curl http://localhost:8096/health
+```
+
+Returns a JSON object listing active sessions, available tools, and supported transports.
 
 ---
 

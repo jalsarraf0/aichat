@@ -9,6 +9,8 @@ Architecture
   (using `docker cp`), then starts it with `docker exec -d ... uvicorn ...`.
 * Subsequent calls: HTTP POST to http://<container-bridge-ip>:7081/<action>.
 * The server persists across aichat restarts (the container keeps running).
+* Version check: if the running server is an older version it is killed and
+  redeployed automatically so _SERVER_SRC changes take effect on next use.
 * Fallback: if the browser server fails, httpx fetches the URL directly.
 """
 from __future__ import annotations
@@ -27,6 +29,10 @@ BROWSER_CONTAINER = "human_browser"
 BROWSER_PORT = 7081
 _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
+# When _ensure_server() finds a running server whose /health returns a
+# different version it kills it and redeploys the current _SERVER_SRC.
+_REQUIRED_SERVER_VERSION = "2"
+
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
 # ---------------------------------------------------------------------------
@@ -34,28 +40,59 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool."""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v2"""
 from __future__ import annotations
+
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_pw = _browser = _page = None
+_VERSION = "2"
+_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_STEALTH_JS = (
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+)
+
+_pw = _browser = _context = _page = None
+_page_lock = None  # asyncio.Lock — created lazily inside first async call
+
+
+async def _new_context():
+    global _context
+    _context = await _browser.new_context(
+        user_agent=_UA,
+        viewport={"width": 1920, "height": 1080},
+        locale="en-US",
+    )
+    await _context.add_init_script(_STEALTH_JS)
+    return _context
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global _pw, _browser, _page
+    global _pw, _browser, _context, _page
     _pw = await async_playwright().start()
     _browser = await _pw.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1920,1080",
+        ],
     )
-    _page = await _browser.new_page()
+    await _new_context()
+    _page = await _context.new_page()
     yield
     await _browser.close()
     await _pw.stop()
@@ -70,6 +107,28 @@ async def _global_exc(request: Request, exc: Exception) -> JSONResponse:
         status_code=200,
         content={"error": str(exc), "content": "", "title": "", "url": ""},
     )
+
+
+async def _ensure_page():
+    """Return a healthy page, recreating it (and context if needed) after a crash."""
+    global _context, _page, _page_lock
+    if _page_lock is None:
+        _page_lock = asyncio.Lock()
+    async with _page_lock:
+        try:
+            if _page is not None and not _page.is_closed():
+                return _page
+        except Exception:
+            pass
+        # Page is gone — recreate
+        try:
+            if _context is None or _context.is_closed():
+                await _new_context()
+            _page = await _context.new_page()
+        except Exception:
+            await _new_context()
+            _page = await _context.new_page()
+        return _page
 
 
 async def _extract_text(page) -> str:
@@ -87,18 +146,61 @@ async def _extract_text(page) -> str:
         return ""
 
 
+async def _get_image_urls(page) -> list:
+    """Extract direct http(s) image URLs from the current page DOM."""
+    js = """() => {
+        const seen = new Set();
+        const result = [];
+        for (const img of document.querySelectorAll('img[src]')) {
+            const src = img.src || '';
+            if (src.startsWith('http') && !seen.has(src)) {
+                seen.add(src);
+                result.push(src);
+            }
+        }
+        for (const el of document.querySelectorAll('[srcset]')) {
+            const srcset = el.getAttribute('srcset') || '';
+            for (const part of srcset.split(',')) {
+                const tokens = part.trim().split(' ').filter(function(t) {
+                    return t.length > 0;
+                });
+                const url = tokens[0] || '';
+                if (url.startsWith('http') && !seen.has(url)) {
+                    seen.add(url);
+                    result.push(url);
+                }
+            }
+        }
+        const og = document.querySelector('meta[property="og:image"]');
+        if (og) {
+            const c = og.getAttribute('content') || '';
+            if (c.startsWith('http') && !seen.has(c)) {
+                seen.add(c);
+                result.push(c);
+            }
+        }
+        return result.slice(0, 30);
+    }"""
+    try:
+        return await page.evaluate(js)
+    except Exception:
+        return []
+
+
 async def _safe_goto(page, url: str) -> None:
     for wait in ("networkidle", "load", "domcontentloaded"):
         try:
             await page.goto(url, wait_until=wait, timeout=30000)
             return
         except Exception:
+            if page.is_closed():
+                raise
             pass
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "version": _VERSION}
 
 
 class NavReq(BaseModel):
@@ -109,13 +211,18 @@ class NavReq(BaseModel):
 @app.post("/navigate")
 async def navigate(req: NavReq):
     try:
-        await _safe_goto(_page, req.url)
+        page = await _ensure_page()
+        await _safe_goto(page, req.url)
         return {
-            "title": await _page.title(),
-            "url": _page.url,
-            "content": await _extract_text(_page),
+            "title": await page.title(),
+            "url": page.url,
+            "content": await _extract_text(page),
         }
     except Exception as exc:
+        try:
+            await _ensure_page()
+        except Exception:
+            pass
         return {"error": str(exc), "content": "", "title": "", "url": req.url}
 
 
@@ -126,12 +233,13 @@ class ClickReq(BaseModel):
 @app.post("/click")
 async def click(req: ClickReq):
     try:
-        await _page.click(req.selector, timeout=10000)
+        page = await _ensure_page()
+        await page.click(req.selector, timeout=10000)
         try:
-            await _page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
-        return {"url": _page.url, "content": await _extract_text(_page)}
+        return {"url": page.url, "content": await _extract_text(page)}
     except Exception as exc:
         return {"error": str(exc), "content": "", "url": ""}
 
@@ -144,7 +252,8 @@ class FillReq(BaseModel):
 @app.post("/fill")
 async def fill(req: FillReq):
     try:
-        await _page.fill(req.selector, req.value)
+        page = await _ensure_page()
+        await page.fill(req.selector, req.value)
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -153,10 +262,11 @@ async def fill(req: FillReq):
 @app.get("/read")
 async def read():
     try:
+        page = await _ensure_page()
         return {
-            "title": await _page.title(),
-            "url": _page.url,
-            "content": await _extract_text(_page),
+            "title": await page.title(),
+            "url": page.url,
+            "content": await _extract_text(page),
         }
     except Exception as exc:
         return {"error": str(exc), "content": "", "title": "", "url": ""}
@@ -169,7 +279,8 @@ class EvalReq(BaseModel):
 @app.post("/eval")
 async def evaluate(req: EvalReq):
     try:
-        result = await _page.evaluate(req.code)
+        page = await _ensure_page()
+        result = await page.evaluate(req.code)
         return {"result": str(result) if result is not None else "null"}
     except Exception as exc:
         return {"error": str(exc), "result": "null"}
@@ -182,13 +293,52 @@ class ScreenshotReq(BaseModel):
 
 @app.post("/screenshot")
 async def screenshot(req: ScreenshotReq):
+    page = await _ensure_page()
+    nav_error = None
+    if req.url:
+        try:
+            await _safe_goto(page, req.url)
+        except Exception as exc:
+            nav_error = str(exc)
+            # Page may have crashed — get a fresh one and retry
+            try:
+                page = await _ensure_page()
+                await _safe_goto(page, req.url)
+                nav_error = None
+            except Exception as exc2:
+                nav_error = str(exc2)
     try:
-        if req.url:
-            await _safe_goto(_page, req.url)
-        await _page.screenshot(path=req.path, full_page=False)
-        return {"path": req.path, "title": await _page.title(), "url": _page.url}
+        await page.screenshot(path=req.path, full_page=False)
+        result = {"path": req.path, "title": await page.title(), "url": page.url}
+        if nav_error:
+            result["nav_error"] = nav_error
+        return result
     except Exception as exc:
-        return {"error": str(exc), "path": req.path, "title": "", "url": ""}
+        # Screenshot itself failed — extract page image URLs as fallback info
+        img_urls: list = []
+        try:
+            if not page.is_closed():
+                img_urls = await _get_image_urls(page)
+        except Exception:
+            pass
+        return {
+            "error": str(exc),
+            "path": req.path,
+            "title": "",
+            "url": page.url if not page.is_closed() else "",
+            "image_urls": img_urls,
+        }
+
+
+@app.get("/images")
+async def list_images():
+    """Extract direct image URLs from the currently loaded page."""
+    try:
+        page = await _ensure_page()
+        urls = await _get_image_urls(page)
+        return {"urls": urls}
+    except Exception as exc:
+        return {"urls": [], "error": str(exc)}
 
 
 class SearchReq(BaseModel):
@@ -200,20 +350,21 @@ class SearchReq(BaseModel):
 async def search(req: SearchReq):
     """Human-like search: navigate to DuckDuckGo, type query, submit, return results."""
     try:
-        await _safe_goto(_page, "https://duckduckgo.com")
-        await _page.fill("input[name='q']", req.query)
-        await _page.keyboard.press("Enter")
+        page = await _ensure_page()
+        await _safe_goto(page, "https://duckduckgo.com")
+        await page.fill("input[name='q']", req.query)
+        await page.keyboard.press("Enter")
         try:
-            await _page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             try:
-                await _page.wait_for_load_state("load", timeout=10000)
+                await page.wait_for_load_state("load", timeout=10000)
             except Exception:
                 pass
-        content = await _extract_text(_page)
+        content = await _extract_text(page)
         return {
             "query": req.query,
-            "url": _page.url,
+            "url": page.url,
             "content": content,
         }
     except Exception as exc:
@@ -293,15 +444,27 @@ class BrowserTool:
             capture_output=True,
         )
 
+    def _kill_old_server(self) -> None:
+        """Kill any running browser server process inside the container."""
+        subprocess.run(
+            ["docker", "exec", BROWSER_CONTAINER, "pkill", "-f", "browser_server.py"],
+            capture_output=True,
+        )  # ignore return code — process may not be running
+
     async def _ensure_server(self) -> str:
-        """Return the server base URL, starting the server if needed."""
+        """Return the server base URL, starting (or upgrading) the server if needed."""
         # Fast path: cached URL
         if self._server_url:
             try:
                 async with httpx.AsyncClient(timeout=2.0) as c:
                     r = await c.get(f"{self._server_url}/health")
                     if r.status_code == 200:
-                        return self._server_url
+                        if r.json().get("version") == _REQUIRED_SERVER_VERSION:
+                            return self._server_url
+                        # Version mismatch — kill stale server and redeploy
+                        self._kill_old_server()
+                        self._server_url = None
+                        await asyncio.sleep(1.5)
             except Exception:
                 self._server_url = None
 
@@ -313,8 +476,12 @@ class BrowserTool:
             async with httpx.AsyncClient(timeout=2.0) as c:
                 r = await c.get(f"{url}/health")
                 if r.status_code == 200:
-                    self._server_url = url
-                    return url
+                    if r.json().get("version") == _REQUIRED_SERVER_VERSION:
+                        self._server_url = url
+                        return url
+                    # Stale version — kill and redeploy
+                    self._kill_old_server()
+                    await asyncio.sleep(1.5)
         except Exception:
             pass
 
@@ -413,6 +580,14 @@ class BrowserTool:
         # Expose the host-side path (workspace is bind-mounted)
         data["host_path"] = f"/docker/human_browser/workspace/screenshot_{ts}.png"
         return data
+
+    async def list_images(self) -> dict:
+        """Get image URLs from the current page in the browser."""
+        base = await self._ensure_server()
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{base}/images")
+        r.raise_for_status()
+        return r.json()
 
     async def click(self, selector: str) -> dict:
         base = await self._ensure_server()
