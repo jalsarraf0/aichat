@@ -352,6 +352,163 @@ class ToolManager:
         await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
         return await self.browser.page_images(url=url, scroll=scroll, max_scrolls=max_scrolls)
 
+    async def run_image_search(
+        self,
+        query: str,
+        count: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> list[dict]:
+        """Search for an image by description; return MCP content blocks (text + image).
+
+        Two-tier strategy:
+          Tier 1 — DDG web search → page_images on top result pages → fetch best match.
+          Tier 2 — DDG image-search page → decode proxy URLs → fetch best match.
+        """
+        await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
+        import base64 as _b64
+        import re as _re
+        import httpx as _httpx
+        from urllib.parse import (
+            unquote as _uq,
+            urlparse as _up,
+            parse_qs as _pqs,
+        )
+
+        qwords = {w for w in query.lower().split() if len(w) > 2}
+        _GOOD_D = ("twimg.com", "wikia.nocookie.net", "imgur.com", "redd.it",
+                   "prydwen.gg", "fandom.com", "iopwiki.com")
+        _SKIP_P = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
+                   "logo", "icon", "avatar", "pixel.gif",
+                   "ytimg.com", "yt3.ggpht")
+        _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com",
+                    "dailymotion.com", "twitch.tv")
+        _HDRS = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "https://www.google.com/",
+        }
+
+        def _score(img: dict) -> int:
+            url_l = img.get("url", "").lower()
+            alt_l = img.get("alt", "").lower()
+            if any(p in url_l for p in _SKIP_P):
+                return -999
+            s  = sum(2 for w in qwords if w in url_l)
+            s += sum(5 for w in qwords if w in alt_l)
+            s += sum(6 for d in _GOOD_D if d in url_l)
+            if img.get("type") == "srcset":
+                s += 2
+            return s
+
+        async def _fetch_render(url: str) -> list[dict] | None:
+            if not url or not url.startswith("http"):
+                return None
+            try:
+                async with _httpx.AsyncClient(timeout=12.0) as hc:
+                    r = await hc.get(url, headers=_HDRS, follow_redirects=True)
+                if r.status_code != 200:
+                    return None
+                ct = r.headers.get("content-type", "").split(";")[0].strip()
+                if not ct.startswith("image/"):
+                    return None
+                raw = r.content
+                if len(raw) < 10_240:
+                    return None
+                try:
+                    from PIL import Image as _PIL
+                    import io as _bio
+                    with _PIL.open(_bio.BytesIO(raw)) as pil:
+                        if pil.width < 150 or pil.height < 150:
+                            return None
+                        pil = pil.convert("RGB")
+                        if pil.width > 1280 or pil.height > 1024:
+                            pil.thumbnail((1280, 1024), _PIL.LANCZOS)
+                        buf = _bio.BytesIO()
+                        pil.save(buf, format="JPEG", quality=85)
+                        raw, ct = buf.getvalue(), "image/jpeg"
+                except Exception:
+                    pass
+                b64 = _b64.standard_b64encode(raw).decode("ascii")
+                return [
+                    {"type": "text",  "text": f"Image: {url}\nQuery: {query}"},
+                    {"type": "image", "data": b64, "mimeType": ct},
+                ]
+            except Exception:
+                return None
+
+        # ── Tier 1: DDG web search → page_images on top article pages ────────
+        try:
+            async with _httpx.AsyncClient(timeout=12.0) as hc:
+                sr = await hc.get(
+                    f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                    headers=_HDRS,
+                    follow_redirects=True,
+                )
+            _ddg_hosts = ("duckduckgo.com", "ddg.gg", "duck.co")
+            raw_enc = _re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', sr.text)
+            t1_urls: list[str] = []
+            t1_seen: set[str] = set()
+            for enc in raw_enc:
+                dec = _uq(enc)
+                if any(d in dec for d in _ddg_hosts):
+                    continue
+                if dec not in t1_seen:
+                    t1_seen.add(dec)
+                    t1_urls.append(dec)
+            t1_urls = [u for u in t1_urls
+                       if not any(d in u for d in _SKIP_T1)]
+            for page_url in t1_urls[:4]:
+                try:
+                    pi = await self.run_page_images(
+                        page_url, mode, confirmer, scroll=True, max_scrolls=2
+                    )
+                    imgs = sorted(pi.get("images", []), key=_score, reverse=True)
+                    for cand in imgs[:count]:
+                        if _score(cand) < 0:
+                            continue
+                        found = await _fetch_render(cand["url"])
+                        if found:
+                            return found
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # ── Tier 2: DDG image-search page → decode proxy URLs ────────────────
+        try:
+            t2_url = (f"https://duckduckgo.com/?q={query.replace(' ', '+')}"
+                      "&iax=images&ia=images")
+            pi2 = await self.run_page_images(
+                t2_url, mode, confirmer, scroll=True, max_scrolls=3
+            )
+            t2_imgs: list[dict] = []
+            for img2 in pi2.get("images", []):
+                u2 = img2.get("url", "")
+                if "external-content.duckduckgo.com" in u2:
+                    try:
+                        params2 = _pqs(_up(u2).query)
+                        orig2 = _uq(params2.get("u", [""])[0])
+                        if orig2.startswith("http"):
+                            t2_imgs.append({**img2, "url": orig2})
+                            continue
+                    except Exception:
+                        pass
+                t2_imgs.append(img2)
+            for cand2 in sorted(t2_imgs, key=_score, reverse=True)[:count]:
+                found2 = await _fetch_render(cand2["url"])
+                if found2:
+                    return found2
+        except Exception:
+            pass
+
+        return [{"type": "text",
+                 "text": (f"image_search: no image found for '{query}'.\n"
+                          "Try: page_images on a specific URL, or refine the query.")}]
+
     async def run_web_search(
         self,
         query: str,

@@ -713,6 +713,33 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "image_search",
+        "description": (
+            "Search for any image by text description and return it rendered inline. "
+            "Searches the web for pages matching the query, extracts every image URL with "
+            "page_images, scores candidates by keyword match in alt text / URL, source domain "
+            "quality, and image dimensions, then fetches the best match (auto-resized to "
+            "1280×1024 JPEG). Falls back to DuckDuckGo Images if no good result is found on "
+            "the initial pages. Use for character art, outfit skins, product photos, logos, "
+            "screenshots, or any visual content. "
+            "Example queries: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower at night'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language description of the image to find.",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Max candidates to try per source page (default 5, max 20).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "bulk_screenshot",
         "description": (
             "Take screenshots of multiple URLs in parallel and return them all inline (max 6 URLs)."
@@ -1518,6 +1545,15 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                     line += f"  {img['srcset_width']}w"
                 lines.append(line)
             return _text("\n".join(lines))
+
+        if name == "image_search":
+            query     = str(arguments.get("query", "")).strip()
+            img_count = max(1, min(int(arguments.get("count", 5)), 20))
+            if not query:
+                return _text("image_search: 'query' is required")
+            return await mgr.run_image_search(
+                query=query, count=img_count, mode=_APPROVAL, confirmer=None,
+            )
 
         if name == "bulk_screenshot":
             urls = [str(u).strip() for u in arguments.get("urls", []) if str(u).strip()]

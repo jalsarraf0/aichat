@@ -1053,14 +1053,14 @@ class TestNewToolsAdvertised:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_39(self):
+    def test_total_tool_count_is_40(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 100, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
+        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
 
     def test_new_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1250,14 +1250,14 @@ class TestImageGeneration:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_39_imggen(self):
+    def test_total_tool_count_is_40_imggen(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 201, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
+        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
 
     def test_gen_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1602,14 +1602,14 @@ class TestBrowserImageDownload:
     # -- MCP HTTP schema checks (skip if MCP not running) --------------------
 
     @skip_mcp
-    def test_tool_count_is_39(self):
+    def test_tool_count_is_40(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 400, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
+        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
 
     @skip_mcp
     def test_browser_save_images_in_mcp_http_schema(self):
@@ -1622,3 +1622,35 @@ class TestBrowserImageDownload:
         assert "browser_save_images" in tools, "browser_save_images missing from HTTP MCP tools"
         assert "browser_download_page_images" in tools, \
             "browser_download_page_images missing from HTTP MCP tools"
+
+    # -- image_search tests ---------------------------------------------------
+
+    def test_image_search_in_stdio_schema(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        names = {t["name"] for t in _TOOL_SCHEMAS}
+        assert "image_search" in names, "image_search missing from stdio _TOOL_SCHEMAS"
+        schema = next(t for t in _TOOL_SCHEMAS if t["name"] == "image_search")
+        assert "query" in schema["inputSchema"]["properties"]
+        assert "query" in schema["inputSchema"]["required"]
+
+    def test_manager_has_run_image_search(self):
+        from aichat.tools.manager import ToolManager
+        assert hasattr(ToolManager, "run_image_search"), \
+            "ToolManager missing run_image_search method"
+        import inspect
+        sig = inspect.signature(ToolManager.run_image_search)
+        assert "query" in sig.parameters
+        assert "count" in sig.parameters
+
+    @skip_mcp
+    def test_image_search_in_mcp_http_schema(self):
+        r = httpx.post(
+            f"{MCP_URL}/mcp",
+            json={"jsonrpc": "2.0", "id": 402, "method": "tools/list", "params": {}},
+            timeout=10,
+        )
+        tools = {t["name"]: t for t in r.json()["result"]["tools"]}
+        assert "image_search" in tools, "image_search missing from HTTP MCP tools"
+        props = tools["image_search"]["inputSchema"]["properties"]
+        assert "query" in props
+        assert "count" in props
