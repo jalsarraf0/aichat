@@ -32,7 +32,7 @@ services:
       - "8091:8091"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8091/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -50,7 +50,7 @@ services:
       - "8092:8092"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8092/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -84,7 +84,7 @@ services:
       - "8096:8096"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8096/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8096/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -101,7 +101,7 @@ services:
       - memorydb:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8094/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -119,7 +119,7 @@ services:
       - ${HOME}/git:/data/repos:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8095/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3

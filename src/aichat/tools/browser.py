@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "7"
+_REQUIRED_SERVER_VERSION = "10"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "7"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v7"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v10"""
 from __future__ import annotations
 
 import asyncio
@@ -53,18 +53,69 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "7"
+_VERSION = "10"
+
+# UA matches the actual Playwright Chromium version (145) to avoid the
+# trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
+# Windows platform is used because it represents ~70% of real desktop Chrome
+# users and avoids the Linux-headless server fingerprint.
 _UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 )
+
+# Sec-Ch-Ua headers to inject — must use "Google Chrome" brand (not
+# "HeadlessChrome" which Playwright emits and bots always check for).
+_SEC_CH_UA_HEADERS = {
+    "Sec-Ch-Ua": \'"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"\',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": \'"Windows"\',
+}
+
 # Extended stealth: hide automation signals, spoof navigator properties,
 # restore chrome runtime so sites don\'t detect a bare Chromium shell.
 _STEALTH_JS = """
+// 1. Remove webdriver flag
 Object.defineProperty(navigator, \'webdriver\', {get: () => undefined});
-Object.defineProperty(navigator, \'plugins\', {get: () => [1, 2, 3, 4, 5]});
+
+// 2. Realistic plugins (PDF viewer + Chrome PDF plugin — present in real Chrome)
+const _pluginData = [
+    {name: \'Chrome PDF Plugin\', filename: \'internal-pdf-viewer\', description: \'Portable Document Format\'},
+    {name: \'Chrome PDF Viewer\',  filename: \'mhjfbmdgcfjbbpaeojofohoefgiehjai\', description: \'\'},
+    {name: \'Native Client\',      filename: \'internal-nacl-plugin\',            description: \'\'},
+];
+const _plugins = Object.create(PluginArray.prototype);
+_pluginData.forEach((d, i) => {
+    const p = Object.create(Plugin.prototype);
+    Object.defineProperty(p, \'name\',        {value: d.name});
+    Object.defineProperty(p, \'filename\',    {value: d.filename});
+    Object.defineProperty(p, \'description\', {value: d.description});
+    Object.defineProperty(p, \'length\',      {value: 0});
+    _plugins[i] = p;
+    _plugins[d.name] = p;
+});
+Object.defineProperty(_plugins, \'length\', {value: _pluginData.length});
+Object.defineProperty(navigator, \'plugins\', {get: () => _plugins});
+
+// 3. Languages, platform, concurrency
 Object.defineProperty(navigator, \'languages\', {get: () => [\'en-US\', \'en\']});
-window.chrome = {runtime: {}};
+Object.defineProperty(navigator, \'platform\',  {get: () => \'Win32\'});
+Object.defineProperty(navigator, \'hardwareConcurrency\', {get: () => 8});
+
+// 4. Chrome runtime stub (required by many sites)
+window.chrome = {
+    runtime: {
+        id: undefined,
+        connect: () => {},
+        sendMessage: () => {},
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+    },
+    loadTimes: () => ({}),
+    csi: () => ({}),
+    app: {},
+};
+
+// 5. Permissions — avoid the \'query\' TypeError that leaks headless state
 try {
     const origQuery = window.navigator.permissions.query;
     window.navigator.permissions.query = (p) =>
@@ -95,6 +146,7 @@ async def _new_context():
         user_agent=_UA,
         viewport=vp,
         locale="en-US",
+        extra_http_headers=_SEC_CH_UA_HEADERS,
     )
     await _context.add_init_script(_STEALTH_JS)
     return _context
@@ -245,6 +297,45 @@ async def _safe_goto(page, url: str) -> None:
             pass
 
 
+# Phrases that indicate the browser session was blocked by bot-detection.
+# When detected in the page text, the navigate handler rotates the context
+# (fresh cookies/fingerprint) and retries once automatically.
+_BLOCK_SIGNALS = [
+    "you\'ve been blocked",
+    "access denied",
+    "enable javascript and cookies",
+    "checking your browser",
+    "please enable cookies",
+    "cloudflare ray id",
+    "attention required",
+    "ddos protection by cloudflare",
+    "please wait while we verify",
+    "your ip address has been",
+    "unusual traffic from your",
+    "sorry, humans only",
+    "are you a robot",
+    "challenge-platform",
+]
+
+
+def _is_blocked(text: str) -> bool:
+    low = text.lower()
+    return any(sig in low for sig in _BLOCK_SIGNALS)
+
+
+async def _rotate_context_and_page() -> object:
+    """Close the current browser context and open a fresh one with new cookies/state."""
+    global _context, _page
+    try:
+        if _context and not _context.is_closed():
+            await _context.close()
+    except Exception:
+        pass
+    await _new_context()
+    _page = await _context.new_page()
+    return _page
+
+
 @app.get("/health")
 async def health():
     return {"ok": True, "version": _VERSION}
@@ -255,15 +346,38 @@ class NavReq(BaseModel):
     wait: str = "networkidle"
 
 
+def _site_fallback(url: str) -> str | None:
+    """Return an alternative URL for sites known to block datacenter IPs."""
+    import re as _re
+    # new Reddit → old Reddit (much lighter anti-bot stance)
+    m = _re.match(r\'https?://(?:www\\.)?reddit\\.com(.*)\', url)
+    if m:
+        return "https://old.reddit.com" + m.group(1)
+    return None
+
+
 @app.post("/navigate")
 async def navigate(req: NavReq):
     try:
         page = await _ensure_page()
         await _safe_goto(page, req.url)
+        content = await _extract_text(page)
+        # Auto-rotate context and retry once if bot-detection is triggered
+        if _is_blocked(content):
+            # 1st try: rotate context (fresh cookies) and retry same URL
+            page = await _rotate_context_and_page()
+            await _safe_goto(page, req.url)
+            content = await _extract_text(page)
+        # 2nd try: if still blocked, try a known-good fallback URL
+        if _is_blocked(content):
+            fallback = _site_fallback(req.url)
+            if fallback:
+                await _safe_goto(page, fallback)
+                content = await _extract_text(page)
         return {
             "title": await page.title(),
             "url": page.url,
-            "content": await _extract_text(page),
+            "content": content,
         }
     except Exception as exc:
         try:
