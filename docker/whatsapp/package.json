@@ -1,0 +1,17 @@
+{
+  "name": "aichat-whatsapp",
+  "version": "1.0.0",
+  "description": "WhatsApp bot for aichat — Baileys + LM Studio with full MCP tool support",
+  "type": "module",
+  "main": "bot.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.0",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.3"
+  }
+}

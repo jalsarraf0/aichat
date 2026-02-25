@@ -110,3 +110,4 @@ fi
 
 log "Install complete."
 log "Run: $HOME/.local/bin/aichat"
+log "WhatsApp bot: visit http://localhost:8097 to scan the QR code and pair a number."
