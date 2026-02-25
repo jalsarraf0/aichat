@@ -646,6 +646,44 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "page_scrape",
+        "description": (
+            "Navigate to a URL, scroll through the full page in viewport-sized steps waiting for "
+            "lazy-loaded content to appear (infinite-scroll feeds, JS widgets, lazy images), then "
+            "extract the complete rendered text from the final DOM state. "
+            "Unlike web_fetch (grabs text immediately after load), page_scrape simulates a human "
+            "scrolling to the bottom so content that only renders on scroll is captured. "
+            "Returns full page text plus scroll stats (steps, whether the page grew, final height). "
+            "Set include_links=true to also return all hyperlinks from the final DOM."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL to navigate to before scraping. Omit to scrape the current browser page.",
+                },
+                "max_scrolls": {
+                    "type": "integer",
+                    "description": "Maximum scroll steps (default 10, max 30).",
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "Milliseconds to wait after each scroll for lazy content (default 500).",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return (default 16000).",
+                },
+                "include_links": {
+                    "type": "boolean",
+                    "description": "If true, also return all hyperlinks from the final DOM.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "bulk_screenshot",
         "description": (
             "Take screenshots of multiple URLs in parallel and return them all inline (max 6 URLs)."
@@ -1390,6 +1428,39 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             final_url = result.get("url", url)
             header = f"Title: {title}\nURL:   {final_url}\n\n" if title else f"URL: {final_url}\n\n"
             return _text(header + clean)
+
+        if name == "page_scrape":
+            result = await mgr.run_page_scrape(
+                url=str(arguments.get("url", "")),
+                mode=_APPROVAL, confirmer=None,
+                max_scrolls=max(1, min(int(arguments.get("max_scrolls", 10)), 30)),
+                wait_ms=max(100, min(int(arguments.get("wait_ms", 500)), 3000)),
+                max_chars=max(500, min(int(arguments.get("max_chars", 16000)), 64000)),
+                include_links=bool(arguments.get("include_links", False)),
+            )
+            if result.get("error"):
+                return _text(f"page_scrape error: {result['error']}")
+            title     = result.get("title", "")
+            content   = result.get("content", "")
+            final_url = result.get("url", "")
+            steps     = result.get("scroll_steps", 0)
+            grew      = result.get("content_grew_on_scroll", False)
+            height    = result.get("final_page_height", 0)
+            chars     = result.get("char_count", len(content))
+            header = (
+                f"Title: {title}\nURL: {final_url}\n"
+                f"Scrolled: {steps} steps | Page height: {height}px"
+                + (" | lazy content grew" if grew else "")
+                + f" | {chars} chars extracted\n\n"
+            )
+            lines = [l.strip() for l in content.splitlines() if l.strip()]
+            body = "\n".join(lines)
+            result_text = header + body
+            if arguments.get("include_links") and result.get("links"):
+                link_lines = [f"[{lk.get('text','')[:60]}] → {lk.get('href','')[:120]}"
+                              for lk in result["links"][:100]]
+                result_text += f"\n\nLinks ({len(result['links'])}):\n" + "\n".join(link_lines)
+            return _text(result_text)
 
         if name == "bulk_screenshot":
             urls = [str(u).strip() for u in arguments.get("urls", []) if str(u).strip()]

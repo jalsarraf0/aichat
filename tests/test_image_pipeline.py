@@ -1060,7 +1060,7 @@ class TestNewToolsAdvertised:
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 37, f"Expected 37 tools, got {len(tools)}"
+        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
 
     def test_new_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1257,7 +1257,7 @@ class TestImageGeneration:
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 37, f"Expected 37 tools, got {len(tools)}"
+        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
 
     def test_gen_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1434,16 +1434,16 @@ class TestBrowserImageDownload:
         assert "save_images" in src, "save_images not routed in run_browser"
         assert "download_page_images" in src, "download_page_images not routed in run_browser"
 
-    # -- browser server v10 checks -------------------------------------------
+    # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_10(self):
+    def test_browser_server_version_is_11(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "10", \
-            f"Expected _REQUIRED_SERVER_VERSION='10', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "10"' in _SERVER_SRC, \
-            "_VERSION = '10' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "11", \
+            f"Expected _REQUIRED_SERVER_VERSION='11', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "11"' in _SERVER_SRC, \
+            "_VERSION = '11' not found in _SERVER_SRC"
 
-    def test_browser_server_v10_has_block_detection(self):
+    def test_browser_server_has_block_detection(self):
         from aichat.tools.browser import _SERVER_SRC
         assert "_BLOCK_SIGNALS" in _SERVER_SRC, "_BLOCK_SIGNALS not in _SERVER_SRC"
         assert "_is_blocked" in _SERVER_SRC, "_is_blocked not in _SERVER_SRC"
@@ -1454,7 +1454,7 @@ class TestBrowserImageDownload:
         assert "old.reddit.com" in _SERVER_SRC, \
             "old.reddit.com fallback not in _SERVER_SRC"
 
-    def test_browser_server_v10_stealth_headers(self):
+    def test_browser_server_stealth_headers(self):
         from aichat.tools.browser import _SERVER_SRC
         assert "Google Chrome" in _SERVER_SRC, "Google Chrome brand not in _SERVER_SRC"
         assert "Windows" in _SERVER_SRC, "Windows platform not in _SERVER_SRC"
@@ -1478,17 +1478,60 @@ class TestBrowserImageDownload:
         assert hasattr(BrowserTool, "download_page_images"), \
             "BrowserTool.download_page_images() missing"
 
+    # -- page_scrape checks --------------------------------------------------
+
+    def test_browser_server_v11_has_scrape_endpoint(self):
+        from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
+        assert _REQUIRED_SERVER_VERSION == "11", \
+            f"Expected v11, got {_REQUIRED_SERVER_VERSION}"
+        assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
+        assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
+        assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
+        assert "ScrapeReq" in _SERVER_SRC, "ScrapeReq missing"
+        assert "content_grew_on_scroll" in _SERVER_SRC, "content_grew_on_scroll missing"
+        assert "include_links" in _SERVER_SRC, "include_links missing"
+        assert "final_page_height" in _SERVER_SRC, "final_page_height missing"
+
+    def test_browser_tool_has_scrape_method(self):
+        from aichat.tools.browser import BrowserTool
+        assert hasattr(BrowserTool, "scrape"), "BrowserTool.scrape() missing"
+        import inspect
+        sig = inspect.signature(BrowserTool.scrape)
+        assert "max_scrolls" in sig.parameters, "max_scrolls missing from BrowserTool.scrape"
+        assert "wait_ms" in sig.parameters, "wait_ms missing from BrowserTool.scrape"
+        assert "include_links" in sig.parameters, "include_links missing from BrowserTool.scrape"
+
+    def test_manager_has_run_page_scrape(self):
+        import inspect
+        from aichat.tools.manager import ToolManager
+        assert hasattr(ToolManager, "run_page_scrape"), "run_page_scrape missing from ToolManager"
+        sig = inspect.signature(ToolManager.run_page_scrape)
+        assert "max_scrolls" in sig.parameters
+        assert "wait_ms" in sig.parameters
+        assert "include_links" in sig.parameters
+
+    def test_page_scrape_in_stdio_schema(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        by_name = {t["name"]: t for t in _TOOL_SCHEMAS}
+        assert "page_scrape" in by_name, "page_scrape missing from stdio _TOOL_SCHEMAS"
+        props = by_name["page_scrape"]["inputSchema"]["properties"]
+        assert "url" in props
+        assert "max_scrolls" in props
+        assert "wait_ms" in props
+        assert "max_chars" in props
+        assert "include_links" in props
+
     # -- MCP HTTP schema checks (skip if MCP not running) --------------------
 
     @skip_mcp
-    def test_tool_count_is_37(self):
+    def test_tool_count_is_38(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 400, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 37, f"Expected 37 tools, got {len(tools)}"
+        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
 
     @skip_mcp
     def test_browser_save_images_in_mcp_http_schema(self):

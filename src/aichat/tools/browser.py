@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "10"
+_REQUIRED_SERVER_VERSION = "11"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "10"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v10"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v11"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "10"
+_VERSION = "11"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -821,6 +821,128 @@ async def download_page_images(req: DownloadPageImagesReq):
     return {"saved": saved, "errors": errors, "count": len(saved), "filter": req.filter}
 
 
+class ScrapeReq(BaseModel):
+    url: str = ""
+    max_scrolls: int = 10
+    wait_ms: int = 500
+    max_chars: int = 16000
+    include_links: bool = False
+
+
+async def _scroll_full_page(page, max_scrolls: int, wait_ms_s: float) -> dict:
+    """Scroll through the page in viewport-sized increments, pausing after each
+    step so lazy-loaded content (images, infinite-scroll items, JS widgets) has
+    time to appear.  Returns scroll stats including whether the page grew."""
+    try:
+        vp_h = int(await page.evaluate("window.innerHeight") or 800)
+    except Exception:
+        vp_h = 800
+    step = max(vp_h - 100, 200)   # 100 px overlap keeps edge lazy-loaders alive
+    scroll_y, prev_h, grew, steps = 0, 0, False, 0
+    for i in range(max_scrolls):
+        try:
+            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            await asyncio.sleep(wait_ms_s)
+            cur_h = int(await page.evaluate("document.documentElement.scrollHeight") or 0)
+        except Exception:
+            break
+        if cur_h > prev_h and i > 0:
+            grew = True          # infinite-scroll: new content arrived
+        prev_h = cur_h
+        steps = i + 1
+        if scroll_y >= cur_h:
+            break                # reached the bottom
+        scroll_y += step
+    # Return to top so any subsequent screenshot or read starts at the header
+    try:
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.2)
+    except Exception:
+        pass
+    return {"steps": steps, "content_grew": grew, "final_height": prev_h}
+
+
+async def _extract_text_long(page, max_chars: int = 16000) -> str:
+    """Extract all readable text from the fully-rendered DOM.
+    Prefers <main>/<article> if present (avoids nav/footer noise).
+    max_chars is configurable — pass 0 for no limit (returns all text)."""
+    limit = max_chars if max_chars > 0 else 999999
+    js = (
+        "() => {"
+        "const b = document.body;"
+        "if (!b) return \'\';"
+        "b.querySelectorAll(\'script,style,noscript,iframe\').forEach(e => e.remove());"
+        "const m = b.querySelector(\'main,article\');"
+        "return (m || b).innerText.trim().slice(0," + str(limit) + ");"
+        "}"
+    )
+    try:
+        return await page.evaluate(js)
+    except Exception:
+        return ""
+
+
+@app.post("/scrape")
+async def scrape(req: ScrapeReq):
+    """Navigate (optional), scroll through the full page waiting for lazy loads,
+    then extract complete rendered text from the final DOM state."""
+    try:
+        page = await _ensure_page()
+
+        # Navigate if a URL was supplied; reuse block-detection + fallback logic
+        if req.url:
+            await _safe_goto(page, req.url)
+            quick = await _extract_text(page)
+            if _is_blocked(quick):
+                page = await _rotate_context_and_page()
+                await _safe_goto(page, req.url)
+                quick = await _extract_text(page)
+            if _is_blocked(quick):
+                fb = _site_fallback(req.url)
+                if fb:
+                    await _safe_goto(page, fb)
+
+        # Scroll through the whole page so lazy content renders
+        stats = await _scroll_full_page(page, req.max_scrolls, req.wait_ms / 1000.0)
+
+        # Full text from the final (completely rendered) DOM
+        content = await _extract_text_long(page, req.max_chars)
+
+        result: dict = {
+            "title": await page.title(),
+            "url": page.url,
+            "content": content,
+            "char_count": len(content),
+            "scroll_steps": stats["steps"],
+            "content_grew_on_scroll": stats["content_grew"],
+            "final_page_height": stats["final_height"],
+        }
+
+        if req.include_links:
+            try:
+                links = await page.evaluate(
+                    "() => Array.from(document.querySelectorAll(\'a[href]\'))"
+                    ".slice(0,200)"
+                    ".map(a => ({text: a.innerText.trim().slice(0,100), href: a.href}))"
+                    ".filter(l => l.href.startsWith(\'http\'))"
+                )
+                result["links"] = links
+            except Exception:
+                result["links"] = []
+
+        return result
+
+    except Exception as exc:
+        try:
+            await _ensure_page()
+        except Exception:
+            pass
+        return {
+            "error": str(exc), "content": "", "title": "", "url": req.url,
+            "scroll_steps": 0, "content_grew_on_scroll": False, "final_page_height": 0,
+        }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7081, log_level="warning")
@@ -1106,6 +1228,30 @@ class BrowserTool:
             if fname:
                 item["host_path"] = f"/docker/human_browser/workspace/{fname}"
         return data
+
+    async def scrape(
+        self,
+        url: str = "",
+        max_scrolls: int = 10,
+        wait_ms: int = 500,
+        max_chars: int = 16000,
+        include_links: bool = False,
+    ) -> dict:
+        """Navigate (optional), scroll through the full page triggering lazy loads,
+        and return the complete rendered text from the final DOM state."""
+        base = await self._ensure_server()
+        payload: dict = {
+            "url": url,
+            "max_scrolls": max_scrolls,
+            "wait_ms": wait_ms,
+            "max_chars": max_chars,
+            "include_links": include_links,
+        }
+        # Scraping can be slow on long pages — generous timeout
+        async with httpx.AsyncClient(timeout=max_scrolls * 3 + 30) as c:
+            r = await c.post(f"{base}/scrape", json=payload)
+        r.raise_for_status()
+        return r.json()
 
     async def click(self, selector: str) -> dict:
         base = await self._ensure_server()

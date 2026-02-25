@@ -839,6 +839,45 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "page_scrape",
+        "description": (
+            "Navigate to a URL, scroll through the full page in viewport-sized steps waiting for lazy-loaded "
+            "content to appear (infinite-scroll feeds, JS widgets, lazy images), then extract the complete "
+            "rendered text from the final DOM state. "
+            "Unlike web_fetch or extract_article (which grab text immediately after load), page_scrape "
+            "simulates a human scrolling to the bottom, so content that only renders on scroll is captured. "
+            "Returns the full page text plus scroll statistics (steps taken, whether the page grew, final height). "
+            "Use max_scrolls to control depth (default 10, max 30). "
+            "Set include_links=true to also return all hyperlinks from the final DOM."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL to navigate to before scraping. Omit to scrape the current browser page.",
+                },
+                "max_scrolls": {
+                    "type": "integer",
+                    "description": "Maximum scroll steps (default 10, max 30). Each step is ~one viewport height.",
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "Milliseconds to wait after each scroll step for lazy content to load (default 500).",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return from the page text (default 16000).",
+                },
+                "include_links": {
+                    "type": "boolean",
+                    "description": "If true, also return all hyperlinks found in the final DOM (default false).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "bulk_screenshot",
         "description": (
             "Take screenshots of multiple URLs in parallel and return them all inline. "
@@ -2046,6 +2085,56 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(header + clean)
                 except Exception as exc:
                     return _text(f"extract_article failed: {exc}")
+
+            # ----------------------------------------------------------------
+            # page_scrape — scroll + lazy-load + full DOM text extraction
+            # ----------------------------------------------------------------
+            if name == "page_scrape":
+                url         = str(args.get("url", "")).strip()
+                max_scrolls = max(1, min(int(args.get("max_scrolls", 10)), 30))
+                wait_ms     = max(100, min(int(args.get("wait_ms", 500)), 3000))
+                max_chars   = max(500, min(int(args.get("max_chars", 16000)), 64000))
+                include_links = bool(args.get("include_links", False))
+                payload: dict = {
+                    "max_scrolls": max_scrolls,
+                    "wait_ms":     wait_ms,
+                    "max_chars":   max_chars,
+                    "include_links": include_links,
+                }
+                if url:
+                    payload["url"] = url
+                try:
+                    timeout_s = max_scrolls * (wait_ms / 1000.0) + 30.0
+                    scrape_r = await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/scrape", json=payload),
+                        timeout=timeout_s,
+                    )
+                    data = scrape_r.json()
+                except Exception as exc:
+                    return _text(f"page_scrape: browser unreachable — {exc}")
+                if data.get("error"):
+                    return _text(f"page_scrape error: {data['error']}")
+                title   = data.get("title", "")
+                content = data.get("content", "")
+                final_url = data.get("url", url)
+                steps   = data.get("scroll_steps", 0)
+                grew    = data.get("content_grew_on_scroll", False)
+                height  = data.get("final_page_height", 0)
+                chars   = data.get("char_count", len(content))
+                header = (
+                    f"Title: {title}\nURL: {final_url}\n"
+                    f"Scrolled: {steps} steps | Page height: {height}px"
+                    + (" | lazy content grew" if grew else "")
+                    + f" | {chars} chars extracted\n\n"
+                )
+                lines = [l.strip() for l in content.splitlines() if l.strip()]
+                body = "\n".join(lines)
+                result_text = header + body
+                if include_links and data.get("links"):
+                    link_lines = [f"[{lk.get('text','')[:60]}] → {lk.get('href','')[:120]}"
+                                  for lk in data["links"][:100]]
+                    result_text += f"\n\nLinks ({len(data['links'])}):\n" + "\n".join(link_lines)
+                return _text(result_text)
 
             # ----------------------------------------------------------------
             # bulk_screenshot — parallel screenshots of multiple URLs

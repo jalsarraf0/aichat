@@ -318,6 +318,27 @@ class ToolManager:
             "truncated": truncated,
         }
 
+    async def run_page_scrape(
+        self,
+        url: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+        max_scrolls: int = 10,
+        wait_ms: int = 500,
+        max_chars: int = 16000,
+        include_links: bool = False,
+    ) -> dict:
+        """Navigate, scroll through the full page triggering lazy loads, and return
+        the complete rendered text from the final DOM state."""
+        await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
+        return await self.browser.scrape(
+            url=url,
+            max_scrolls=max_scrolls,
+            wait_ms=wait_ms,
+            max_chars=max_chars,
+            include_links=include_links,
+        )
+
     async def run_web_search(
         self,
         query: str,
