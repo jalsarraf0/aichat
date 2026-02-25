@@ -2621,8 +2621,13 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": msg}}
 
     if method == "initialize":
+        # Echo back the client's requested version if we support it; otherwise
+        # fall back to 2024-11-05.  LM Studio 0.3.6+ sends "2025-03-26" and
+        # will only enable image rendering when the agreed version matches.
+        client_ver = params.get("protocolVersion", "2024-11-05")
+        agreed_ver = client_ver if client_ver in {"2024-11-05", "2025-03-26"} else "2024-11-05"
         return ok({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": agreed_ver,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "aichat", "version": "1.0.0"},
         })
@@ -2682,7 +2687,15 @@ async def mcp_post(request: Request) -> Response:
             status_code=400,
         )
 
+    method = rpc.get("method", "")
     accept = request.headers.get("accept", "")
+
+    # MCP 2025-03-26 §3.3: server MUST return Mcp-Session-Id on initialize so
+    # that LM Studio can enable image rendering and session tracking.
+    extra_headers: dict[str, str] = {}
+    if method == "initialize":
+        extra_headers["Mcp-Session-Id"] = str(uuid.uuid4())
+
     if "text/event-stream" in accept:
         # Non-blocking: stream keepalives while the tool runs, yield result when done.
         async def _stream_result(rpc: dict):
@@ -2694,13 +2707,14 @@ async def mcp_post(request: Request) -> Response:
             if result is not None:
                 yield f"event: message\ndata: {json.dumps(result)}\n\n"
         return StreamingResponse(_stream_result(rpc), media_type="text/event-stream",
-                                 headers=_SSE_HEADERS)
+                                 headers={**_SSE_HEADERS, **extra_headers})
 
     # JSON (non-SSE) path — synchronous; used only by non-LM-Studio clients.
     response = await _handle_rpc(rpc)
     if response is None:
-        return Response(content="", status_code=202)
-    return Response(content=json.dumps(response), media_type="application/json")
+        return Response(content="", status_code=202, headers=extra_headers)
+    return Response(content=json.dumps(response), media_type="application/json",
+                    headers=extra_headers)
 
 
 @app.get("/mcp")
