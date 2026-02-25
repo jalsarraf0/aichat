@@ -1953,8 +1953,10 @@ async def _handle(line: str) -> None:
     params = req.get("params") or {}
 
     if method == "initialize":
+        client_ver = params.get("protocolVersion", "2024-11-05")
+        agreed_ver = client_ver if client_ver in {"2024-11-05", "2025-03-26"} else "2024-11-05"
         _write(_ok(req_id, {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": agreed_ver,
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "aichat",
