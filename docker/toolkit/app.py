@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
+import os
 import sys
 import textwrap
 import time
@@ -27,8 +29,45 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("aichat-toolkit")
+
+# ---------------------------------------------------------------------------
+# Error reporting
+# ---------------------------------------------------------------------------
+
+_DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
+_SERVICE_NAME = "aichat-toolkit"
+
+
+async def _report_error(message: str, detail: str | None = None) -> None:
+    """Fire-and-forget: send an error entry to aichat-database."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(
+                f"{_DATABASE_URL}/errors/log",
+                json={"service": _SERVICE_NAME, "level": "ERROR",
+                      "message": message, "detail": detail},
+            )
+    except Exception:
+        pass  # never let error reporting crash the service
+
+
+# ---------------------------------------------------------------------------
+# Tool loading
+# ---------------------------------------------------------------------------
 
 TOOLS_DIR = Path("/data/tools")
 TOOLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,6 +193,19 @@ class RegisterRequest(BaseModel):
 
 class CallRequest(BaseModel):
     params: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — logs to aichat-database, never returns raw 500s
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    message = str(exc)
+    detail = f"{request.method} {request.url.path}"
+    log.error("Unhandled error [%s %s]: %s", request.method, request.url.path, exc, exc_info=True)
+    asyncio.create_task(_report_error(message, detail))
+    return JSONResponse(status_code=500, content={"error": message})
 
 
 # ---------------------------------------------------------------------------

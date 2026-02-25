@@ -30,3 +30,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aichat" = ["assets/*.tcss", "assets/themes/*.tcss"]
+
+[tool.pytest.ini_options]
+markers = [
+  "smoke: smoke tests that require all Docker services to be running",
+]

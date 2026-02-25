@@ -89,3 +89,13 @@ class DatabaseTool:
 
     async def list_images(self, limit: int = 20) -> dict:
         return await self._request("GET", "/images/list", params={"limit": limit})
+
+    async def get_errors(
+        self,
+        limit: int = 50,
+        service: Optional[str] = None,
+    ) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        if service:
+            params["service"] = service
+        return await self._request("GET", "/errors/recent", params=params)

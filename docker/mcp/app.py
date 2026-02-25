@@ -64,6 +64,7 @@ app.add_middleware(
 )
 
 # Base URLs for aichat backend services (running on the same Docker network).
+# (exception handler is registered after _report_error is defined, below)
 DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-memory:8094")
 RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-researchbox:8092")
@@ -75,6 +76,43 @@ BROWSER_WORKSPACE = os.environ.get("BROWSER_WORKSPACE", "/browser-workspace")
 
 # Active SSE sessions: session_id -> asyncio.Queue
 _sessions: dict[str, asyncio.Queue] = {}
+
+# ---------------------------------------------------------------------------
+# Logging + error reporting
+# ---------------------------------------------------------------------------
+
+import logging as _logging
+
+_log = _logging.getLogger("aichat-mcp")
+_logging.basicConfig(
+    level=_logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+_SERVICE_NAME = "aichat-mcp"
+
+
+async def _report_error(message: str, detail: str | None = None) -> None:
+    """Fire-and-forget: send an error entry to aichat-database."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as _c:
+            await _c.post(
+                f"{DATABASE_URL}/errors/log",
+                json={"service": _SERVICE_NAME, "level": "ERROR",
+                      "message": message, "detail": detail},
+            )
+    except Exception:
+        pass  # never let error reporting crash the MCP server
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: "Request", exc: Exception) -> "Response":
+    from fastapi.responses import JSONResponse as _JSONResponse
+    message = str(exc)
+    detail = f"{request.method} {request.url.path}"
+    _log.error("Unhandled error [%s %s]: %s", request.method, request.url.path, exc, exc_info=True)
+    asyncio.create_task(_report_error(message, detail))
+    return _JSONResponse(status_code=500, content={"error": message})
+
 
 # Realistic browser headers — used for all outbound httpx requests to reduce
 # bot-detection and rate-limit exposure.
@@ -449,6 +487,29 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["tool_name"],
+        },
+    },
+    {
+        "name": "get_errors",
+        "description": (
+            "Query the structured error log stored in PostgreSQL. "
+            "Returns recent application errors from all aichat services "
+            "(aichat-mcp, aichat-memory, aichat-toolkit, aichat-researchbox, etc.). "
+            "Use this to diagnose failures, check service health history, or audit errors."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of error entries to return (default 50, max 200).",
+                },
+                "service": {
+                    "type": "string",
+                    "description": "Filter by service name (e.g. 'aichat-memory'). Omit to see all services.",
+                },
+            },
+            "required": [],
         },
     },
 ]
@@ -1032,6 +1093,27 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     timeout=30.0,
                 )
                 return _text(json.dumps(r.json()))
+
+            # ----------------------------------------------------------------
+            if name == "get_errors":
+                limit = max(1, min(int(args.get("limit", 50)), 200))
+                params: dict = {"limit": limit}
+                svc = str(args.get("service", "")).strip()
+                if svc:
+                    params["service"] = svc
+                r = await c.get(f"{DATABASE_URL}/errors/recent", params=params, timeout=10.0)
+                data = r.json()
+                errors = data.get("errors", [])
+                if not errors:
+                    return _text("No errors logged yet." + (f" (service={svc})" if svc else ""))
+                lines = [f"Recent errors ({len(errors)}):"]
+                for e in errors:
+                    ts = str(e.get("logged_at", ""))[:19].replace("T", " ")
+                    lines.append(
+                        f"  [{ts}] [{e['level']}] {e['service']}: {e['message']}"
+                        + (f"\n    detail: {e['detail']}" if e.get("detail") else "")
+                    )
+                return _text("\n".join(lines))
 
             return _text(f"Unknown tool: {name}")
 
