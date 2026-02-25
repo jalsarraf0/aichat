@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "13"
+_REQUIRED_SERVER_VERSION = "14"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "13"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v13"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v14"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "13"
+_VERSION = "14"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -251,6 +251,32 @@ _LAUNCH_ARGS = [
 ]
 
 
+async def _restart_browser():
+    """Restart the entire Playwright browser after a crash (WebSocket closed, OOM, etc.)."""
+    global _browser, _context, _page
+    for obj in (_page, _context, _browser):
+        try:
+            if obj is not None:
+                await obj.close()
+        except Exception:
+            pass
+    _page = _context = _browser = None
+    last_exc = None
+    for exe in _CHROMIUM_PATHS:
+        try:
+            kwargs = {"headless": True, "args": _LAUNCH_ARGS}
+            if exe:
+                kwargs["executable_path"] = exe
+            _browser = await _pw.chromium.launch(**kwargs)
+            break
+        except Exception as exc:
+            last_exc = exc
+    if _browser is None:
+        raise RuntimeError(f"Browser restart failed: {last_exc}")
+    await _new_context()
+    _page = await _context.new_page()
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _pw, _browser, _context, _page
@@ -287,24 +313,27 @@ async def _global_exc(request: Request, exc: Exception) -> JSONResponse:
 
 
 async def _ensure_page():
-    """Return a healthy page, recreating it (and context if needed) after a crash."""
+    """Return a healthy page, recreating context or browser if needed after a crash."""
     global _context, _page, _page_lock
     if _page_lock is None:
         _page_lock = asyncio.Lock()
     async with _page_lock:
+        # 1. Existing page still alive?
         try:
             if _page is not None and not _page.is_closed():
                 return _page
         except Exception:
             pass
-        # Page is gone — recreate
+        # 2. Recreate page (and context if closed) within existing browser
         try:
             if _context is None or _context.is_closed():
                 await _new_context()
             _page = await _context.new_page()
+            return _page
         except Exception:
-            await _new_context()
-            _page = await _context.new_page()
+            pass
+        # 3. Browser itself has crashed (WebSocket closed, OOM) — restart entirely
+        await _restart_browser()
         return _page
 
 
@@ -410,8 +439,12 @@ async def _rotate_context_and_page() -> object:
             await _context.close()
     except Exception:
         pass
-    await _new_context()
-    _page = await _context.new_page()
+    try:
+        await _new_context()
+        _page = await _context.new_page()
+    except Exception:
+        # Browser may have crashed — restart it entirely
+        await _restart_browser()
     return _page
 
 
@@ -677,9 +710,10 @@ async def screenshot(req: ScreenshotReq):
             result["nav_error"] = nav_error
         return result
     except Exception as exc:
-        # Screenshot itself failed — extract page image URLs as fallback info
+        # Screenshot failed — attempt browser recovery then return fallback info
         img_urls: list = []
         try:
+            page = await _ensure_page()
             if not page.is_closed():
                 img_urls = await _get_image_urls(page)
         except Exception:
@@ -688,7 +722,7 @@ async def screenshot(req: ScreenshotReq):
             "error": str(exc),
             "path": req.path,
             "title": "",
-            "url": page.url if not page.is_closed() else "",
+            "url": "",
             "image_urls": img_urls,
         }
 
