@@ -86,6 +86,31 @@ services:
       - ${HOME}/git:/data/repos:ro
     restart: unless-stopped
 
+  # WhatsApp bot — Baileys + LM Studio with full MCP tool support.
+  # Visit http://localhost:8097 to scan the QR code and pair a number.
+  aichat-whatsapp:
+    build: ./docker/whatsapp
+    environment:
+      LM_STUDIO_URL: http://host.docker.internal:1234
+      MCP_URL:       http://aichat-mcp:8096
+      MEMORY_URL:    http://aichat-memory:8094
+      BOT_NAME:      AI Assistant
+      MAX_HISTORY:   "20"
+      MAX_TOOL_ITER: "5"
+      MAX_TOKENS:    "1024"
+      ALLOW_GROUPS:  "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - aichat-memory
+      - aichat-mcp
+    ports:
+      - "8097:8097"
+    volumes:
+      - whatsappauth:/data/auth
+    restart: unless-stopped
+
 volumes:
   aichatdb:
   memorydb:
+  whatsappauth:
