@@ -1436,12 +1436,21 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_13(self):
+    def test_browser_server_version_is_14(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "13", \
-            f"Expected _REQUIRED_SERVER_VERSION='13', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "13"' in _SERVER_SRC, \
-            "_VERSION = '13' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "14", \
+            f"Expected _REQUIRED_SERVER_VERSION='14', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "14"' in _SERVER_SRC, \
+            "_VERSION = '14' not found in _SERVER_SRC"
+
+    def test_browser_server_v14_has_crash_recovery(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_restart_browser" in _SERVER_SRC, "_restart_browser not in _SERVER_SRC"
+        # _ensure_page must call _restart_browser as third tier
+        assert "_restart_browser" in _SERVER_SRC, "_restart_browser missing from _SERVER_SRC"
+        # _rotate_context_and_page must fall back to _restart_browser
+        assert "Browser may have crashed" in _SERVER_SRC, \
+            "Browser crash fallback comment missing from _rotate_context_and_page"
 
     def test_browser_server_has_block_detection(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1516,10 +1525,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v13_has_scrape_endpoint(self):
+    def test_browser_server_v14_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "13", \
-            f"Expected v13, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "14", \
+            f"Expected v14, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
