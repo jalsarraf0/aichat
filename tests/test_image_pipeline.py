@@ -1434,14 +1434,32 @@ class TestBrowserImageDownload:
         assert "save_images" in src, "save_images not routed in run_browser"
         assert "download_page_images" in src, "download_page_images not routed in run_browser"
 
-    # -- browser server v7 checks --------------------------------------------
+    # -- browser server v10 checks -------------------------------------------
 
-    def test_browser_server_version_is_7(self):
+    def test_browser_server_version_is_10(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "7", \
-            f"Expected _REQUIRED_SERVER_VERSION='7', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "7"' in _SERVER_SRC, \
-            "_VERSION = '7' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "10", \
+            f"Expected _REQUIRED_SERVER_VERSION='10', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "10"' in _SERVER_SRC, \
+            "_VERSION = '10' not found in _SERVER_SRC"
+
+    def test_browser_server_v10_has_block_detection(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_BLOCK_SIGNALS" in _SERVER_SRC, "_BLOCK_SIGNALS not in _SERVER_SRC"
+        assert "_is_blocked" in _SERVER_SRC, "_is_blocked not in _SERVER_SRC"
+        assert "_rotate_context_and_page" in _SERVER_SRC, \
+            "_rotate_context_and_page not in _SERVER_SRC"
+        assert "_site_fallback" in _SERVER_SRC, \
+            "_site_fallback not in _SERVER_SRC"
+        assert "old.reddit.com" in _SERVER_SRC, \
+            "old.reddit.com fallback not in _SERVER_SRC"
+
+    def test_browser_server_v10_stealth_headers(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "Google Chrome" in _SERVER_SRC, "Google Chrome brand not in _SERVER_SRC"
+        assert "Windows" in _SERVER_SRC, "Windows platform not in _SERVER_SRC"
+        assert "Chrome/145.0.0.0" in _SERVER_SRC, "Chrome/145 UA not in _SERVER_SRC"
+        assert "Win32" in _SERVER_SRC, "Win32 navigator.platform not in _SERVER_SRC"
 
     def test_browser_server_has_save_images_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC
