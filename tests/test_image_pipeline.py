@@ -1053,14 +1053,14 @@ class TestNewToolsAdvertised:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_32(self):
+    def test_total_tool_count_is_39(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 100, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
+        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
 
     def test_new_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1250,14 +1250,14 @@ class TestImageGeneration:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_35(self):
+    def test_total_tool_count_is_39_imggen(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 201, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
+        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
 
     def test_gen_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1436,12 +1436,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_12(self):
+    def test_browser_server_version_is_13(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "12", \
-            f"Expected _REQUIRED_SERVER_VERSION='12', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "12"' in _SERVER_SRC, \
-            "_VERSION = '12' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "13", \
+            f"Expected _REQUIRED_SERVER_VERSION='13', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "13"' in _SERVER_SRC, \
+            "_VERSION = '13' not found in _SERVER_SRC"
 
     def test_browser_server_has_block_detection(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1516,10 +1516,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v12_has_scrape_endpoint(self):
+    def test_browser_server_v13_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "12", \
-            f"Expected v12, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "13", \
+            f"Expected v13, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
@@ -1557,17 +1557,59 @@ class TestBrowserImageDownload:
         assert "max_chars" in props
         assert "include_links" in props
 
+    # -- page_images checks --------------------------------------------------
+
+    def test_browser_server_v13_has_page_images_endpoint(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "/page_images" in _SERVER_SRC, "/page_images endpoint missing from _SERVER_SRC"
+        assert "PageImagesReq" in _SERVER_SRC, "PageImagesReq model missing"
+        assert "bestSrcset" in _SERVER_SRC, "bestSrcset helper missing"
+        assert "data-src" in _SERVER_SRC, "data-src lazy extraction missing"
+        assert "data-lazy-src" in _SERVER_SRC, "data-lazy-src lazy extraction missing"
+        assert "picture source" in _SERVER_SRC, "<picture><source> extraction missing"
+        assert "twitter:image" in _SERVER_SRC, "twitter:image meta missing"
+        assert "json_ld" in _SERVER_SRC, "JSON-LD extraction missing"
+        assert "css_bg" in _SERVER_SRC, "CSS background-image extraction missing"
+        assert "new URL(u, base).href" in _SERVER_SRC, "relative URL normalisation missing"
+
+    def test_browser_tool_has_page_images_method(self):
+        from aichat.tools.browser import BrowserTool
+        import inspect
+        assert hasattr(BrowserTool, "page_images"), "BrowserTool.page_images() missing"
+        sig = inspect.signature(BrowserTool.page_images)
+        assert "url" in sig.parameters, "url param missing from page_images"
+        assert "scroll" in sig.parameters, "scroll param missing from page_images"
+        assert "max_scrolls" in sig.parameters, "max_scrolls param missing from page_images"
+
+    def test_manager_has_run_page_images(self):
+        from aichat.tools.manager import ToolManager
+        import inspect
+        assert hasattr(ToolManager, "run_page_images"), "run_page_images missing from ToolManager"
+        sig = inspect.signature(ToolManager.run_page_images)
+        assert "url" in sig.parameters
+        assert "scroll" in sig.parameters
+        assert "max_scrolls" in sig.parameters
+
+    def test_page_images_in_stdio_schema(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        by_name = {t["name"]: t for t in _TOOL_SCHEMAS}
+        assert "page_images" in by_name, "page_images missing from stdio _TOOL_SCHEMAS"
+        props = by_name["page_images"]["inputSchema"]["properties"]
+        assert "url" in props
+        assert "scroll" in props
+        assert "max_scrolls" in props
+
     # -- MCP HTTP schema checks (skip if MCP not running) --------------------
 
     @skip_mcp
-    def test_tool_count_is_38(self):
+    def test_tool_count_is_39(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 400, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 38, f"Expected 38 tools, got {len(tools)}"
+        assert len(tools) == 39, f"Expected 39 tools, got {len(tools)}"
 
     @skip_mcp
     def test_browser_save_images_in_mcp_http_schema(self):

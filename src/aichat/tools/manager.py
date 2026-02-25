@@ -339,6 +339,19 @@ class ToolManager:
             include_links=include_links,
         )
 
+    async def run_page_images(
+        self,
+        url: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+        scroll: bool = True,
+        max_scrolls: int = 3,
+    ) -> dict:
+        """Extract all image URLs from a page: src, srcset (highest-res), data-src,
+        picture sources, og:image, twitter:image, CSS bg, JSON-LD."""
+        await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
+        return await self.browser.page_images(url=url, scroll=scroll, max_scrolls=max_scrolls)
+
     async def run_web_search(
         self,
         query: str,

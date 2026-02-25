@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "12"
+_REQUIRED_SERVER_VERSION = "13"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "12"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v12"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v13"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "12"
+_VERSION = "13"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -1022,6 +1022,112 @@ async def scrape(req: ScrapeReq):
         }
 
 
+class PageImagesReq(BaseModel):
+    url: str = ""
+    scroll: bool = True
+    max_scrolls: int = 3   # fewer needed for URL discovery vs full-text extraction
+
+
+@app.post("/page_images")
+async def page_images_endpoint(req: PageImagesReq):
+    """Navigate (optional), scroll to trigger lazy loaders, then extract ALL
+    image URLs: img src, highest-res srcset, data-src/lazy variants, <picture>
+    sources, og:image, twitter:image, inline CSS background-image, JSON-LD."""
+    try:
+        page = await _ensure_page()
+        if req.url:
+            await _safe_goto(page, req.url)
+            quick = await _extract_text(page)
+            if _is_blocked(quick):
+                page = await _rotate_context_and_page()
+                await _safe_goto(page, req.url)
+                quick = await _extract_text(page)
+            if _is_blocked(quick):
+                fb = _site_fallback(req.url)
+                if fb:
+                    await _safe_goto(page, fb)
+        if req.scroll:
+            await _scroll_full_page(page, req.max_scrolls, 0.4)
+        images = await page.evaluate("""
+() => {
+    const base = document.location.href;
+    function abs(u) {
+        if (!u) return \'\';
+        try { return new URL(u, base).href; } catch(e) { return \'\'; }
+    }
+    const seen = new Set();
+    const result = [];
+    function add(rawUrl, type, meta) {
+        const u = abs(rawUrl);
+        if (!u || !u.startsWith(\'http\') || seen.has(u)) return;
+        seen.add(u);
+        result.push(Object.assign({url: u, type: type}, meta));
+    }
+    function bestSrcset(srcset) {
+        let best = \'\', bestW = 0;
+        for (const part of (srcset || \'\').split(\',\')) {
+            const tok = part.trim().split(/\\s+/);
+            if (!tok[0]) continue;
+            const w = tok[1] ? (parseFloat(tok[1]) || 0) : 0;
+            if (w > bestW || !best) { best = tok[0]; bestW = w; }
+        }
+        return {url: best, w: bestW};
+    }
+    // 1. <img> src + data-src lazy variants + highest-res srcset
+    for (const img of document.querySelectorAll(\'img\')) {
+        const src = img.getAttribute(\'src\') || \'\';
+        if (src) add(src, \'img\', {alt: img.alt||\'\'});
+        for (const attr of [\'data-src\',\'data-lazy-src\',\'data-original\',\'data-lazy\',\'data-echo\']) {
+            const v = img.getAttribute(attr) || \'\';
+            if (v) add(v, \'lazy\', {alt: img.alt||\'\'});
+        }
+        const ss = img.getAttribute(\'srcset\') || img.getAttribute(\'data-srcset\') || \'\';
+        if (ss) { const b = bestSrcset(ss); if (b.url) add(b.url, \'srcset\', {srcset_width: b.w}); }
+    }
+    // 2. <picture><source> — pick highest descriptor per element
+    for (const src of document.querySelectorAll(\'picture source[srcset]\')) {
+        const b = bestSrcset(src.getAttribute(\'srcset\') || \'\');
+        if (b.url) add(b.url, \'picture\', {srcset_width: b.w});
+    }
+    // 3. og:image / twitter:image meta tags
+    for (const m of document.querySelectorAll(\'meta[property="og:image"],meta[name="twitter:image"],meta[name="twitter:image:src"]\')) {
+        const c = m.getAttribute(\'content\') || \'\';
+        if (c) add(c, \'og_meta\', {});
+    }
+    // 4. Inline CSS style attribute background-image
+    for (const el of document.querySelectorAll(\'[style*="background"]\')) {
+        const bg = el.style.backgroundImage || \'\';
+        const m = bg.match(/url\\(["\'\\s]*(https?:[^"\'\\)\\s]+)["\'\\s]*\\)/);
+        if (m) add(m[1], \'css_bg\', {});
+    }
+    // 5. JSON-LD schema.org image / logo / thumbnail
+    for (const s of document.querySelectorAll(\'script[type="application/ld+json"]\')) {
+        try {
+            const d = JSON.parse(s.textContent || \'{}\');
+            const fields = [d.image, d.logo, d.thumbnail].flat().filter(Boolean);
+            for (const field of fields) {
+                const u = typeof field === \'string\' ? field : (field.url||field.contentUrl||field["@id"]||\'\');
+                if (u) add(u, \'json_ld\', {});
+            }
+        } catch(e) {}
+    }
+    return result.slice(0, 150);
+}
+""")
+        return {
+            "images": images,
+            "count": len(images),
+            "title": await page.title(),
+            "url": page.url,
+        }
+    except Exception as exc:
+        try:
+            await _ensure_page()
+        except Exception:
+            pass
+        return {"error": str(exc), "images": [], "count": 0, "title": "", "url": req.url}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7081, log_level="warning")
@@ -1365,5 +1471,21 @@ class BrowserTool:
         base = await self._ensure_server()
         async with httpx.AsyncClient(timeout=45.0) as c:
             r = await c.post(f"{base}/search", json={"query": query})
+        r.raise_for_status()
+        return r.json()
+
+    async def page_images(
+        self,
+        url: str = "",
+        scroll: bool = True,
+        max_scrolls: int = 3,
+    ) -> dict:
+        """Extract all image URLs from the current page (or navigate first).
+        Returns a deduplicated list with source type (img/srcset/lazy/picture/og_meta/css_bg/json_ld)."""
+        base = await self._ensure_server()
+        payload = {"url": url, "scroll": scroll, "max_scrolls": max_scrolls}
+        timeout = max_scrolls * 2.0 + 30.0
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(f"{base}/page_images", json=payload)
         r.raise_for_status()
         return r.json()
