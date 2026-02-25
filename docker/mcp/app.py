@@ -2631,24 +2631,47 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # ----------------------------------------------------------------
             if name == "image_search":
                 query      = str(args.get("query", "")).strip()
-                img_count  = max(1, min(int(args.get("count", 5)), 20))
+                img_count  = max(1, min(int(args.get("count", 8)), 20))
                 if not query:
                     return _text("image_search: 'query' is required")
 
+                from urllib.parse import quote_plus as _qp, urlparse as _up2, \
+                    parse_qs as _pqs2, unquote as _uq2
                 qwords = {w for w in query.lower().split() if len(w) > 2}
-                _GOOD_D = ("twimg.com", "wikia.nocookie.net", "imgur.com", "redd.it",
+
+                # High-quality art/image CDN domains — order matters for score checks
+                _GOOD_D = ("wikia.nocookie.net", "imgur.com", "redd.it",
                            "prydwen.gg", "fandom.com", "iopwiki.com", "cdn.")
                 _SKIP_P = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
                            "logo", "icon", "avatar", "pixel.gif", "button",
-                           "ytimg.com", "yt3.ggpht")   # skip YouTube CDN thumbnails
+                           "ytimg.com", "yt3.ggpht")
                 _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com",
-                            "dailymotion.com", "twitch.tv")  # skip video pages in tier 1
-                img_hdrs = {
-                    "User-Agent": _BROWSER_HEADERS["User-Agent"],
-                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                    "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
-                    "Referer": "https://www.google.com/",
-                }
+                            "dailymotion.com", "twitch.tv")
+
+                def _unwrap_thumb(url: str) -> str:
+                    """Convert a MediaWiki thumbnail URL to the full-size original.
+                    e.g. /images/thumb/a/ab/File.png/200px-File.png → /images/a/ab/File.png
+                    Also handles Wikia's /revision/latest suffix.
+                    """
+                    if "/images/thumb/" in url:
+                        no_thumb = url.replace("/images/thumb/", "/images/", 1)
+                        m = re.search(r"/\d+px-[^?]*", no_thumb)
+                        if m:
+                            return no_thumb[:m.start()]
+                    return url
+
+                def _img_referer(url: str) -> str:
+                    """Return the most appropriate Referer for fetching this image."""
+                    u = url.lower()
+                    if "pbs.twimg.com" in u or "media.twimg.com" in u:
+                        return "https://twitter.com/"
+                    if "wikia.nocookie.net" in u or "static.fandom.com" in u:
+                        return "https://www.fandom.com/"
+                    if "iopwiki.com" in u:
+                        return "https://iopwiki.com/"
+                    if "prydwen.gg" in u:
+                        return "https://www.prydwen.gg/"
+                    return "https://www.google.com/"
 
                 def _score(img: dict) -> int:
                     url_l = img.get("url", "").lower()
@@ -2657,17 +2680,33 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         return -999
                     s  = sum(2 for w in qwords if w in url_l)
                     s += sum(5 for w in qwords if w in alt_l)
-                    s += sum(6 for d in _GOOD_D if d in url_l)
-                    if img.get("type") == "srcset":
+                    # pbs.twimg.com / media.twimg.com — Twitter's direct media CDN
+                    if "pbs.twimg.com" in url_l or "media.twimg.com" in url_l:
+                        s += 10
+                    else:
+                        s += sum(6 for d in _GOOD_D if d in url_l)
+                    if img.get("type") in ("srcset", "picture"):
+                        s += 2
+                    nw = img.get("natural_w", 0)
+                    if nw >= 500:
+                        s += 4
+                    elif nw >= 300:
                         s += 2
                     return s
 
                 async def _fetch_render(url: str) -> list[dict] | None:
                     if not url or not url.startswith("http"):
                         return None
+                    url = _unwrap_thumb(url)
+                    hdrs = {
+                        "User-Agent": _BROWSER_HEADERS["User-Agent"],
+                        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                        "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+                        "Referer": _img_referer(url),
+                    }
                     try:
                         img_r = await asyncio.wait_for(
-                            c.get(url, headers=img_hdrs, follow_redirects=True),
+                            c.get(url, headers=hdrs, follow_redirects=True),
                             timeout=12.0,
                         )
                         if img_r.status_code != 200:
@@ -2676,13 +2715,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         if not ct.startswith("image/"):
                             return None
                         raw = img_r.content
-                        if len(raw) < 10_240:        # skip tiny placeholders (<10 KB)
+                        if len(raw) < 10_240:
                             return None
                         if _HAS_PIL:
                             try:
                                 with _PilImage.open(_io.BytesIO(raw)) as pil:
                                     if pil.width < 150 or pil.height < 150:
-                                        return None  # too small to be useful artwork
+                                        return None
                                     pil = pil.convert("RGB")
                                     if pil.width > 1280 or pil.height > 1024:
                                         pil.thumbnail((1280, 1024), _PilImage.LANCZOS)
@@ -2703,7 +2742,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 try:
                     sr = await asyncio.wait_for(
                         c.get(
-                            f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                            f"https://html.duckduckgo.com/html/?q={_qp(query)}",
                             headers=_BROWSER_HEADERS,
                             follow_redirects=True,
                         ),
@@ -2720,18 +2759,19 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         if dec not in t1_seen:
                             t1_seen.add(dec)
                             t1_urls.append(dec)
-                    # Skip video platform pages — they only have thumbnails
                     t1_urls = [u for u in t1_urls
                                if not any(d in u for d in _SKIP_T1)]
-                    for page_url in t1_urls[:4]:
+                    for page_url in t1_urls[:5]:
                         try:
                             pi_r = await asyncio.wait_for(
                                 c.post(f"{BROWSER_URL}/page_images",
                                        json={"url": page_url, "scroll": True, "max_scrolls": 2}),
                                 timeout=35.0,
                             )
-                            imgs_sorted = sorted(pi_r.json().get("images", []),
-                                                 key=_score, reverse=True)
+                            all_imgs = pi_r.json().get("images", [])
+                            if len(all_imgs) < 3:   # auth wall / stub — skip
+                                continue
+                            imgs_sorted = sorted(all_imgs, key=_score, reverse=True)
                             for cand in imgs_sorted[:img_count]:
                                 if _score(cand) < 0:
                                     continue
@@ -2745,9 +2785,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
                 # ── Tier 2: DDG image-search page → decode proxy URLs ─────────
                 try:
-                    from urllib.parse import urlparse as _up2, parse_qs as _pqs2, \
-                        unquote as _uq2
-                    t2_url = (f"https://duckduckgo.com/?q={query.replace(' ', '+')}"
+                    t2_url = (f"https://duckduckgo.com/?q={_qp(query)}"
                               "&iax=images&ia=images")
                     pi2_r = await asyncio.wait_for(
                         c.post(f"{BROWSER_URL}/page_images",

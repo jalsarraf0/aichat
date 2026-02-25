@@ -373,24 +373,46 @@ class ToolManager:
             unquote as _uq,
             urlparse as _up,
             parse_qs as _pqs,
+            quote_plus as _qp,
         )
 
+        count = max(1, min(count if count else 8, 20))
         qwords = {w for w in query.lower().split() if len(w) > 2}
-        _GOOD_D = ("twimg.com", "wikia.nocookie.net", "imgur.com", "redd.it",
-                   "prydwen.gg", "fandom.com", "iopwiki.com")
+        _GOOD_D = ("wikia.nocookie.net", "imgur.com", "redd.it",
+                   "prydwen.gg", "fandom.com", "iopwiki.com", "cdn.")
         _SKIP_P = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
-                   "logo", "icon", "avatar", "pixel.gif",
+                   "logo", "icon", "avatar", "pixel.gif", "button",
                    "ytimg.com", "yt3.ggpht")
         _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com",
                     "dailymotion.com", "twitch.tv")
-        _HDRS = {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-            ),
-            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-            "Referer": "https://www.google.com/",
-        }
+        _UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+
+        def _unwrap_thumb(url: str) -> str:
+            """Convert a MediaWiki thumbnail URL to the full-size original.
+            Also handles Wikia's /revision/latest suffix.
+            """
+            if "/images/thumb/" in url:
+                no_thumb = url.replace("/images/thumb/", "/images/", 1)
+                m = _re.search(r"/\d+px-[^?]*", no_thumb)
+                if m:
+                    return no_thumb[:m.start()]
+            return url
+
+        def _img_referer(url: str) -> str:
+            """Return the most appropriate Referer for fetching this image."""
+            u = url.lower()
+            if "pbs.twimg.com" in u or "media.twimg.com" in u:
+                return "https://twitter.com/"
+            if "wikia.nocookie.net" in u or "static.fandom.com" in u:
+                return "https://www.fandom.com/"
+            if "iopwiki.com" in u:
+                return "https://iopwiki.com/"
+            if "prydwen.gg" in u:
+                return "https://www.prydwen.gg/"
+            return "https://www.google.com/"
 
         def _score(img: dict) -> int:
             url_l = img.get("url", "").lower()
@@ -399,17 +421,31 @@ class ToolManager:
                 return -999
             s  = sum(2 for w in qwords if w in url_l)
             s += sum(5 for w in qwords if w in alt_l)
-            s += sum(6 for d in _GOOD_D if d in url_l)
-            if img.get("type") == "srcset":
+            if "pbs.twimg.com" in url_l or "media.twimg.com" in url_l:
+                s += 10
+            else:
+                s += sum(6 for d in _GOOD_D if d in url_l)
+            if img.get("type") in ("srcset", "picture"):
+                s += 2
+            nw = img.get("natural_w", 0)
+            if nw >= 500:
+                s += 4
+            elif nw >= 300:
                 s += 2
             return s
 
         async def _fetch_render(url: str) -> list[dict] | None:
             if not url or not url.startswith("http"):
                 return None
+            url = _unwrap_thumb(url)
+            hdrs = {
+                "User-Agent": _UA,
+                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": _img_referer(url),
+            }
             try:
                 async with _httpx.AsyncClient(timeout=12.0) as hc:
-                    r = await hc.get(url, headers=_HDRS, follow_redirects=True)
+                    r = await hc.get(url, headers=hdrs, follow_redirects=True)
                 if r.status_code != 200:
                     return None
                 ct = r.headers.get("content-type", "").split(";")[0].strip()
@@ -444,8 +480,8 @@ class ToolManager:
         try:
             async with _httpx.AsyncClient(timeout=12.0) as hc:
                 sr = await hc.get(
-                    f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
-                    headers=_HDRS,
+                    f"https://html.duckduckgo.com/html/?q={_qp(query)}",
+                    headers={"User-Agent": _UA},
                     follow_redirects=True,
                 )
             _ddg_hosts = ("duckduckgo.com", "ddg.gg", "duck.co")
@@ -461,12 +497,15 @@ class ToolManager:
                     t1_urls.append(dec)
             t1_urls = [u for u in t1_urls
                        if not any(d in u for d in _SKIP_T1)]
-            for page_url in t1_urls[:4]:
+            for page_url in t1_urls[:5]:
                 try:
                     pi = await self.run_page_images(
                         page_url, mode, confirmer, scroll=True, max_scrolls=2
                     )
-                    imgs = sorted(pi.get("images", []), key=_score, reverse=True)
+                    all_imgs = pi.get("images", [])
+                    if len(all_imgs) < 3:   # auth wall / stub — skip
+                        continue
+                    imgs = sorted(all_imgs, key=_score, reverse=True)
                     for cand in imgs[:count]:
                         if _score(cand) < 0:
                             continue
@@ -480,7 +519,7 @@ class ToolManager:
 
         # ── Tier 2: DDG image-search page → decode proxy URLs ────────────────
         try:
-            t2_url = (f"https://duckduckgo.com/?q={query.replace(' ', '+')}"
+            t2_url = (f"https://duckduckgo.com/?q={_qp(query)}"
                       "&iax=images&ia=images")
             pi2 = await self.run_page_images(
                 t2_url, mode, confirmer, scroll=True, max_scrolls=3
