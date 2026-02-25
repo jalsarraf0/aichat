@@ -374,6 +374,29 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["command"],
         },
     },
+    {
+        "name": "get_errors",
+        "description": (
+            "Query the structured error log stored in PostgreSQL. "
+            "Returns recent application errors from all aichat services "
+            "(aichat-mcp, aichat-memory, aichat-toolkit, aichat-researchbox, etc.). "
+            "Use this to diagnose failures, check service health history, or audit errors."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of error entries to return (default 50, max 200).",
+                },
+                "service": {
+                    "type": "string",
+                    "description": "Filter by service name (e.g. 'aichat-memory'). Omit to see all services.",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -631,6 +654,22 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 _APPROVAL, None,
             )
             return _text(output or "(no output)")
+
+        if name == "get_errors":
+            limit = max(1, min(int(arguments.get("limit", 50)), 200))
+            service = str(arguments.get("service", "")).strip()
+            result = await mgr.run_get_errors(limit, service, _APPROVAL, None)
+            errors = result.get("errors", [])
+            if not errors:
+                return _text("No errors logged yet." + (f" (service={service})" if service else ""))
+            lines = [f"Recent errors ({len(errors)}):"]
+            for e in errors:
+                ts = str(e.get("logged_at", ""))[:19].replace("T", " ")
+                lines.append(
+                    f"  [{ts}] [{e['level']}] {e['service']}: {e['message']}"
+                    + (f"\n    detail: {e['detail']}" if e.get("detail") else "")
+                )
+            return _text("\n".join(lines))
 
         return _text(f"Unknown tool: {name}")
 

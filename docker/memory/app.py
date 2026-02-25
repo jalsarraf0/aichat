@@ -5,17 +5,55 @@ notes, and context across sessions.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Generator
 
-from fastapi import FastAPI, HTTPException, Query
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("aichat-memory")
+
+# ---------------------------------------------------------------------------
+# Error reporting
+# ---------------------------------------------------------------------------
+
+_DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
+_SERVICE_NAME = "aichat-memory"
+
+
+async def _report_error(message: str, detail: str | None = None) -> None:
+    """Fire-and-forget: send an error entry to aichat-database."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(
+                f"{_DATABASE_URL}/errors/log",
+                json={"service": _SERVICE_NAME, "level": "ERROR",
+                      "message": message, "detail": detail},
+            )
+    except Exception:
+        pass  # never let error reporting crash the service
+
+# ---------------------------------------------------------------------------
+# SQLite database helpers
+# ---------------------------------------------------------------------------
+
 DB_PATH = Path("/data/memory.db")
-app = FastAPI(title="aichat-memory")
 
 
 @contextmanager
@@ -29,8 +67,12 @@ def _db() -> Generator[sqlite3.Connection, None, None]:
         con.close()
 
 
-@app.on_event("startup")
-def _init_db() -> None:
+# ---------------------------------------------------------------------------
+# App lifecycle
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _db() as con:
         con.execute(
@@ -42,12 +84,37 @@ def _init_db() -> None:
             )
             """
         )
+    yield
 
+
+app = FastAPI(title="aichat-memory", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — logs to aichat-database, never returns raw 500s
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    message = str(exc)
+    detail = f"{request.method} {request.url.path}"
+    log.error("Unhandled error [%s %s]: %s", request.method, request.url.path, exc, exc_info=True)
+    asyncio.create_task(_report_error(message, detail))
+    return JSONResponse(status_code=500, content={"error": message})
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
 
 class StoreRequest(BaseModel):
     key: str
     value: str
 
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health() -> dict:

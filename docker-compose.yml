@@ -63,6 +63,10 @@ services:
 
   aichat-memory:
     build: ./docker/memory
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+    depends_on:
+      - aichat-database
     ports:
       - "8094:8094"
     volumes:
@@ -71,6 +75,10 @@ services:
 
   aichat-toolkit:
     build: ./docker/toolkit
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+    depends_on:
+      - aichat-database
     ports:
       - "8095:8095"
     volumes:

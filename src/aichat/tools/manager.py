@@ -96,6 +96,8 @@ class ToolName(str, Enum):
     DB_LIST_IMAGES = "db_list_images"
     SCREENSHOT_SEARCH = "screenshot_search"
     FETCH_IMAGE = "fetch_image"
+    CALL_CUSTOM_TOOL = "call_custom_tool"
+    GET_ERRORS = "get_errors"
 
 
 class ToolManager:
@@ -415,6 +417,16 @@ class ToolManager:
     ) -> dict:
         await self._check_approval(mode, ToolName.DB_LIST_IMAGES.value, confirmer)
         return await self.db.list_images(limit=limit)
+
+    async def run_get_errors(
+        self,
+        limit: int,
+        service: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        await self._check_approval(mode, ToolName.GET_ERRORS.value, confirmer)
+        return await self.db.get_errors(limit=limit, service=service or None)
 
     async def run_fetch_image(
         self,

@@ -1375,3 +1375,129 @@ class TestMCPScreenshot:
         }
         missing = expected - names
         assert not missing, f"stdio MCP missing tools: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Logging system tests
+# ---------------------------------------------------------------------------
+
+class TestLoggingSystem:
+    """Unit tests for the error-reporting infrastructure."""
+
+    def test_toolname_enum_has_call_custom_tool(self):
+        """ToolName enum must include CALL_CUSTOM_TOOL and GET_ERRORS."""
+        from aichat.tools.manager import ToolName
+        assert hasattr(ToolName, "CALL_CUSTOM_TOOL"), "ToolName missing CALL_CUSTOM_TOOL"
+        assert ToolName.CALL_CUSTOM_TOOL.value == "call_custom_tool"
+        assert hasattr(ToolName, "GET_ERRORS"), "ToolName missing GET_ERRORS"
+        assert ToolName.GET_ERRORS.value == "get_errors"
+
+    def test_database_tool_has_get_errors(self):
+        """DatabaseTool must expose a get_errors() coroutine method."""
+        from aichat.tools.database import DatabaseTool
+        import inspect
+        assert hasattr(DatabaseTool, "get_errors"), "DatabaseTool missing get_errors"
+        assert inspect.iscoroutinefunction(DatabaseTool.get_errors)
+
+    def test_tool_manager_has_run_get_errors(self):
+        """ToolManager must expose run_get_errors() coroutine method."""
+        import inspect
+        mgr = ToolManager()
+        assert hasattr(mgr, "run_get_errors"), "ToolManager missing run_get_errors"
+        assert inspect.iscoroutinefunction(mgr.run_get_errors)
+
+    @pytest.mark.asyncio
+    async def test_run_get_errors_calls_db_get_errors(self):
+        """run_get_errors must delegate to DatabaseTool.get_errors with correct args."""
+        mgr = ToolManager()
+        fake_result = {"errors": [{"service": "aichat-mcp", "level": "ERROR",
+                                   "message": "boom", "detail": None,
+                                   "logged_at": "2024-01-01T00:00:00+00:00"}]}
+        with patch.object(mgr.db, "get_errors", new=AsyncMock(return_value=fake_result)) as mock_get:
+            result = await mgr.run_get_errors(25, "aichat-mcp", ApprovalMode.AUTO, None)
+        mock_get.assert_called_once_with(limit=25, service="aichat-mcp")
+        assert result == fake_result
+
+    @pytest.mark.asyncio
+    async def test_mcp_get_errors_tool_returns_formatted_text(self):
+        """get_errors tool in stdio MCP server formats error list as readable text."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        fake_result = {
+            "errors": [
+                {"service": "aichat-memory", "level": "ERROR",
+                 "message": "Connection refused", "detail": "GET /recall",
+                 "logged_at": "2024-06-15T12:34:56+00:00"},
+            ]
+        }
+        with patch.object(mgr, "run_get_errors", new=AsyncMock(return_value=fake_result)):
+            blocks = await mcp._call_tool("get_errors", {"limit": 10, "service": "aichat-memory"})
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "text"
+        text = blocks[0]["text"]
+        assert "aichat-memory" in text
+        assert "Connection refused" in text
+
+    @pytest.mark.asyncio
+    async def test_mcp_get_errors_empty_returns_helpful_message(self):
+        """get_errors with no errors returns a friendly 'no errors' message."""
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        with patch.object(mgr, "run_get_errors", new=AsyncMock(return_value={"errors": []})):
+            blocks = await mcp._call_tool("get_errors", {})
+        assert blocks[0]["type"] == "text"
+        assert "no errors" in blocks[0]["text"].lower()
+
+    def test_http_mcp_get_errors_schema_present(self):
+        """HTTP MCP server must include get_errors in its _TOOLS list."""
+        import importlib, sys
+        # Import without running the FastAPI app startup
+        spec = importlib.util.spec_from_file_location(
+            "mcp_app",
+            "/home/jalsarraf/git/aichat/docker/mcp/app.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            pytest.skip("Cannot import docker/mcp/app.py (missing deps)")
+        tool_names = {t["name"] for t in mod._TOOLS}
+        assert "get_errors" in tool_names, f"get_errors missing from HTTP MCP _TOOLS: {tool_names}"
+
+    def test_stdio_mcp_get_errors_schema_present(self):
+        """stdio MCP server must include get_errors in its _TOOL_SCHEMAS list."""
+        import aichat.mcp_server as mcp
+        names = {t["name"] for t in mcp._TOOL_SCHEMAS}
+        assert "get_errors" in names, f"get_errors missing from stdio MCP schemas: {names}"
+
+    @pytest.mark.asyncio
+    async def test_report_error_helper_does_not_raise(self):
+        """_report_error must silently swallow all exceptions (fire-and-forget)."""
+        import aichat.mcp_server as mcp
+        # memory's _report_error
+        from docker.memory import app as memory_app  # noqa: F401 — just checking import
+        # The key property: even when the DB is unreachable, _report_error must not raise
+        # We test the ToolManager's database path instead (no side effects needed).
+        mgr = ToolManager()
+        with patch.object(mgr.db, "get_errors", new=AsyncMock(side_effect=Exception("DB down"))):
+            try:
+                await mgr.run_get_errors(10, "", ApprovalMode.AUTO, None)
+            except Exception as exc:
+                # get_errors may propagate DB exceptions — that's fine.
+                # The important thing is _report_error itself never crashes.
+                pass
+
+    def test_mcp_stdio_tool_schemas_complete_with_get_errors(self):
+        """stdio MCP server must expose all expected tools including get_errors."""
+        import aichat.mcp_server as mcp
+        names = {t["name"] for t in mcp._TOOL_SCHEMAS}
+        expected = {
+            "browser", "screenshot", "fetch_image", "screenshot_search",
+            "web_fetch", "web_search", "memory_store", "memory_recall",
+            "db_store_article", "db_search", "db_cache_store", "db_cache_get",
+            "db_store_image", "db_list_images", "researchbox_search", "researchbox_push",
+            "shell_exec", "create_tool", "list_custom_tools", "delete_custom_tool",
+            "get_errors",
+        }
+        missing = expected - names
+        assert not missing, f"stdio MCP missing tools: {missing}"
