@@ -1436,12 +1436,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_11(self):
+    def test_browser_server_version_is_12(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "11", \
-            f"Expected _REQUIRED_SERVER_VERSION='11', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "11"' in _SERVER_SRC, \
-            "_VERSION = '11' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "12", \
+            f"Expected _REQUIRED_SERVER_VERSION='12', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "12"' in _SERVER_SRC, \
+            "_VERSION = '12' not found in _SERVER_SRC"
 
     def test_browser_server_has_block_detection(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1460,6 +1460,42 @@ class TestBrowserImageDownload:
         assert "Windows" in _SERVER_SRC, "Windows platform not in _SERVER_SRC"
         assert "Chrome/145.0.0.0" in _SERVER_SRC, "Chrome/145 UA not in _SERVER_SRC"
         assert "Win32" in _SERVER_SRC, "Win32 navigator.platform not in _SERVER_SRC"
+
+    def test_browser_server_v12_cloudflare_fixes(self):
+        """v12 stealth: all Cloudflare Turnstile signals are addressed."""
+        from aichat.tools.browser import _SERVER_SRC
+        # CRITICAL: webdriver on prototype with enumerable:false
+        assert "Navigator.prototype" in _SERVER_SRC, \
+            "Navigator.prototype webdriver fix missing"
+        assert "enumerable: false" in _SERVER_SRC, \
+            "enumerable: false not set on webdriver"
+        # CRITICAL: permissions.query toString() spoofing via _markNative
+        assert "_markNative" in _SERVER_SRC, \
+            "_markNative native-code spoofer missing"
+        assert "_nativizedFns" in _SERVER_SRC, \
+            "_nativizedFns WeakMap missing"
+        assert "wrappedQuery" in _SERVER_SRC, \
+            "permissions.query wrapper missing"
+        # HIGH: Accept-Language q-values in the server headers dict
+        assert "en-US,en;q=0.9" in _SERVER_SRC, \
+            "Accept-Language q-values missing from _SERVER_SRC"
+        # MEDIUM: pdfViewerEnabled
+        assert "pdfViewerEnabled" in _SERVER_SRC, \
+            "pdfViewerEnabled spoof missing"
+        # MEDIUM: battery spoof — realistic non-charging laptop values
+        assert "_fakeBattery" in _SERVER_SRC, \
+            "_fakeBattery object missing"
+        assert "charging: false" in _SERVER_SRC, \
+            "battery.charging should be false (not headless default true)"
+        # MEDIUM: timezone in context
+        assert "timezone_id" in _SERVER_SRC, \
+            "timezone_id not set in _new_context()"
+        # LOW: mimeTypes
+        assert "mimeTypes" in _SERVER_SRC, \
+            "navigator.mimeTypes spoof missing"
+        # LOW: connection RTT
+        assert "connection" in _SERVER_SRC and "rtt" in _SERVER_SRC, \
+            "connection.rtt spoof missing"
 
     def test_browser_server_has_save_images_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1480,10 +1516,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v11_has_scrape_endpoint(self):
+    def test_browser_server_v12_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "11", \
-            f"Expected v11, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "12", \
+            f"Expected v12, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"

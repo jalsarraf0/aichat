@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "11"
+_REQUIRED_SERVER_VERSION = "12"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "11"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v11"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v12"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "11"
+_VERSION = "12"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -70,15 +70,40 @@ _SEC_CH_UA_HEADERS = {
     "Sec-Ch-Ua": \'"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"\',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": \'"Windows"\',
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Extended stealth: hide automation signals, spoof navigator properties,
-# restore chrome runtime so sites don\'t detect a bare Chromium shell.
+# Extended stealth v12: eliminate every signal Cloudflare Turnstile checks.
+# Fixes: webdriver enumerable, permissions toString, Accept-Language q-values,
+# pdfViewerEnabled, battery spoof, mimeTypes, connection RTT, timezone.
 _STEALTH_JS = """
-// 1. Remove webdriver flag
-Object.defineProperty(navigator, \'webdriver\', {get: () => undefined});
+// 0. Native-code spoofer: wrapper functions appear as [native code] to toString()
+const _origFnToString = Function.prototype.toString;
+const _nativizedFns = new WeakMap();
+Object.defineProperty(Function.prototype, \'toString\', {
+    value: function toString() {
+        if (_nativizedFns.has(this)) {
+            return \'function \' + _nativizedFns.get(this) + \'() { [native code] }\';
+        }
+        return _origFnToString.call(this);
+    },
+    writable: true,
+    configurable: true,
+});
+function _markNative(fn, name) {
+    _nativizedFns.set(fn, name !== undefined ? name : (fn.name || \'\'));
+    return fn;
+}
 
-// 2. Realistic plugins (PDF viewer + Chrome PDF plugin — present in real Chrome)
+// 1. Remove webdriver flag on Navigator.prototype with enumerable:false
+// (instance-level override still shows enumerable:true on the prototype)
+Object.defineProperty(Navigator.prototype, \'webdriver\', {
+    get: () => undefined,
+    enumerable: false,
+    configurable: true,
+});
+
+// 2. Realistic plugins (Chrome PDF Plugin + Viewer + Native Client)
 const _pluginData = [
     {name: \'Chrome PDF Plugin\', filename: \'internal-pdf-viewer\', description: \'Portable Document Format\'},
     {name: \'Chrome PDF Viewer\',  filename: \'mhjfbmdgcfjbbpaeojofohoefgiehjai\', description: \'\'},
@@ -97,12 +122,32 @@ _pluginData.forEach((d, i) => {
 Object.defineProperty(_plugins, \'length\', {value: _pluginData.length});
 Object.defineProperty(navigator, \'plugins\', {get: () => _plugins});
 
-// 3. Languages, platform, concurrency
-Object.defineProperty(navigator, \'languages\', {get: () => [\'en-US\', \'en\']});
-Object.defineProperty(navigator, \'platform\',  {get: () => \'Win32\'});
-Object.defineProperty(navigator, \'hardwareConcurrency\', {get: () => 8});
+// 3. MimeTypes matching the PDF plugins (absent in headless)
+try {
+    const _mimeData = [
+        {type: \'application/pdf\', description: \'Portable Document Format\', suffix: \'pdf\'},
+        {type: \'text/pdf\',        description: \'Portable Document Format\', suffix: \'pdf\'},
+    ];
+    const _mimes = Object.create(MimeTypeArray.prototype);
+    _mimeData.forEach((d, i) => {
+        const m = Object.create(MimeType.prototype);
+        Object.defineProperty(m, \'type\',        {value: d.type});
+        Object.defineProperty(m, \'description\', {value: d.description});
+        Object.defineProperty(m, \'suffixes\',    {value: d.suffix});
+        _mimes[i] = m;
+        _mimes[d.type] = m;
+    });
+    Object.defineProperty(_mimes, \'length\', {value: _mimeData.length});
+    Object.defineProperty(navigator, \'mimeTypes\', {get: () => _mimes});
+} catch(_) {}
 
-// 4. Chrome runtime stub (required by many sites)
+// 4. Languages, platform, concurrency, pdfViewerEnabled (true since Chrome 108)
+Object.defineProperty(navigator, \'languages\',          {get: () => [\'en-US\', \'en\']});
+Object.defineProperty(navigator, \'platform\',           {get: () => \'Win32\'});
+Object.defineProperty(navigator, \'hardwareConcurrency\', {get: () => 8});
+Object.defineProperty(navigator, \'pdfViewerEnabled\',   {get: () => true});
+
+// 5. Chrome runtime stub (required by many sites)
 window.chrome = {
     runtime: {
         id: undefined,
@@ -115,13 +160,46 @@ window.chrome = {
     app: {},
 };
 
-// 5. Permissions — avoid the \'query\' TypeError that leaks headless state
+// 6. Permissions — wrap query() and mark as [native code] so toString() check passes
 try {
     const origQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (p) =>
-        p.name === \'notifications\'
-        ? Promise.resolve({state: Notification.permission})
-        : origQuery(p);
+    const wrappedQuery = _markNative(function query(perm) {
+        if (perm && perm.name === \'notifications\') {
+            return Promise.resolve({state: Notification.permission});
+        }
+        return origQuery.call(window.navigator.permissions, perm);
+    }, \'query\');
+    Object.defineProperty(window.navigator.permissions, \'query\', {
+        value: wrappedQuery,
+        writable: true,
+        configurable: true,
+    });
+} catch(_) {}
+
+// 7. Battery API — realistic laptop (not always-full always-charging headless)
+try {
+    if (\'getBattery\' in navigator) {
+        const _fakeBattery = {
+            charging: false,
+            chargingTime: Infinity,
+            dischargingTime: 14400,
+            level: 0.72,
+            addEventListener:    () => {},
+            removeEventListener: () => {},
+            dispatchEvent:       () => true,
+        };
+        navigator.getBattery = _markNative(async () => _fakeBattery, \'getBattery\');
+    }
+} catch(_) {}
+
+// 8. Network connection — non-zero RTT (datacenter default of 0 is suspicious)
+try {
+    if (navigator.connection) {
+        Object.defineProperty(navigator.connection, \'rtt\',
+            {get: () => 100, configurable: true});
+        Object.defineProperty(navigator.connection, \'effectiveType\',
+            {get: () => \'4g\', configurable: true});
+    }
 } catch(_) {}
 """
 
@@ -146,6 +224,7 @@ async def _new_context():
         user_agent=_UA,
         viewport=vp,
         locale="en-US",
+        timezone_id="America/New_York",
         extra_http_headers=_SEC_CH_UA_HEADERS,
     )
     await _context.add_init_script(_STEALTH_JS)
