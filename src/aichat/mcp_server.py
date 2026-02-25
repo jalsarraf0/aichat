@@ -684,6 +684,35 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "page_images",
+        "description": (
+            "Extract every image URL from a web page: <img> src, highest-resolution srcset variant, "
+            "data-src/data-lazy-src lazy-load attributes, <picture><source> responsive images, "
+            "og:image and twitter:image meta tags, inline CSS background-image, and JSON-LD "
+            "schema.org image/logo/thumbnail fields. Scrolls first to trigger lazy loaders. "
+            "Returns a deduplicated list (up to 150) with source type and alt text. "
+            "Feed the URLs to fetch_image or browser_save_images to render/download them."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Page URL to navigate to and extract images from.",
+                },
+                "scroll": {
+                    "type": "boolean",
+                    "description": "Scroll before extracting to trigger lazy-loaded images (default true).",
+                },
+                "max_scrolls": {
+                    "type": "integer",
+                    "description": "Number of scroll steps to trigger lazy loaders (default 3).",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "bulk_screenshot",
         "description": (
             "Take screenshots of multiple URLs in parallel and return them all inline (max 6 URLs)."
@@ -1461,6 +1490,34 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                               for lk in result["links"][:100]]
                 result_text += f"\n\nLinks ({len(result['links'])}):\n" + "\n".join(link_lines)
             return _text(result_text)
+
+        if name == "page_images":
+            url         = str(arguments.get("url", "")).strip()
+            scroll      = bool(arguments.get("scroll", True))
+            max_scrolls = max(1, min(int(arguments.get("max_scrolls", 3)), 20))
+            if not url:
+                return _text("page_images: 'url' is required")
+            result = await mgr.run_page_images(
+                url=url, mode=_APPROVAL, confirmer=None,
+                scroll=scroll, max_scrolls=max_scrolls,
+            )
+            if result.get("error"):
+                return _text(f"page_images error: {result['error']}")
+            imgs      = result.get("images", [])
+            count     = result.get("count", len(imgs))
+            title     = result.get("title", "")
+            final_url = result.get("url", url)
+            lines = [f"Found {count} images on: {final_url}  ({title})"]
+            for img in imgs:
+                line = f"[{img.get('type','?')}] {img['url']}"
+                if img.get("alt"):
+                    line += f"  alt={img['alt']!r}"
+                if img.get("natural_w"):
+                    line += f"  {img['natural_w']}×{img['natural_h']}"
+                elif img.get("srcset_width"):
+                    line += f"  {img['srcset_width']}w"
+                lines.append(line)
+            return _text("\n".join(lines))
 
         if name == "bulk_screenshot":
             urls = [str(u).strip() for u in arguments.get("urls", []) if str(u).strip()]

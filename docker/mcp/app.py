@@ -878,6 +878,35 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "page_images",
+        "description": (
+            "Extract every image URL from a web page: <img> src, highest-resolution srcset variant, "
+            "data-src/data-lazy-src lazy-load attributes, <picture><source> responsive images, "
+            "og:image and twitter:image meta tags, inline CSS background-image, and JSON-LD "
+            "schema.org image/logo/thumbnail fields. Scrolls the page first to trigger lazy loaders. "
+            "Returns a deduplicated list (up to 150) with source type and alt text. "
+            "Use with fetch_image or browser_save_images to render/download the results."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Page URL to navigate to and extract images from.",
+                },
+                "scroll": {
+                    "type": "boolean",
+                    "description": "Scroll before extracting to trigger lazy-loaded images (default true).",
+                },
+                "max_scrolls": {
+                    "type": "integer",
+                    "description": "Number of scroll steps to trigger lazy loaders (default 3).",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "bulk_screenshot",
         "description": (
             "Take screenshots of multiple URLs in parallel and return them all inline. "
@@ -2135,6 +2164,43 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                   for lk in data["links"][:100]]
                     result_text += f"\n\nLinks ({len(data['links'])}):\n" + "\n".join(link_lines)
                 return _text(result_text)
+
+            # ----------------------------------------------------------------
+            # page_images — comprehensive image URL extraction from live page
+            # ----------------------------------------------------------------
+            if name == "page_images":
+                url         = str(args.get("url", "")).strip()
+                scroll      = bool(args.get("scroll", True))
+                max_scrolls = max(1, min(int(args.get("max_scrolls", 3)), 20))
+                if not url:
+                    return _text("page_images: 'url' is required")
+                payload = {"url": url, "scroll": scroll, "max_scrolls": max_scrolls}
+                timeout_s = max_scrolls * 2.0 + 30.0
+                try:
+                    pi_r = await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/page_images", json=payload),
+                        timeout=timeout_s,
+                    )
+                    data = pi_r.json()
+                except Exception as exc:
+                    return _text(f"page_images: browser unreachable — {exc}")
+                if data.get("error"):
+                    return _text(f"page_images error: {data['error']}")
+                imgs   = data.get("images", [])
+                count  = data.get("count", len(imgs))
+                title  = data.get("title", "")
+                final_url = data.get("url", url)
+                lines = [f"Found {count} images on: {final_url}  ({title})"]
+                for img in imgs:
+                    line = f"[{img.get('type','?')}] {img['url']}"
+                    if img.get("alt"):
+                        line += f"  alt={img['alt']!r}"
+                    if img.get("natural_w"):
+                        line += f"  {img['natural_w']}×{img['natural_h']}"
+                    elif img.get("srcset_width"):
+                        line += f"  {img['srcset_width']}w"
+                    lines.append(line)
+                return _text("\n".join(lines))
 
             # ----------------------------------------------------------------
             # bulk_screenshot — parallel screenshots of multiple URLs
