@@ -12,7 +12,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -78,12 +78,20 @@ async def lifespan(application: FastAPI):
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS memory (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                ts    INTEGER NOT NULL
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                ts         INTEGER NOT NULL,
+                expires_at INTEGER          -- Unix timestamp; NULL = never expires
             )
             """
         )
+        # Add expires_at column to existing databases that don't have it yet
+        try:
+            con.execute("ALTER TABLE memory ADD COLUMN expires_at INTEGER")
+        except Exception:
+            pass  # column already exists
+        # Purge any already-expired entries on startup
+        con.execute("DELETE FROM memory WHERE expires_at IS NOT NULL AND expires_at < ?", (int(time.time()),))
     yield
 
 
@@ -110,6 +118,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 class StoreRequest(BaseModel):
     key: str
     value: str
+    ttl_seconds: Optional[int] = None  # if set, entry expires after this many seconds
 
 
 # ---------------------------------------------------------------------------
@@ -126,21 +135,29 @@ async def store(req: StoreRequest) -> dict:
     key = req.key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="key must not be empty")
+    now = int(time.time())
+    expires_at = (now + req.ttl_seconds) if req.ttl_seconds and req.ttl_seconds > 0 else None
     with _db() as con:
         con.execute(
-            "INSERT INTO memory (key, value, ts) VALUES (?, ?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, ts=excluded.ts",
-            (key, req.value, int(time.time())),
+            "INSERT INTO memory (key, value, ts, expires_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, ts=excluded.ts, expires_at=excluded.expires_at",
+            (key, req.value, now, expires_at),
         )
-    return {"stored": key}
+    return {"stored": key, **({"expires_at": expires_at} if expires_at else {})}
 
 
 @app.get("/recall")
-async def recall(key: str = Query(default="")) -> dict:
+async def recall(key: str = Query(default=""), pattern: str = Query(default="")) -> dict:
+    """Recall memory entries.  Use 'key' for exact match, 'pattern' for SQL LIKE (e.g. 'whatsapp:%')."""
+    now = int(time.time())
     key = key.strip()
+    pattern = pattern.strip()
     with _db() as con:
         if key:
-            row = con.execute("SELECT key, value, ts FROM memory WHERE key=?", (key,)).fetchone()
+            row = con.execute(
+                "SELECT key, value, ts FROM memory WHERE key=? AND (expires_at IS NULL OR expires_at > ?)",
+                (key, now),
+            ).fetchone()
             if row is None:
                 return {"key": key, "found": False, "entries": []}
             return {
@@ -148,9 +165,20 @@ async def recall(key: str = Query(default="")) -> dict:
                 "found": True,
                 "entries": [{"key": row["key"], "value": row["value"], "ts": row["ts"]}],
             }
-        rows = con.execute("SELECT key, value, ts FROM memory ORDER BY ts DESC LIMIT 50").fetchall()
+        if pattern:
+            rows = con.execute(
+                "SELECT key, value, ts FROM memory WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?)"
+                " ORDER BY ts DESC LIMIT 50",
+                (pattern, now),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT key, value, ts FROM memory WHERE (expires_at IS NULL OR expires_at > ?)"
+                " ORDER BY ts DESC LIMIT 50",
+                (now,),
+            ).fetchall()
         return {
-            "key": "",
+            "key": key or pattern,
             "found": bool(rows),
             "entries": [{"key": r["key"], "value": r["value"], "ts": r["ts"]} for r in rows],
         }

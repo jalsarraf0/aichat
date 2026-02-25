@@ -54,12 +54,16 @@ class DatabaseTool:
         topic: Optional[str] = None,
         q: Optional[str] = None,
         limit: int = 20,
+        offset: int = 0,
+        summary_only: bool = False,
     ) -> dict:
-        params: dict[str, object] = {"limit": limit}
+        params: dict[str, object] = {"limit": limit, "offset": offset}
         if topic:
             params["topic"] = topic
         if q:
             params["q"] = q
+        if summary_only:
+            params["summary_only"] = "true"
         return await self._request("GET", "/articles/search", params=params)
 
     async def store_image(

@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "5"
+_REQUIRED_SERVER_VERSION = "7"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "5"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v5"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v7"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "5"
+_VERSION = "7"
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -337,6 +337,7 @@ class ScreenshotReq(BaseModel):
     url: Optional[str] = None
     path: str = "/workspace/screenshot.png"
     find_text: Optional[str] = None   # scroll to first occurrence of this text before screenshotting
+    find_image: Optional[str] = None  # match <img> by src/alt substring OR 1-based index (e.g. "logo", "2", "#3")
 
 
 @app.post("/screenshot")
@@ -360,7 +361,67 @@ async def screenshot(req: ScreenshotReq):
         await asyncio.sleep(_random.uniform(0.2, 0.5))
 
         clipped = False
-        if req.find_text:
+        image_meta: dict = {}
+        if req.find_image:
+            # Precise image capture: find an <img> element by src/alt pattern or 1-based index,
+            # scroll it to center, and clip the screenshot to its exact bounding box.
+            try:
+                import json as _json
+                found_img = await page.evaluate(
+                    """(query) => {
+                        const imgs = Array.from(document.querySelectorAll(\'img\'));
+                        let target = null;
+                        // 1-based index: "#3" or "3"
+                        const idxM = query.match(/^#?(\\d+)$/);
+                        if (idxM) {
+                            const idx = parseInt(idxM[1]) - 1;
+                            target = imgs[idx] || null;
+                        } else {
+                            const lower = query.toLowerCase();
+                            for (const img of imgs) {
+                                const src = (img.src || \'\').toLowerCase();
+                                const alt = (img.alt || \'\').toLowerCase();
+                                if (src.includes(lower) || alt.includes(lower)) {
+                                    target = img;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!target) return {found: false};
+                        target.scrollIntoView({behavior: \'instant\', block: \'center\'});
+                        const r = target.getBoundingClientRect();
+                        return {found: true, x: r.left, y: r.top, w: r.width, h: r.height,
+                                src: target.src, alt: target.alt,
+                                nw: target.naturalWidth, nh: target.naturalHeight};
+                    }""",
+                    req.find_image,
+                )
+                await asyncio.sleep(_random.uniform(0.1, 0.2))
+                if found_img.get("found") and found_img.get("w", 0) > 0:
+                    pad = 8  # tight padding for precise image capture
+                    vp = page.viewport_size or {"width": 1280, "height": 900}
+                    x = max(0, found_img["x"] - pad)
+                    y = max(0, found_img["y"] - pad)
+                    w = min(vp["width"] - x, found_img["w"] + 2 * pad)
+                    h = min(vp["height"] - y, found_img["h"] + 2 * pad)
+                    await page.screenshot(
+                        path=req.path,
+                        clip={"x": x, "y": y, "width": w, "height": h},
+                    )
+                    clipped = True
+                    image_meta = {
+                        "src": found_img.get("src", ""),
+                        "alt": found_img.get("alt", ""),
+                        "natural_width":  found_img.get("nw", 0),
+                        "natural_height": found_img.get("nh", 0),
+                    }
+                else:
+                    # Image not found — fall through to normal screenshot
+                    await page.screenshot(path=req.path, full_page=False)
+            except Exception:
+                await page.screenshot(path=req.path, full_page=False)
+
+        elif req.find_text:
             # Zoom: find the element containing the text, scroll to it, then clip
             # the screenshot to show just that region with context padding.
             try:
@@ -417,6 +478,8 @@ async def screenshot(req: ScreenshotReq):
 
         result = {"path": req.path, "title": await page.title(), "url": page.url,
                   "clipped": clipped}
+        if image_meta:
+            result["image_meta"] = image_meta
         if nav_error:
             result["nav_error"] = nav_error
         return result
@@ -437,15 +500,70 @@ async def screenshot(req: ScreenshotReq):
         }
 
 
-@app.get("/images")
-async def list_images():
-    """Extract direct image URLs from the currently loaded page."""
+class ElementScreenshotReq(BaseModel):
+    selector: str
+    path: str = "/workspace/element.png"
+    pad: int = 20  # padding around the element in pixels
+
+
+@app.post("/screenshot_element")
+async def screenshot_element(req: ElementScreenshotReq):
+    """Screenshot a single page element identified by CSS selector."""
     try:
         page = await _ensure_page()
-        urls = await _get_image_urls(page)
-        return {"urls": urls}
+        locator = page.locator(req.selector).first
+        bbox = await locator.bounding_box()
+        if not bbox:
+            return {"error": f"Element \'{req.selector}\' not found or has no bounding box"}
+        await locator.scroll_into_view_if_needed()
+        await asyncio.sleep(_random.uniform(0.1, 0.2))
+        vp = page.viewport_size or {"width": 1280, "height": 900}
+        x = max(0, bbox["x"] - req.pad)
+        y = max(0, bbox["y"] - req.pad)
+        w = min(vp["width"]  - x, bbox["width"]  + 2 * req.pad)
+        h = min(vp["height"] - y, bbox["height"] + 2 * req.pad)
+        if w <= 0 or h <= 0:
+            return {"error": f"Element \'{req.selector}\' has zero-size bounding box"}
+        await page.screenshot(path=req.path, clip={"x": x, "y": y, "width": w, "height": h})
+        return {
+            "path": req.path,
+            "selector": req.selector,
+            "clip": {"x": x, "y": y, "width": w, "height": h},
+            "title": await page.title(),
+            "url": page.url,
+        }
     except Exception as exc:
-        return {"urls": [], "error": str(exc)}
+        return {"error": str(exc), "path": req.path}
+
+
+@app.get("/images")
+async def list_images():
+    """Return metadata for all visible <img> elements on the current page."""
+    try:
+        page = await _ensure_page()
+        data = await page.evaluate(
+            """() => {
+                const imgs = Array.from(document.querySelectorAll(\'img\'));
+                return imgs.slice(0, 30).map(function(img, i) {
+                    const r = img.getBoundingClientRect();
+                    return {
+                        index:          i + 1,
+                        src:            img.src || \'\',
+                        alt:            img.alt || \'\',
+                        rendered_w:     Math.round(r.width),
+                        rendered_h:     Math.round(r.height),
+                        natural_w:      img.naturalWidth  || 0,
+                        natural_h:      img.naturalHeight || 0,
+                        visible:        r.width > 1 && r.height > 1,
+                        in_viewport:    r.top < window.innerHeight && r.bottom > 0
+                            && r.left < window.innerWidth && r.right > 0
+                    };
+                });
+            }"""
+        )
+        return {"images": data, "count": len(data)}
+    except Exception as exc:
+        return {"images": [], "count": 0, "error": str(exc)}
 
 
 class SearchReq(BaseModel):
@@ -480,6 +598,113 @@ async def search(req: SearchReq):
         }
     except Exception as exc:
         return {"error": str(exc), "query": req.query, "content": ""}
+
+
+_MIME_EXT: dict = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+    "image/tiff": ".tiff",
+    "image/avif": ".avif",
+}
+
+
+class SaveImagesReq(BaseModel):
+    urls: list
+    prefix: str = "image"
+    max: int = 20
+
+
+class DownloadPageImagesReq(BaseModel):
+    filter: Optional[str] = None
+    max: int = 20
+    prefix: str = "image"
+
+
+async def _save_url_via_browser(page, url: str, path: str) -> dict:
+    """Download a single image URL using the browser\'s session (cookies, auth, referrer)."""
+    import os as _os
+    try:
+        resp = await page.request.get(url, timeout=30000)
+        if not resp.ok:
+            return {"url": url, "error": f"HTTP {resp.status}"}
+        body = await resp.body()
+        ct = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+        ext = _MIME_EXT.get(ct, ".jpg")
+        # Replace any placeholder extension in path with the real one
+        base, _ = _os.path.splitext(path)
+        final_path = base + ext
+        _os.makedirs(_os.path.dirname(final_path), exist_ok=True)
+        with open(final_path, "wb") as f:
+            f.write(body)
+        return {
+            "url": url,
+            "path": final_path,
+            "mime": ct,
+            "size": len(body),
+        }
+    except Exception as exc:
+        return {"url": url, "error": str(exc)}
+
+
+@app.post("/save_images")
+async def save_images(req: SaveImagesReq):
+    """Download a list of image URLs using the browser\'s live session (cookies, auth, referrer)."""
+    import datetime as _dt, os as _os
+    page = await _ensure_page()
+    urls = req.urls[:min(req.max, 50)]
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    saved = []
+    errors = []
+    for idx, url in enumerate(urls):
+        path = f"/workspace/{req.prefix}_{idx + 1}_{ts}.tmp"
+        result = await _save_url_via_browser(page, url, path)
+        if "error" in result:
+            errors.append(result)
+        else:
+            saved.append({**result, "index": idx + 1})
+    return {"saved": saved, "errors": errors, "count": len(saved)}
+
+
+@app.post("/download_page_images")
+async def download_page_images(req: DownloadPageImagesReq):
+    """Download all (or filtered) <img> elements from the current page using browser session."""
+    page = await _ensure_page()
+    # Collect all img srcs + alts from DOM
+    img_data = await page.evaluate("""() => {
+        const imgs = Array.from(document.querySelectorAll(\'img[src]\'));
+        return imgs.slice(0, 100).map(img => ({src: img.src || \'\', alt: img.alt || \'\'}));
+    }""")
+    # Filter by src/alt substring if requested
+    if req.filter:
+        lower = req.filter.lower()
+        img_data = [i for i in img_data
+                    if lower in i["src"].lower() or lower in i["alt"].lower()]
+    # Deduplicate by src
+    seen = set()
+    urls = []
+    for item in img_data:
+        src = item["src"]
+        if src and src not in seen and src.startswith("http"):
+            seen.add(src)
+            urls.append(src)
+    urls = urls[:min(req.max, 50)]
+    # Reuse save logic
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    saved = []
+    errors = []
+    for idx, url in enumerate(urls):
+        path = f"/workspace/{req.prefix}_{idx + 1}_{ts}.tmp"
+        result = await _save_url_via_browser(page, url, path)
+        if "error" in result:
+            errors.append(result)
+        else:
+            saved.append({**result, "index": idx + 1})
+    return {"saved": saved, "errors": errors, "count": len(saved), "filter": req.filter}
 
 
 if __name__ == "__main__":
@@ -677,7 +902,12 @@ class BrowserTool:
                 break
         return await self._httpx_fetch(url)
 
-    async def screenshot(self, url: str | None = None, find_text: str | None = None) -> dict:
+    async def screenshot(
+        self,
+        url: str | None = None,
+        find_text: str | None = None,
+        find_image: str | None = None,
+    ) -> dict:
         base = await self._ensure_server()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = f"/workspace/screenshot_{ts}.png"
@@ -686,6 +916,8 @@ class BrowserTool:
             payload["url"] = url
         if find_text:
             payload["find_text"] = find_text
+        if find_image:
+            payload["find_image"] = find_image
         async with httpx.AsyncClient(timeout=45.0) as c:
             r = await c.post(f"{base}/screenshot", json=payload)
         r.raise_for_status()
@@ -694,13 +926,72 @@ class BrowserTool:
         data["host_path"] = f"/docker/human_browser/workspace/screenshot_{ts}.png"
         return data
 
+    async def screenshot_element(self, selector: str, pad: int = 20) -> dict:
+        """Screenshot a single DOM element by CSS selector."""
+        base = await self._ensure_server()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"/workspace/element_{ts}.png"
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(f"{base}/screenshot_element",
+                             json={"selector": selector, "path": path, "pad": pad})
+        r.raise_for_status()
+        data = r.json()
+        data["host_path"] = f"/docker/human_browser/workspace/element_{ts}.png"
+        return data
+
     async def list_images(self) -> dict:
-        """Get image URLs from the current page in the browser."""
+        """Get image metadata (index, src, alt, dimensions, visibility) for the current page."""
         base = await self._ensure_server()
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{base}/images")
         r.raise_for_status()
         return r.json()
+
+    async def save_images(
+        self,
+        urls: list[str],
+        prefix: str = "image",
+        max_images: int = 20,
+    ) -> dict:
+        """Download specific image URLs using the browser's authenticated session.
+
+        Uses Playwright page.request.get() — shares cookies, auth tokens, and referrer
+        with the live browser page, exactly like a human right-clicking 'Save Image As'.
+        """
+        base = await self._ensure_server()
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            r = await c.post(
+                f"{base}/save_images",
+                json={"urls": urls[:max_images], "prefix": prefix, "max": max_images},
+            )
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("saved", []):
+            fname = os.path.basename(item.get("path", ""))
+            if fname:
+                item["host_path"] = f"/docker/human_browser/workspace/{fname}"
+        return data
+
+    async def download_page_images(
+        self,
+        filter_query: str | None = None,
+        max_images: int = 20,
+        prefix: str = "image",
+    ) -> dict:
+        """Download all (or filtered) images from the current page via browser session."""
+        base = await self._ensure_server()
+        payload: dict = {"max": max_images, "prefix": prefix}
+        if filter_query:
+            payload["filter"] = filter_query
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            r = await c.post(f"{base}/download_page_images", json=payload)
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("saved", []):
+            fname = os.path.basename(item.get("path", ""))
+            if fname:
+                item["host_path"] = f"/docker/human_browser/workspace/{fname}"
+        return data
 
     async def click(self, selector: str) -> dict:
         base = await self._ensure_server()

@@ -33,11 +33,19 @@ class MemoryTool:
                 retryable=retryable,
             ) from exc
 
-    async def store(self, key: str, value: str) -> dict:
-        return await self._request("POST", "/store", json={"key": key, "value": value})
+    async def store(self, key: str, value: str, ttl_seconds: int | None = None) -> dict:
+        payload: dict = {"key": key, "value": value}
+        if ttl_seconds and ttl_seconds > 0:
+            payload["ttl_seconds"] = ttl_seconds
+        return await self._request("POST", "/store", json=payload)
 
-    async def recall(self, key: str = "") -> dict:
-        return await self._request("GET", "/recall", params={"key": key})
+    async def recall(self, key: str = "", pattern: str = "") -> dict:
+        params: dict = {}
+        if key:
+            params["key"] = key
+        if pattern:
+            params["pattern"] = pattern
+        return await self._request("GET", "/recall", params=params)
 
     async def delete(self, key: str) -> dict:
         return await self._request("DELETE", "/delete", params={"key": key})

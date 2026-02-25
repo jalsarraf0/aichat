@@ -13,6 +13,12 @@ services:
       - aichatdb:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aichat -d aichat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # FastAPI service that wraps the PostgreSQL DB with REST endpoints for
   # storing/searching articles, images, and cached web pages.
@@ -25,6 +31,11 @@ services:
     ports:
       - "8091:8091"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8091/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   # RSS/feed discovery (returns feed URLs; stores articles via aichat-database).
   aichat-researchbox:
@@ -37,6 +48,12 @@ services:
       - /tmp/research:/tmp/research
     ports:
       - "8092:8092"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8092/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   # MCP HTTP/SSE server — exposes all aichat tools to LM Studio and other
   # MCP clients over the network.  Reachable at http://<host-ip>:8096/sse
@@ -50,9 +67,15 @@ services:
       # human_browser is connected to this network by the install script
       # so it is reachable by hostname from within the container.
       BROWSER_URL:  http://human_browser:7081
+      # Image generation — points at LM Studio (or any OpenAI-compatible image API).
+      # Set IMAGE_GEN_MODEL to the exact model name shown in LM Studio to pin a model.
+      IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
+      IMAGE_GEN_MODEL: ""
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      # Read the screenshot PNGs that the browser server writes to /workspace
-      - /docker/human_browser/workspace:/browser-workspace:ro
+      # Read/write the browser screenshot workspace — rw allows saving pipeline outputs
+      - /docker/human_browser/workspace:/browser-workspace
     depends_on:
       - aichat-database
       - aichat-memory
@@ -60,6 +83,11 @@ services:
     ports:
       - "8096:8096"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8096/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   aichat-memory:
     build: ./docker/memory
@@ -72,6 +100,11 @@ services:
     volumes:
       - memorydb:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8094/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   aichat-toolkit:
     build: ./docker/toolkit
@@ -85,6 +118,11 @@ services:
       - ${HOME}/.config/aichat/tools:/data/tools
       - ${HOME}/git:/data/repos:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8095/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   # WhatsApp bot — Baileys + LM Studio with full MCP tool support.
   # Visit http://localhost:8097 to scan the QR code and pair a number.
@@ -104,6 +142,7 @@ services:
     depends_on:
       - aichat-memory
       - aichat-mcp
+      - aichat-toolkit
     ports:
       - "8097:8097"
     volumes:

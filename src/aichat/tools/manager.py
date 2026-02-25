@@ -339,18 +339,20 @@ class ToolManager:
         value: str,
         mode: ApprovalMode,
         confirmer: Callable[[str], Awaitable[bool]] | None,
+        ttl_seconds: int | None = None,
     ) -> dict:
         await self._check_approval(mode, ToolName.MEMORY_STORE.value, confirmer)
-        return await self.memory.store(key, value)
+        return await self.memory.store(key, value, ttl_seconds=ttl_seconds)
 
     async def run_memory_recall(
         self,
         key: str,
         mode: ApprovalMode,
         confirmer: Callable[[str], Awaitable[bool]] | None,
+        pattern: str = "",
     ) -> dict:
         await self._check_approval(mode, ToolName.MEMORY_RECALL.value, confirmer)
-        return await self.memory.recall(key)
+        return await self.memory.recall(key, pattern=pattern)
 
     # ------------------------------------------------------------------
     # Database tools (PostgreSQL storage / web cache)
@@ -374,9 +376,15 @@ class ToolManager:
         q: str,
         mode: ApprovalMode,
         confirmer: Callable[[str], Awaitable[bool]] | None,
+        limit: int = 20,
+        offset: int = 0,
+        summary_only: bool = False,
     ) -> dict:
         await self._check_approval(mode, ToolName.DB_SEARCH.value, confirmer)
-        return await self.db.search_articles(topic=topic or None, q=q or None)
+        return await self.db.search_articles(
+            topic=topic or None, q=q or None,
+            limit=limit, offset=offset, summary_only=summary_only,
+        )
 
     async def run_db_cache_store(
         self,
@@ -688,6 +696,12 @@ class ToolManager:
         value: str | None = None,
         code: str | None = None,
         find_text: str | None = None,
+        find_image: str | None = None,
+        pad: int = 20,
+        image_urls: list[str] | None = None,
+        filter_query: str | None = None,
+        image_prefix: str = "image",
+        max_images: int = 20,
     ) -> dict:
         await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
         try:
@@ -696,7 +710,8 @@ class ToolManager:
                     return {"error": "url is required for navigate"}
                 return await self.browser.navigate(url)
             if action == "screenshot":
-                result = await self.browser.screenshot(url, find_text=find_text)
+                result = await self.browser.screenshot(url, find_text=find_text,
+                                                        find_image=find_image)
                 # Auto-persist screenshot metadata to the image database
                 host_path = result.get("host_path", "")
                 if host_path and not result.get("error"):
@@ -725,10 +740,27 @@ class ToolManager:
                 if not code:
                     return {"error": "code is required for eval"}
                 return await self.browser.eval_js(code)
+            if action == "screenshot_element":
+                if not selector:
+                    return {"error": "selector is required for screenshot_element"}
+                return await self.browser.screenshot_element(selector, pad=pad)
+            if action == "list_images_detail":
+                return await self.browser.list_images()
+            if action == "save_images":
+                if not image_urls:
+                    return {"error": "image_urls required for save_images"}
+                return await self.browser.save_images(
+                    image_urls, prefix=image_prefix, max_images=max_images
+                )
+            if action == "download_page_images":
+                return await self.browser.download_page_images(
+                    filter_query=filter_query, max_images=max_images, prefix=image_prefix
+                )
             return {
                 "error": (
                     f"Unknown action '{action}'. "
-                    "Valid: navigate, read, screenshot, click, fill, eval"
+                    "Valid: navigate, read, screenshot, click, fill, eval, "
+                    "screenshot_element, list_images_detail, save_images, download_page_images"
                 )
             }
         except Exception as exc:
