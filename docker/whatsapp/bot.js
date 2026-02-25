@@ -27,6 +27,7 @@ import makeWASocket, {
   isJidBroadcast,
   isJidGroup,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import axios from 'axios'
@@ -59,6 +60,7 @@ const logger = pino({ level: 'warn' })
 // ─── QR / Status HTTP server (port 8097) ─────────────────────────────────────
 
 let _qrDataURL  = null   // base64 PNG data URL of current QR code
+let _qrRaw      = null   // raw QR string (for terminal rendering)
 let _status     = 'starting'
 let _myJid      = null
 
@@ -104,6 +106,11 @@ const httpServer = createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ status: _status, jid: _myJid }))
+    return
+  }
+  if (req.url === '/qr-raw') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' })
+    res.end(_qrRaw ?? '')
     return
   }
   res.writeHead(200, { 'Content-Type': 'text/html' })
@@ -226,16 +233,27 @@ async function callMCPTool (toolName, toolArgs) {
  * Run the full LM Studio conversation + tool-calling loop.
  * Returns the final assistant text and any images produced by tools.
  */
-async function runLLM (jid, userMessage, sock) {
+async function runLLM (jid, userMessage, imageData, sock) {
   const history = await getHistory(jid)
   const tools   = await getTools()
+
+  // Build the user content: vision array if an image was provided, plain string otherwise
+  const userContent = imageData
+    ? [
+        { type: 'image_url', image_url: { url: `data:${imageData.mimeType};base64,${imageData.data}` } },
+        { type: 'text', text: userMessage },
+      ]
+    : userMessage
 
   // Build the messages array: system + prior history + current user message
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...history,
-    { role: 'user', content: userMessage },
+    { role: 'user', content: userContent },
   ]
+
+  // Text label used when persisting to history (never store raw image bytes)
+  const historicUserMsg = imageData ? `[image] ${userMessage}` : userMessage
 
   let allImages = []   // images emitted by tools during this turn
 
@@ -266,11 +284,11 @@ async function runLLM (jid, userMessage, sock) {
       // Final text answer
       const finalText = (msg?.content ?? '').trim() || '(no response)'
 
-      // Persist only the clean user/assistant turn (not tool details)
+      // Persist only the clean user/assistant turn (not tool details or raw image bytes)
       await saveHistory(jid, [
         ...history,
-        { role: 'user',      content: userMessage },
-        { role: 'assistant', content: finalText   },
+        { role: 'user',      content: historicUserMsg },
+        { role: 'assistant', content: finalText        },
       ])
 
       return { text: finalText, images: allImages }
@@ -284,7 +302,9 @@ async function runLLM (jid, userMessage, sock) {
       toolCalls.map(async tc => {
         const toolName = tc.function.name
         let   toolArgs = {}
-        try { toolArgs = JSON.parse(tc.function.arguments ?? '{}') } catch { /* ignore */ }
+        try { toolArgs = JSON.parse(tc.function.arguments ?? '{}') } catch (e) {
+          console.warn(`[whatsapp] tool arg parse error for ${toolName}: ${e.message} — raw: ${String(tc.function.arguments).slice(0, 200)}`)
+        }
 
         console.log(`[whatsapp] → tool: ${toolName}(${JSON.stringify(toolArgs).slice(0, 120)})`)
 
@@ -326,25 +346,49 @@ async function runLLM (jid, userMessage, sock) {
   const fallback = lastText?.content?.trim() || '(max tool iterations reached)'
   await saveHistory(jid, [
     ...history,
-    { role: 'user',      content: userMessage },
-    { role: 'assistant', content: fallback    },
+    { role: 'user',      content: historicUserMsg },
+    { role: 'assistant', content: fallback         },
   ])
   return { text: fallback, images: allImages }
 }
 
-// ─── Text extraction from WhatsApp message ───────────────────────────────────
+// ─── Content extraction from WhatsApp message ────────────────────────────────
 
-function extractText (msg) {
+/**
+ * Extract text and optional image from a WhatsApp message.
+ * Returns { text, image } where image is { data: base64, mimeType } or null.
+ */
+async function extractContent (msg, sock) {
   const m = msg?.message
-  if (!m) return null
-  return (
-    m.conversation                    ??
-    m.extendedTextMessage?.text       ??
-    m.imageMessage?.caption           ??
-    m.videoMessage?.caption           ??
-    m.documentMessage?.caption        ??
-    null
-  )
+  if (!m) return { text: null, image: null }
+
+  // Plain text messages
+  const plainText = m.conversation ?? m.extendedTextMessage?.text ?? null
+  if (plainText !== null) return { text: plainText, image: null }
+
+  // Image message — download and forward to the LLM as vision input
+  if (m.imageMessage) {
+    const caption = m.imageMessage.caption || 'Describe this image.'
+    try {
+      const buffer = await downloadMediaMessage(
+        msg, 'buffer', {},
+        { logger, reuploadRequest: sock.updateMediaMessage },
+      )
+      return {
+        text:  caption,
+        image: { data: buffer.toString('base64'), mimeType: m.imageMessage.mimetype || 'image/jpeg' },
+      }
+    } catch (err) {
+      console.warn('[whatsapp] Failed to download image:', err.message)
+      return { text: caption, image: null }
+    }
+  }
+
+  // Video / document — caption only
+  const captionOnly = m.videoMessage?.caption ?? m.documentMessage?.caption ?? null
+  if (captionOnly) return { text: captionOnly, image: null }
+
+  return { text: null, image: null }
 }
 
 // ─── Core message handler ─────────────────────────────────────────────────────
@@ -360,7 +404,8 @@ async function handleMessage (sock, msg) {
 
   if (isGroup && !ALLOW_GROUPS) return
 
-  let text = extractText(msg)
+  const { text: rawText, image } = await extractContent(msg, sock)
+  let text = rawText
   if (!text) return
 
   // In groups, require the configured prefix and strip it
@@ -372,7 +417,7 @@ async function handleMessage (sock, msg) {
   }
 
   const senderName = msg.pushName ?? jid.split('@')[0]
-  console.log(`[whatsapp] ${senderName} (${jid}): ${text.slice(0, 100)}`)
+  console.log(`[whatsapp] ${senderName} (${jid}): ${image ? '[image] ' : ''}${text.slice(0, 100)}`)
 
   // ── Built-in commands ────────────────────────────────────────────────────
   const cmd = text.trim().toLowerCase()
@@ -388,8 +433,9 @@ async function handleMessage (sock, msg) {
       `*${BOT_NAME}* — aichat WhatsApp Bot\n\n` +
       `I'm an AI assistant with access to the following tools:\n` +
       `• 🌐 Web search & screenshots\n` +
+      `• 🖼️ Image analysis (send me a photo!)\n` +
       `• 💾 Memory & database storage\n` +
-      `• 🔎 RSS feed research\n` +
+      `• 📡 RSS feed ingestion & article search\n` +
       `• 🛠️ Custom tools\n\n` +
       `*Commands:*\n` +
       `!help — show this message\n` +
@@ -406,7 +452,7 @@ async function handleMessage (sock, msg) {
 
     let result
     try {
-      result = await runLLM(jid, text, sock)
+      result = await runLLM(jid, text, image, sock)
     } catch (err) {
       console.error('[whatsapp] LM Studio error:', err.message)
       await sock.sendPresenceUpdate('paused', jid)
@@ -455,6 +501,7 @@ async function connectToWhatsApp () {
 
     if (qr) {
       _status    = 'waiting_for_qr'
+      _qrRaw     = qr
       _qrDataURL = await QRCode.toDataURL(qr)
       console.log('[whatsapp] QR ready — scan at http://localhost:8097')
     }
@@ -463,6 +510,7 @@ async function connectToWhatsApp () {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode
       _status    = 'disconnected'
       _qrDataURL = null
+      _qrRaw     = null
 
       if (statusCode === DisconnectReason.loggedOut) {
         console.log(

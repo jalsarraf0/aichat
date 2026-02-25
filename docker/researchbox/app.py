@@ -85,7 +85,18 @@ def search_feeds(topic: str) -> dict:
 async def push_feed(payload: dict) -> dict:
     topic = payload["topic"]
     feed_url = payload["feed_url"]
-    parsed = feedparser.parse(feed_url)
+
+    # feedparser.parse is synchronous; run in a thread to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    try:
+        parsed = await asyncio.wait_for(
+            loop.run_in_executor(None, feedparser.parse, feed_url),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        return {"topic": topic, "feed_url": feed_url, "inserted": 0, "failed": 0,
+                "errors": [{"url": feed_url, "error": "feed fetch timed out after 20s"}]}
+
     items = [
         {
             "title": e.get("title", "untitled"),
@@ -93,20 +104,25 @@ async def push_feed(payload: dict) -> dict:
         }
         for e in parsed.entries[:20]
     ]
+
     stored = 0
+    failed = 0
+    errors: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as c:
         for item in items:
             try:
                 r = await c.post(
                     f"{DB_API}/articles/store",
-                    json={
-                        "url": item["url"],
-                        "title": item["title"],
-                        "topic": topic,
-                    },
+                    json={"url": item["url"], "title": item["title"], "topic": topic},
                 )
                 r.raise_for_status()
                 stored += 1
-            except Exception:
-                pass
-    return {"topic": topic, "feed_url": feed_url, "inserted": stored}
+            except Exception as exc:
+                failed += 1
+                errors.append({"url": item["url"], "error": str(exc)})
+
+    log.info("push_feed %s → %d inserted, %d failed", feed_url, stored, failed)
+    result: dict = {"topic": topic, "feed_url": feed_url, "inserted": stored, "failed": failed}
+    if errors:
+        result["errors"] = errors
+    return result

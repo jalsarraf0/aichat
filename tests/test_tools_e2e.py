@@ -929,7 +929,7 @@ class TestBrowserToolUnit:
         mgr = ToolManager()
         captured_kwargs: list[dict] = []
 
-        async def _fake_screenshot(url=None, find_text=None):
+        async def _fake_screenshot(url=None, find_text=None, find_image=None):
             captured_kwargs.append({"url": url, "find_text": find_text})
             return {
                 "path": "/workspace/screenshot_test.png",

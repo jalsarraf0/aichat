@@ -271,6 +271,9 @@ async def register_tool(req: RegisterRequest) -> dict:
     }
 
 
+_TOOL_TIMEOUT = float(os.environ.get("TOOL_TIMEOUT", "30"))
+
+
 @app.post("/call/{tool_name}")
 async def call_tool(tool_name: str, req: CallRequest) -> dict:
     tools = _load_tools()
@@ -278,8 +281,10 @@ async def call_tool(tool_name: str, req: CallRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
     mod = tools[tool_name]["module"]
     try:
-        result = await mod.run(**req.params)
+        result = await asyncio.wait_for(mod.run(**req.params), timeout=_TOOL_TIMEOUT)
         return {"tool": tool_name, "result": str(result)}
+    except asyncio.TimeoutError:
+        return {"tool": tool_name, "result": f"Tool timed out after {_TOOL_TIMEOUT:.0f}s", "error": True}
     except Exception:
         tb = traceback.format_exc()
         return {"tool": tool_name, "result": f"Tool error:\n{tb}", "error": True}

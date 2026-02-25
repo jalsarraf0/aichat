@@ -274,14 +274,6 @@ Run: ls -la ~/git/aichat/src
 Dangerous commands (rm -rf on critical paths, fork bombs, dd to raw disks, etc.) are blocked automatically.
 Shell must be enabled (`/shell on` or `Ctrl+S`).
 
-### `rss_latest` — RSS Feed Reader
-
-Fetches the latest stored RSS items for a topic from the RSS service.
-
-```
-What's the latest news on AI?
-```
-
 ### `researchbox_search` — Find RSS Feeds
 
 Searches for RSS feed sources for a given topic.

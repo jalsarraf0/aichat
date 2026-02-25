@@ -81,6 +81,11 @@ def _create_tables(c: psycopg.Connection) -> None:
             logged_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    # Indexes for common query patterns on error_logs
+    c.execute("CREATE INDEX IF NOT EXISTS idx_error_logs_service_ts ON error_logs (service, logged_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_error_logs_level_ts   ON error_logs (level, logged_at DESC)")
+    # Index for article topic lookups
+    c.execute("CREATE INDEX IF NOT EXISTS idx_articles_topic_ts ON articles (topic, stored_at DESC)")
 
 
 # ---------------------------------------------------------------------------
@@ -246,40 +251,49 @@ def search_articles(
     topic: Optional[str] = None,
     q: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
+    summary_only: bool = False,
 ) -> dict:
+    """Search stored articles.  summary_only=true truncates content to 300 chars."""
     try:
         with conn() as c:
             if topic and q:
                 rows = c.execute(
                     """SELECT url, title, content, topic, stored_at FROM articles
                        WHERE topic = %s AND (title ILIKE %s OR content ILIKE %s)
-                       ORDER BY stored_at DESC LIMIT %s""",
-                    (topic, f"%{q}%", f"%{q}%", limit),
+                       ORDER BY stored_at DESC LIMIT %s OFFSET %s""",
+                    (topic, f"%{q}%", f"%{q}%", limit, offset),
                 ).fetchall()
             elif topic:
                 rows = c.execute(
                     """SELECT url, title, content, topic, stored_at FROM articles
                        WHERE topic = %s
-                       ORDER BY stored_at DESC LIMIT %s""",
-                    (topic, limit),
+                       ORDER BY stored_at DESC LIMIT %s OFFSET %s""",
+                    (topic, limit, offset),
                 ).fetchall()
             elif q:
                 rows = c.execute(
                     """SELECT url, title, content, topic, stored_at FROM articles
                        WHERE title ILIKE %s OR content ILIKE %s
-                       ORDER BY stored_at DESC LIMIT %s""",
-                    (f"%{q}%", f"%{q}%", limit),
+                       ORDER BY stored_at DESC LIMIT %s OFFSET %s""",
+                    (f"%{q}%", f"%{q}%", limit, offset),
                 ).fetchall()
             else:
                 rows = c.execute(
                     """SELECT url, title, content, topic, stored_at FROM articles
-                       ORDER BY stored_at DESC LIMIT %s""",
-                    (limit,),
+                       ORDER BY stored_at DESC LIMIT %s OFFSET %s""",
+                    (limit, offset),
                 ).fetchall()
+
+        def _content(raw: Optional[str]) -> Optional[str]:
+            if raw is None:
+                return None
+            return (raw[:300] + "…") if summary_only and len(raw) > 300 else raw
+
         return {
             "articles": [
                 {
-                    "url": r[0], "title": r[1], "content": r[2],
+                    "url": r[0], "title": r[1], "content": _content(r[2]),
                     "topic": r[3], "stored_at": r[4].isoformat(),
                 }
                 for r in rows
@@ -322,13 +336,13 @@ def store_image(image: ImageIn) -> dict:
 
 
 @app.get("/images/list")
-def list_images(limit: int = 20) -> dict:
+def list_images(limit: int = 20, offset: int = 0) -> dict:
     try:
         with conn() as c:
             rows = c.execute(
                 """SELECT url, host_path, alt_text, stored_at FROM images
-                   ORDER BY stored_at DESC LIMIT %s""",
-                (limit,),
+                   ORDER BY stored_at DESC LIMIT %s OFFSET %s""",
+                (limit, offset),
             ).fetchall()
         return {
             "images": [
