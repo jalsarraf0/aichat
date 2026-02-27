@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "14"
+_REQUIRED_SERVER_VERSION = "15"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "14"
+_VERSION = "15"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -423,7 +423,27 @@ _BLOCK_SIGNALS = [
     "sorry, humans only",
     "are you a robot",
     "challenge-platform",
+    # captcha providers
+    "hcaptcha.com/captcha",
+    "recaptcha/api.js",
+    "g-recaptcha",
+    "cf-turnstile",
+    "press and hold",
+    "verify you are human",
+    "complete the captcha",
+    "this site is protected by hcaptcha",
+    "bot protection by",
+    "ddos-guard",
+    "just a moment",
 ]
+
+# Sites known to aggressively fingerprint — always rotate context before visiting
+_ALWAYS_ROTATE_DOMAINS = (
+    "twitter.com", "x.com",
+    "reddit.com", "old.reddit.com",
+    "pinterest.com",
+    "instagram.com",
+)
 
 
 def _is_blocked(text: str) -> bool:
@@ -1070,6 +1090,9 @@ async def page_images_endpoint(req: PageImagesReq):
     try:
         page = await _ensure_page()
         if req.url:
+            # Pre-rotate context for sites that aggressively fingerprint browsers
+            if any(d in req.url for d in _ALWAYS_ROTATE_DOMAINS):
+                page = await _rotate_context_and_page()
             await _safe_goto(page, req.url)
             quick = await _extract_text(page)
             if _is_blocked(quick):

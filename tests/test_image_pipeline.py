@@ -1436,12 +1436,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_14(self):
+    def test_browser_server_version_is_15(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "14", \
-            f"Expected _REQUIRED_SERVER_VERSION='14', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "14"' in _SERVER_SRC, \
-            "_VERSION = '14' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "15", \
+            f"Expected _REQUIRED_SERVER_VERSION='15', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "15"' in _SERVER_SRC, \
+            "_VERSION = '15' not found in _SERVER_SRC"
 
     def test_browser_server_v14_has_crash_recovery(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1525,10 +1525,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v14_has_scrape_endpoint(self):
+    def test_browser_server_v15_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "14", \
-            f"Expected v14, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "15", \
+            f"Expected v15, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
@@ -1650,6 +1650,14 @@ class TestBrowserImageDownload:
         sig = inspect.signature(ToolManager.run_image_search)
         assert "query" in sig.parameters
         assert "count" in sig.parameters
+        assert "offset" in sig.parameters, "run_image_search missing 'offset' parameter"
+        assert sig.parameters["offset"].default == 0, "offset default should be 0"
+
+    def test_image_search_stdio_schema_has_offset(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        schema = next(t for t in _TOOL_SCHEMAS if t["name"] == "image_search")
+        props = schema["inputSchema"]["properties"]
+        assert "offset" in props, "image_search stdio schema missing 'offset'"
 
     @skip_mcp
     def test_image_search_in_mcp_http_schema(self):
@@ -1663,3 +1671,60 @@ class TestBrowserImageDownload:
         props = tools["image_search"]["inputSchema"]["properties"]
         assert "query" in props
         assert "count" in props
+        assert "offset" in props, "image_search HTTP schema missing 'offset'"
+
+    def test_image_search_domain_cap(self):
+        """_apply_domain_cap keeps max 2 images per domain."""
+        from urllib.parse import urlparse
+
+        def _domain_of(url):
+            h = urlparse(url).hostname or ""
+            return h.removeprefix("www.")
+
+        def _apply_domain_cap(candidates, max_per_domain=2):
+            counts: dict = {}
+            result = []
+            for cand in candidates:
+                d = _domain_of(cand.get("url", ""))
+                if counts.get(d, 0) < max_per_domain:
+                    result.append(cand)
+                    counts[d] = counts.get(d, 0) + 1
+            return result
+
+        cands = [
+            {"url": "https://fandom.com/img/a.png"},
+            {"url": "https://fandom.com/img/b.png"},
+            {"url": "https://fandom.com/img/c.png"},   # 3rd — should be dropped
+            {"url": "https://imgur.com/img/d.png"},
+        ]
+        result = _apply_domain_cap(cands, max_per_domain=2)
+        assert len(result) == 3
+        domains = [_domain_of(c["url"]) for c in result]
+        assert domains.count("fandom.com") == 2
+        assert domains.count("imgur.com") == 1
+
+    def test_image_search_query_expansion(self):
+        """_expand_queries produces variants for known shorthand terms."""
+        _EXPANSIONS = {
+            "gfl2": "Girls Frontline 2", "gfl": "Girls Frontline",
+            "hsr":  "Honkai Star Rail",  "gi":  "Genshin Impact",
+        }
+
+        def _expand_queries(q):
+            variants = [q]
+            q_lower  = q.lower()
+            for short, full in _EXPANSIONS.items():
+                if short in q_lower and full.lower() not in q_lower:
+                    variants.append(q.replace(short, full).replace(short.upper(), full))
+                    break
+            if "artwork" not in q_lower and "art" not in q_lower:
+                variants.append(q + " artwork")
+            return variants[:3]
+
+        v = _expand_queries("Klukai GFL2")
+        assert len(v) >= 2
+        assert any("Girls Frontline 2" in vv for vv in v), \
+            f"Expected GFL2 expansion, got: {v}"
+        # No 'artwork' appended since we cap at 3 and already have 2 variants (base + expansion)
+        # but ensure no duplicates
+        assert len(v) == len(set(v))

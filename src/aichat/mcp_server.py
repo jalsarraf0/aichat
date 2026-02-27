@@ -715,14 +715,13 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "image_search",
         "description": (
-            "Search for any image by text description and return it rendered inline. "
-            "Searches the web for pages matching the query, extracts every image URL with "
-            "page_images, scores candidates by keyword match in alt text / URL, source domain "
-            "quality, and image dimensions, then fetches the best match (auto-resized to "
-            "1280×1024 JPEG). Falls back to DuckDuckGo Images if no good result is found on "
-            "the initial pages. Use for character art, outfit skins, product photos, logos, "
-            "screenshots, or any visual content. "
-            "Example queries: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower at night'."
+            "Search for any image by text description and return MULTIPLE images rendered inline. "
+            "Uses query expansion (game shorthands, artwork variant), collects candidates from "
+            "multiple pages and query variants, enforces domain diversity (max 2 per domain), "
+            "fetches in parallel, and deduplicates via seen-URL cache so repeated calls return "
+            "DIFFERENT images. Use 'offset' to paginate to the next batch. "
+            "Use for character art, outfit skins, product photos, logos, screenshots, or any "
+            "visual content. Example: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower night'."
         ),
         "inputSchema": {
             "type": "object",
@@ -733,7 +732,11 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "count": {
                     "type": "integer",
-                    "description": "Max candidates to try per source page (default 5, max 20).",
+                    "description": "Number of images to return (default 4, max 20).",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Skip first N ranked candidates for pagination (default 0).",
                 },
             },
             "required": ["query"],
@@ -1547,12 +1550,14 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _text("\n".join(lines))
 
         if name == "image_search":
-            query     = str(arguments.get("query", "")).strip()
-            img_count = max(1, min(int(arguments.get("count", 5)), 20))
+            query      = str(arguments.get("query", "")).strip()
+            img_count  = max(1, min(int(arguments.get("count", 4)), 20))
+            img_offset = max(0, int(arguments.get("offset", 0)))
             if not query:
                 return _text("image_search: 'query' is required")
             return await mgr.run_image_search(
                 query=query, count=img_count, mode=_APPROVAL, confirmer=None,
+                offset=img_offset,
             )
 
         if name == "bulk_screenshot":

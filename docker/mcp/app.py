@@ -909,15 +909,13 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "image_search",
         "description": (
-            "Search for any image by text description and return it rendered inline. "
-            "Searches the web for pages matching the query, extracts every image URL with "
-            "page_images, scores candidates by keyword match in alt text / URL, source domain "
-            "quality, and image dimensions, then fetches the best match (auto-resized to "
-            "1280×1024 JPEG). Falls back to DuckDuckGo Images if no good result is found on "
-            "the initial pages. Use for character art, outfit skins, product photos, logos, "
-            "screenshots, or any visual content. "
-            "Example queries: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower at night', "
-            "'SpaceX Starship launch photo'. Use 'count' to try more candidates per page."
+            "Search for any image by text description and return MULTIPLE images rendered inline. "
+            "Uses query expansion (game shorthands, artwork variant), collects candidates from "
+            "multiple pages and query variants, enforces domain diversity (max 2 per domain), "
+            "fetches in parallel, and deduplicates via seen-URL cache so repeated calls return "
+            "DIFFERENT images. Use 'offset' to paginate to the next batch. "
+            "Use for character art, outfit skins, product photos, logos, screenshots, or any "
+            "visual content. Example: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower night'."
         ),
         "inputSchema": {
             "type": "object",
@@ -928,7 +926,11 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "count": {
                     "type": "integer",
-                    "description": "Max candidates to try per source page (default 5, max 20).",
+                    "description": "Number of images to return (default 4, max 20).",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Skip first N ranked candidates for pagination (default 0).",
                 },
             },
             "required": ["query"],
@@ -2627,32 +2629,64 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 return blocks
 
             # ----------------------------------------------------------------
-            # image_search — find any image by query; render inline
+            # image_search — find images by query; return multiple inline
             # ----------------------------------------------------------------
             if name == "image_search":
                 query      = str(args.get("query", "")).strip()
-                img_count  = max(1, min(int(args.get("count", 8)), 20))
+                img_count  = max(1, min(int(args.get("count", 4)), 20))
+                img_offset = max(0, int(args.get("offset", 0)))
                 if not query:
                     return _text("image_search: 'query' is required")
 
+                import hashlib as _hl2
+                import json as _js2
                 from urllib.parse import quote_plus as _qp, urlparse as _up2, \
                     parse_qs as _pqs2, unquote as _uq2
                 qwords = {w for w in query.lower().split() if len(w) > 2}
 
-                # High-quality art/image CDN domains — order matters for score checks
-                _GOOD_D = ("wikia.nocookie.net", "imgur.com", "redd.it",
-                           "prydwen.gg", "fandom.com", "iopwiki.com", "cdn.")
-                _SKIP_P = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
-                           "logo", "icon", "avatar", "pixel.gif", "button",
-                           "ytimg.com", "yt3.ggpht")
-                _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com",
-                            "dailymotion.com", "twitch.tv")
+                _GOOD_D  = ("wikia.nocookie.net", "imgur.com", "redd.it",
+                            "prydwen.gg", "fandom.com", "iopwiki.com", "cdn.")
+                _SKIP_P  = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
+                            "logo", "icon", "avatar", "pixel.gif", "button",
+                            "ytimg.com", "yt3.ggpht")
+                _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+                            "twitch.tv", "pinterest.com", "instagram.com",
+                            "deviantart.com", "artstation.com")
+
+                # ── Seen-URL dedup via memory service ─────────────────────────
+                _qhash   = _hl2.md5(query.lower().encode()).hexdigest()[:16]
+                _mem_key = f"imgsr:{_qhash}"
+                _seen_urls: set[str] = set()
+                try:
+                    mem_r = await asyncio.wait_for(
+                        c.get(f"{MEMORY_URL}/recall", params={"key": _mem_key}),
+                        timeout=5.0,
+                    )
+                    rdata = mem_r.json()
+                    if rdata.get("found"):
+                        _seen_urls = set(_js2.loads(rdata["entries"][0]["value"]))
+                except Exception:
+                    pass
+
+                # ── Query expansion ────────────────────────────────────────────
+                _EXPANSIONS = {
+                    "gfl2": "Girls Frontline 2", "gfl": "Girls Frontline",
+                    "hsr":  "Honkai Star Rail",  "gi":  "Genshin Impact",
+                    "hk":   "Honkai Impact",
+                }
+
+                def _expand_queries(q: str) -> list[str]:
+                    variants = [q]
+                    q_lower  = q.lower()
+                    for short, full in _EXPANSIONS.items():
+                        if short in q_lower and full.lower() not in q_lower:
+                            variants.append(q.replace(short, full).replace(short.upper(), full))
+                            break
+                    if "artwork" not in q_lower and "art" not in q_lower:
+                        variants.append(q + " artwork")
+                    return variants[:3]
 
                 def _unwrap_thumb(url: str) -> str:
-                    """Convert a MediaWiki thumbnail URL to the full-size original.
-                    e.g. /images/thumb/a/ab/File.png/200px-File.png → /images/a/ab/File.png
-                    Also handles Wikia's /revision/latest suffix.
-                    """
                     if "/images/thumb/" in url:
                         no_thumb = url.replace("/images/thumb/", "/images/", 1)
                         m = re.search(r"/\d+px-[^?]*", no_thumb)
@@ -2661,7 +2695,6 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return url
 
                 def _img_referer(url: str) -> str:
-                    """Return the most appropriate Referer for fetching this image."""
                     u = url.lower()
                     if "pbs.twimg.com" in u or "media.twimg.com" in u:
                         return "https://twitter.com/"
@@ -2680,7 +2713,6 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         return -999
                     s  = sum(2 for w in qwords if w in url_l)
                     s += sum(5 for w in qwords if w in alt_l)
-                    # pbs.twimg.com / media.twimg.com — Twitter's direct media CDN
                     if "pbs.twimg.com" in url_l or "media.twimg.com" in url_l:
                         s += 10
                     else:
@@ -2694,15 +2726,32 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         s += 2
                     return s
 
+                def _domain_of(url: str) -> str:
+                    try:
+                        h = _up2(url).hostname or ""
+                        return h.removeprefix("www.")
+                    except Exception:
+                        return url
+
+                def _apply_domain_cap(candidates: list[dict], max_per_domain: int = 2) -> list[dict]:
+                    counts: dict[str, int] = {}
+                    result = []
+                    for cand in candidates:
+                        d = _domain_of(cand.get("url", ""))
+                        if counts.get(d, 0) < max_per_domain:
+                            result.append(cand)
+                            counts[d] = counts.get(d, 0) + 1
+                    return result
+
                 async def _fetch_render(url: str) -> list[dict] | None:
                     if not url or not url.startswith("http"):
                         return None
-                    url = _unwrap_thumb(url)
+                    url  = _unwrap_thumb(url)
                     hdrs = {
-                        "User-Agent": _BROWSER_HEADERS["User-Agent"],
-                        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                        "User-Agent":     _BROWSER_HEADERS["User-Agent"],
+                        "Accept":         "image/webp,image/apng,image/*,*/*;q=0.8",
                         "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
-                        "Referer": _img_referer(url),
+                        "Referer":        _img_referer(url),
                     }
                     try:
                         img_r = await asyncio.wait_for(
@@ -2738,80 +2787,121 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     except Exception:
                         return None
 
-                # ── Tier 1: DDG web search → page_images on top results ──────
-                try:
-                    sr = await asyncio.wait_for(
-                        c.get(
-                            f"https://html.duckduckgo.com/html/?q={_qp(query)}",
-                            headers=_BROWSER_HEADERS,
-                            follow_redirects=True,
-                        ),
-                        timeout=12.0,
-                    )
-                    _ddg_hosts = ("duckduckgo.com", "ddg.gg", "duck.co")
-                    raw_enc = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', sr.text)
-                    t1_urls: list[str] = []
-                    t1_seen: set[str] = set()
-                    for enc in raw_enc:
-                        dec = _url_unquote(enc)
-                        if any(d in dec for d in _ddg_hosts):
-                            continue
-                        if dec not in t1_seen:
-                            t1_seen.add(dec)
-                            t1_urls.append(dec)
-                    t1_urls = [u for u in t1_urls
-                               if not any(d in u for d in _SKIP_T1)]
-                    for page_url in t1_urls[:5]:
-                        try:
-                            pi_r = await asyncio.wait_for(
-                                c.post(f"{BROWSER_URL}/page_images",
-                                       json={"url": page_url, "scroll": True, "max_scrolls": 2}),
-                                timeout=35.0,
-                            )
-                            all_imgs = pi_r.json().get("images", [])
-                            if len(all_imgs) < 3:   # auth wall / stub — skip
-                                continue
-                            imgs_sorted = sorted(all_imgs, key=_score, reverse=True)
-                            for cand in imgs_sorted[:img_count]:
-                                if _score(cand) < 0:
-                                    continue
-                                found = await _fetch_render(cand["url"])
-                                if found:
-                                    return found
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
+                # ── Collect ALL candidates across all query variants + both tiers ──
+                all_candidates: list[dict] = []
+                _ddg_hosts = ("duckduckgo.com", "ddg.gg", "duck.co")
 
-                # ── Tier 2: DDG image-search page → decode proxy URLs ─────────
+                # Tier 1: DDG web search → page_images on top article pages
+                for variant_q in _expand_queries(query):
+                    try:
+                        sr = await asyncio.wait_for(
+                            c.get(
+                                f"https://html.duckduckgo.com/html/?q={_qp(variant_q)}&kp=-2",
+                                headers=_BROWSER_HEADERS,
+                                follow_redirects=True,
+                            ),
+                            timeout=12.0,
+                        )
+                        raw_enc = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', sr.text)
+                        t1_urls: list[str] = []
+                        t1_seen: set[str]  = set()
+                        for enc in raw_enc:
+                            dec = _url_unquote(enc)
+                            if any(d in dec for d in _ddg_hosts):
+                                continue
+                            if dec not in t1_seen:
+                                t1_seen.add(dec)
+                                t1_urls.append(dec)
+                        t1_urls = [u for u in t1_urls if not any(d in u for d in _SKIP_T1)]
+                        for page_url in t1_urls[:5]:
+                            try:
+                                pi_r = await asyncio.wait_for(
+                                    c.post(f"{BROWSER_URL}/page_images",
+                                           json={"url": page_url, "scroll": True, "max_scrolls": 2}),
+                                    timeout=35.0,
+                                )
+                                page_imgs = pi_r.json().get("images", [])
+                                if len(page_imgs) < 3:
+                                    continue
+                                all_candidates.extend(page_imgs)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                # Tier 2: DDG image-search page → decode proxy URLs
                 try:
-                    t2_url = (f"https://duckduckgo.com/?q={_qp(query)}"
-                              "&iax=images&ia=images")
+                    t2_url = f"https://duckduckgo.com/?q={_qp(query)}&iax=images&ia=images&kp=-2"
                     pi2_r = await asyncio.wait_for(
                         c.post(f"{BROWSER_URL}/page_images",
                                json={"url": t2_url, "scroll": True, "max_scrolls": 3}),
                         timeout=45.0,
                     )
-                    t2_imgs: list[dict] = []
                     for img2 in pi2_r.json().get("images", []):
                         u2 = img2.get("url", "")
                         if "external-content.duckduckgo.com" in u2:
                             try:
                                 params2 = _pqs2(_up2(u2).query)
-                                orig2 = _uq2(params2.get("u", [""])[0])
+                                orig2   = _uq2(params2.get("u", [""])[0])
                                 if orig2.startswith("http"):
-                                    t2_imgs.append({**img2, "url": orig2})
+                                    all_candidates.append({**img2, "url": orig2})
                                     continue
                             except Exception:
                                 pass
-                        t2_imgs.append(img2)
-                    for cand2 in sorted(t2_imgs, key=_score, reverse=True)[:img_count]:
-                        found2 = await _fetch_render(cand2["url"])
-                        if found2:
-                            return found2
+                        all_candidates.append(img2)
                 except Exception:
                     pass
 
+                # ── Score, dedup seen URLs + intra-call dupes, domain-cap, offset ──
+                _intra_seen: set[str] = set()
+                fresh: list[dict] = []
+                for cand in all_candidates:
+                    u = _unwrap_thumb(cand.get("url", ""))
+                    if _score(cand) >= 0 and u not in _seen_urls and u not in _intra_seen:
+                        fresh.append(cand)
+                        _intra_seen.add(u)
+                sorted_cands = _apply_domain_cap(
+                    sorted(fresh, key=_score, reverse=True), max_per_domain=2
+                )
+                sorted_cands = sorted_cands[img_offset:]
+                fetch_pool   = sorted_cands[:img_count * 3]
+
+                if not fetch_pool:
+                    return _text(
+                        f"image_search: no image found for '{query}'.\n"
+                        "Try: page_images on a specific URL, or refine the query."
+                    )
+
+                fetch_results = await asyncio.gather(
+                    *[_fetch_render(cand["url"]) for cand in fetch_pool],
+                    return_exceptions=True,
+                )
+
+                output_blocks: list[dict] = []
+                returned_urls: list[str]  = []
+                for cand, res in zip(fetch_pool, fetch_results):
+                    if isinstance(res, Exception) or res is None:
+                        continue
+                    output_blocks.extend(res)
+                    returned_urls.append(_unwrap_thumb(cand["url"]))
+                    if len(returned_urls) >= img_count:
+                        break
+
+                # ── Persist seen URLs for next call ────────────────────────────
+                if returned_urls:
+                    try:
+                        merged = list(_seen_urls | set(returned_urls))
+                        await asyncio.wait_for(
+                            c.post(f"{MEMORY_URL}/store",
+                                   json={"key": _mem_key, "value": _js2.dumps(merged),
+                                         "ttl_seconds": 3600}),
+                            timeout=5.0,
+                        )
+                    except Exception:
+                        pass
+
+                if output_blocks:
+                    return output_blocks
                 return _text(
                     f"image_search: no image found for '{query}'.\n"
                     "Try: page_images on a specific URL, or refine the query."
