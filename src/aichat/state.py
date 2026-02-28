@@ -51,3 +51,4 @@ class AppState:
     session_id: str = ""
     rag_context_enabled: bool = True
     session_title_set: bool = False
+    compaction_enabled: bool = True
