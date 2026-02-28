@@ -1436,12 +1436,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_15(self):
+    def test_browser_server_version_is_16(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "15", \
-            f"Expected _REQUIRED_SERVER_VERSION='15', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "15"' in _SERVER_SRC, \
-            "_VERSION = '15' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "16", \
+            f"Expected _REQUIRED_SERVER_VERSION='16', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "16"' in _SERVER_SRC, \
+            "_VERSION = '16' not found in _SERVER_SRC"
 
     def test_browser_server_v14_has_crash_recovery(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1525,10 +1525,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v15_has_scrape_endpoint(self):
+    def test_browser_server_v16_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "15", \
-            f"Expected v15, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "16", \
+            f"Expected v16, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
@@ -1728,3 +1728,62 @@ class TestBrowserImageDownload:
         # No 'artwork' appended since we cap at 3 and already have 2 variants (base + expansion)
         # but ensure no duplicates
         assert len(v) == len(set(v))
+
+
+class TestBrowserV16Stealth:
+    """Verify v16 stealth spoofs and ad-blocking are present in _SERVER_SRC."""
+
+    def test_webgl_gpu_spoof(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "GeForce RTX 3070" in _SERVER_SRC, "WebGL GPU spoof missing"
+        assert "37445" in _SERVER_SRC, "WebGL VENDOR param (37445) missing"
+        assert "37446" in _SERVER_SRC, "WebGL RENDERER param (37446) missing"
+
+    def test_canvas_noise(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "toDataURL" in _SERVER_SRC, "Canvas toDataURL override missing"
+        assert "_seed" in _SERVER_SRC, "Canvas noise seed missing"
+        assert "toBlob" in _SERVER_SRC, "Canvas toBlob override missing"
+
+    def test_audio_context_noise(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "getChannelData" in _SERVER_SRC, "AudioBuffer.getChannelData override missing"
+
+    def test_screen_geometry_spoof(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "devicePixelRatio" in _SERVER_SRC, "devicePixelRatio spoof missing"
+        assert "outerWidth" in _SERVER_SRC, "outerWidth spoof missing"
+        assert "availWidth" in _SERVER_SRC, "availWidth spoof missing"
+
+    def test_device_memory_spoof(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "deviceMemory" in _SERVER_SRC, "deviceMemory spoof missing"
+
+    def test_media_devices_stub(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "enumerateDevices" in _SERVER_SRC, "enumerateDevices stub missing"
+        assert "audioinput" in _SERVER_SRC, "audioinput device stub missing"
+
+    def test_ad_domains_present(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_AD_DOMAINS" in _SERVER_SRC, "_AD_DOMAINS missing"
+        assert "doubleclick.net" in _SERVER_SRC, "doubleclick.net missing from _AD_DOMAINS"
+        assert "googlesyndication.com" in _SERVER_SRC, "googlesyndication.com missing"
+        assert "outbrain.com" in _SERVER_SRC, "outbrain.com missing"
+        assert "hotjar.com" in _SERVER_SRC, "hotjar.com missing"
+
+    def test_route_handler_present(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_route_handler" in _SERVER_SRC, "_route_handler function missing"
+        assert "route.abort()" in _SERVER_SRC, "route.abort() missing"
+        assert "route.continue_()" in _SERVER_SRC, "route.continue_() missing"
+
+    def test_new_page_helper_present(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "async def _new_page()" in _SERVER_SRC, "_new_page() helper missing"
+        assert 'route("**/*", _route_handler)' in _SERVER_SRC, "route registration missing"
+
+    def test_extra_launch_args(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "--no-first-run" in _SERVER_SRC, "--no-first-run flag missing"
+        assert "--lang=en-US" in _SERVER_SRC, "--lang=en-US flag missing"
