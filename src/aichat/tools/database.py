@@ -78,6 +78,34 @@ class DatabaseTool:
             json={"url": url, "host_path": host_path, "alt_text": alt_text},
         )
 
+    async def store_image_rich(
+        self,
+        url: str,
+        *,
+        host_path: Optional[str] = None,
+        alt_text: Optional[str] = None,
+        subject: Optional[str] = None,
+        description: Optional[str] = None,
+        phash: Optional[str] = None,
+        quality_score: Optional[float] = None,
+    ) -> dict:
+        """Store an image with vision-recognition metadata (subject, phash, quality_score)."""
+        return await self._request(
+            "POST",
+            "/images/store",
+            json={
+                "url": url, "host_path": host_path, "alt_text": alt_text,
+                "subject": subject, "description": description,
+                "phash": phash, "quality_score": quality_score,
+            },
+        )
+
+    async def search_images(self, subject: str, limit: int = 20) -> dict:
+        """Search previously confirmed images by subject or description text."""
+        return await self._request(
+            "GET", "/images/search", params={"subject": subject, "limit": limit}
+        )
+
     async def cache_store(self, url: str, content: str, title: Optional[str] = None) -> dict:
         return await self._request(
             "POST",

@@ -60,6 +60,79 @@ try:
 except ImportError:
     _HAS_PIL = False
 
+
+# ---------------------------------------------------------------------------
+# Perceptual hash helpers — pure PIL, no extra packages
+# ---------------------------------------------------------------------------
+
+def _dhash(img: "_PilImage.Image") -> str:
+    """64-bit difference hash of a PIL Image → 16-char hex string."""
+    if not _HAS_PIL:
+        return ""
+    try:
+        gray = img.convert("L").resize((9, 8), _PilImage.LANCZOS)
+        px   = list(gray.getdata())
+        bits = sum(
+            1 << i for i in range(64)
+            if px[i % 8 + (i // 8) * 9] > px[i % 8 + (i // 8) * 9 + 1]
+        )
+        return f"{bits:016x}"
+    except Exception:
+        return ""
+
+
+def _hamming(h1: str, h2: str) -> int:
+    """Bit-level Hamming distance between two 16-hex-char dHashes."""
+    if not h1 or not h2 or len(h1) != 16 or len(h2) != 16:
+        return 64
+    return bin(int(h1, 16) ^ int(h2, 16)).count("1")
+
+
+async def _vision_confirm(
+    b64: str, subject: str, hc: "httpx.AsyncClient"
+) -> "tuple[bool, str, float]":
+    """Ask the loaded multimodal model whether the image shows *subject*.
+
+    Returns (is_match, description, confidence).  Fails open on any error so
+    image_search never breaks when no vision model is loaded in LM Studio.
+    Uses IMAGE_GEN_BASE_URL/v1/chat/completions with 8-second timeout.
+    Set IMAGE_VISION_CONFIRM=false to disable (skip confirmation, keep all images).
+    """
+    env_flag = os.environ.get("IMAGE_VISION_CONFIRM", "true").lower()
+    if env_flag not in ("1", "true", "yes"):
+        return True, "", 0.6
+    prompt = (
+        f"Describe this image in one short sentence. "
+        f"Then answer: does it clearly show '{subject}'? "
+        f"Format: DESCRIPTION: <text> | MATCH: YES or NO"
+    )
+    payload: dict = {
+        "messages": [{"role": "user", "content": [
+            {"type": "text",      "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]}],
+        "max_tokens": 80,
+        "temperature": 0.0,
+    }
+    model = IMAGE_GEN_MODEL.strip()
+    if model:
+        payload["model"] = model
+    try:
+        r = await asyncio.wait_for(
+            hc.post(f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload),
+            timeout=8.0,
+        )
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        desc  = ""
+        if "DESCRIPTION:" in text:
+            desc = text.split("DESCRIPTION:")[1].split("|")[0].strip()
+        match = "MATCH: YES" in text.upper() or text.upper().strip().endswith("YES")
+        conf  = 0.9 if match else 0.2
+        return match, desc, conf
+    except Exception:
+        return True, "", 0.6   # fail-open
+
+
 app = FastAPI(title="aichat-mcp")
 
 # Allow all origins so LM Studio (Electron/WebView2) can connect without CORS issues.
@@ -2664,9 +2737,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             "deviantart.com", "artstation.com")
 
                 # ── Seen-URL dedup via memory service ─────────────────────────
-                _qhash   = _hl2.md5(query.lower().encode()).hexdigest()[:16]
-                _mem_key = f"imgsr:{_qhash}"
-                _seen_urls: set[str] = set()
+                _qhash        = _hl2.md5(query.lower().encode()).hexdigest()[:16]
+                _mem_key      = f"imgsr:{_qhash}"
+                _seen_urls:   set[str]  = set()
+                _seen_hashes: list[str] = []   # intra-call phash dedup
+                _url_to_hash: dict[str, str] = {}
                 try:
                     mem_r = await asyncio.wait_for(
                         c.get(f"{MEMORY_URL}/recall", params={"key": _mem_key}),
@@ -2677,6 +2752,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         _seen_urls = set(_js2.loads(rdata["entries"][0]["value"]))
                 except Exception:
                     pass
+
+                _norm_subject = query.lower().strip()
 
                 # ── Query expansion ────────────────────────────────────────────
                 _EXPANSIONS = {
@@ -2754,14 +2831,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return result
 
                 async def _fetch_render(url: str) -> list[dict] | None:
+                    """Fetch, resize, phash-dedup, and encode one image URL."""
                     if not url or not url.startswith("http"):
                         return None
                     url  = _unwrap_thumb(url)
                     hdrs = {
-                        "User-Agent":     _BROWSER_HEADERS["User-Agent"],
-                        "Accept":         "image/webp,image/apng,image/*,*/*;q=0.8",
+                        "User-Agent":      _BROWSER_HEADERS["User-Agent"],
+                        "Accept":          "image/webp,image/apng,image/*,*/*;q=0.8",
                         "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
-                        "Referer":        _img_referer(url),
+                        "Referer":         _img_referer(url),
                     }
                     try:
                         img_r = await asyncio.wait_for(
@@ -2782,6 +2860,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                     if pil.width < 150 or pil.height < 150:
                                         return None
                                     pil = pil.convert("RGB")
+                                    # dHash intra-call dedup: skip visually identical images
+                                    img_hash = _dhash(pil)
+                                    if img_hash and any(
+                                        _hamming(img_hash, h) < 8 for h in _seen_hashes
+                                    ):
+                                        return None
+                                    if img_hash:
+                                        _seen_hashes.append(img_hash)
+                                        _url_to_hash[url] = img_hash
                                     if pil.width > 1280 or pil.height > 1024:
                                         pil.thumbnail((1280, 1024), _PilImage.LANCZOS)
                                     buf = _io.BytesIO()
@@ -2796,6 +2883,27 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         ]
                     except Exception:
                         return None
+
+                # ── DB-first: return confirmed images if we have enough cached ───
+                try:
+                    db_r = await asyncio.wait_for(
+                        c.get(f"{DATABASE_URL}/images/search",
+                              params={"subject": _norm_subject, "limit": img_count * 2}),
+                        timeout=3.0,
+                    )
+                    db_imgs = db_r.json().get("images", [])
+                    if len(db_imgs) >= img_count:
+                        db_blocks: list[dict] = []
+                        for dbi in db_imgs:
+                            fb = await _fetch_render(dbi["url"])
+                            if fb:
+                                db_blocks.extend(fb)
+                            if len(db_blocks) >= img_count * 2:
+                                break
+                        if db_blocks:
+                            return db_blocks
+                except Exception:
+                    pass
 
                 # ── Collect ALL candidates across all query variants + both tiers ──
                 all_candidates: list[dict] = []
@@ -2904,9 +3012,48 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return_exceptions=True,
                 )
 
+                # ── Vision confirm pass (best-effort, parallel) ────────────────
+                async def _maybe_confirm(
+                    blocks: list[dict] | None,
+                    url: str,
+                    img_hash: str,
+                ) -> list[dict] | None:
+                    if not blocks:
+                        return None
+                    img_b64 = next(
+                        (b["data"] for b in blocks if b.get("type") == "image"), ""
+                    )
+                    if not img_b64:
+                        return blocks
+                    is_match, desc, conf = await _vision_confirm(img_b64, query, c)
+                    if not is_match:
+                        return None
+                    # Fire-and-forget: persist confirmed image to DB
+                    asyncio.create_task(c.post(
+                        f"{DATABASE_URL}/images/store",
+                        json={
+                            "url": url, "subject": _norm_subject,
+                            "description": desc, "phash": img_hash,
+                            "quality_score": conf,
+                        },
+                    ))
+                    return blocks
+
+                confirmed_results = await asyncio.gather(
+                    *[
+                        _maybe_confirm(
+                            res if not isinstance(res, Exception) else None,
+                            _unwrap_thumb(cand["url"]),
+                            _url_to_hash.get(_unwrap_thumb(cand["url"]), ""),
+                        )
+                        for cand, res in zip(fetch_pool, fetch_results)
+                    ],
+                    return_exceptions=True,
+                )
+
                 output_blocks: list[dict] = []
                 returned_urls: list[str]  = []
-                for cand, res in zip(fetch_pool, fetch_results):
+                for cand, res in zip(fetch_pool, confirmed_results):
                     if isinstance(res, Exception) or res is None:
                         continue
                     output_blocks.extend(res)
