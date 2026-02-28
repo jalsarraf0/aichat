@@ -159,9 +159,16 @@ class ToolManager:
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
         self._custom_tools: dict[str, dict] = {}
+        # Per-session tool-result dedup cache: {name:hash(args) → output}
+        self._tool_result_cache: dict[str, str] = {}
 
     def reset_turn(self) -> None:
         self._calls_this_turn = 0
+        self._tool_result_cache.clear()
+
+    def clear_tool_cache(self) -> None:
+        """Discard all cached tool results (call between sessions or after /new)."""
+        self._tool_result_cache.clear()
 
     # ------------------------------------------------------------------
     # Custom tool registry

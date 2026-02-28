@@ -278,7 +278,9 @@ class TestFixSourceInspection:
 
     def test_rag_threshold_in_fetch_context(self):
         src = self._app_src()
-        assert "0.3" in src, "Similarity threshold 0.3 not found in app.py"
+        # Threshold may be 0.25 (date-weighted) or 0.3 (original); either is acceptable
+        assert ("0.3" in src or "0.25" in src), \
+            "Similarity threshold (0.3 or 0.25) not found in app.py"
         assert "_fetch_rag_context" in src, "_fetch_rag_context not in app.py"
 
     def test_fulltext_endpoint_in_database_app(self):

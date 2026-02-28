@@ -46,6 +46,24 @@ class LLMClient:
         models = [m.get("id", "") for m in payload.get("data", []) if isinstance(m, dict)]
         return [m for m in models if m]
 
+    async def model_info(self) -> dict[str, int]:
+        """Return ``{model_id: context_length}`` from ``/v1/models``.
+
+        LM Studio includes ``context_length`` in each model entry.  Returns an
+        empty dict on any failure (fail-open) so callers can always safely check
+        ``info.get(model_id, 0)``.
+        """
+        try:
+            response = await self._request("GET", "/v1/models")
+            data = response.json().get("data", [])
+            return {
+                m["id"]: int(m["context_length"])
+                for m in data
+                if isinstance(m, dict) and m.get("id") and m.get("context_length")
+            }
+        except Exception:
+            return {}
+
     async def ensure_model(self, model: str) -> None:
         models = await self.list_models()
         if models and model not in models:

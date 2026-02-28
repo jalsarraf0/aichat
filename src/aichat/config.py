@@ -37,6 +37,9 @@ class AppConfig:
     compact_keep_ratio: float = 0.5    # compact oldest N fraction of visible messages
     compact_tool_turns: bool = True    # include tool-result messages in compaction input
     compaction_enabled: bool = True    # persisted default for new sessions
+    compact_model: str = ""            # dedicated fast model for compaction (empty = use main model)
+    tool_result_max_chars: int = 2000  # max chars per tool result stored in history
+    rag_recency_days: float = 30.0     # recency half-life for date-weighted RAG scoring
     config_version: int = 6
 
 
@@ -93,6 +96,11 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     merged["compact_keep_ratio"] = float(raw_ckr) if isinstance(raw_ckr, (int, float)) and 0.0 < float(raw_ckr) < 1.0 else defaults["compact_keep_ratio"]
     merged["compact_tool_turns"] = bool(merged.get("compact_tool_turns", defaults["compact_tool_turns"]))
     merged["compaction_enabled"] = bool(merged.get("compaction_enabled", defaults["compaction_enabled"]))
+    merged["compact_model"] = str(merged.get("compact_model", defaults["compact_model"]))
+    raw_trmc = merged.get("tool_result_max_chars", defaults["tool_result_max_chars"])
+    merged["tool_result_max_chars"] = int(raw_trmc) if isinstance(raw_trmc, (int, float)) and int(raw_trmc) >= 100 else defaults["tool_result_max_chars"]
+    raw_rrd = merged.get("rag_recency_days", defaults["rag_recency_days"])
+    merged["rag_recency_days"] = float(raw_rrd) if isinstance(raw_rrd, (int, float)) and float(raw_rrd) > 0 else defaults["rag_recency_days"]
     merged["config_version"] = defaults["config_version"]
     return merged
 
