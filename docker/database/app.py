@@ -859,6 +859,37 @@ def conv_get_session(session_id: str, limit: int = 200) -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/conversations/turns/search")
+def conv_fulltext_search(q: str = "", limit: int = 10) -> dict:
+    """Full-text search on conversation_turns using ILIKE (fallback when embeddings unavailable)."""
+    try:
+        if not q.strip():
+            return {"results": []}
+        with conn() as c:
+            rows = c.execute(
+                "SELECT t.id, t.session_id, t.role, t.content, t.timestamp "
+                "FROM conversation_turns t "
+                "WHERE t.content ILIKE %s AND t.role IN ('user', 'assistant') "
+                "ORDER BY t.timestamp DESC LIMIT %s",
+                (f"%{q}%", max(1, min(limit, 50))),
+            ).fetchall()
+        return {
+            "results": [
+                {
+                    "turn_id": r[0],
+                    "session_id": r[1],
+                    "role": r[2],
+                    "content": r[3],
+                    "timestamp": r[4].isoformat() if r[4] else "",
+                }
+                for r in rows
+            ]
+        }
+    except Exception as exc:
+        log.error("conv_fulltext_search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.patch("/conversations/sessions/{session_id}/title")
 def conv_update_title(session_id: str, req: ConvTitleIn) -> dict:
     try:

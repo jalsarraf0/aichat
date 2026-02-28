@@ -138,7 +138,7 @@ class ToolName(str, Enum):
 
 
 class ToolManager:
-    def __init__(self, max_tool_calls_per_turn: int = 1) -> None:
+    def __init__(self, max_tool_calls_per_turn: int = 6) -> None:
         self.shell = ShellTool()
         self.researchbox = ResearchboxTool()
         self.memory = MemoryTool()
@@ -343,22 +343,44 @@ class ToolManager:
     ) -> dict:
         """Fetch a URL using the human_browser container (a12fdfeaaf78).
 
+        Checks the DB page cache first; falls back to live browser fetch and
+        fires a background cache-store on fresh results.
+
         Returns the same shape as the old aichat-fetch service so all callers
         remain compatible: {"text": ..., "truncated": ..., "char_count": ...}.
         """
         await self._check_approval(mode, ToolName.WEB_FETCH.value, confirmer)
+        # --- DB cache fast path ---
+        try:
+            cached = await self.db.cache_get(url)
+            if cached.get("found") and cached.get("content"):
+                raw = cached["content"]
+                truncated = len(raw) > max_chars
+                return {
+                    "url": url,
+                    "title": cached.get("title", ""),
+                    "text": raw[:max_chars],
+                    "char_count": min(len(raw), max_chars),
+                    "truncated": truncated,
+                    "cached": True,
+                }
+        except Exception:
+            pass
+        # --- Live fetch ---
         result = await self.browser.navigate(url)
         content = result.get("content", "")
-        truncated = False
-        if len(content) > max_chars:
-            content = content[:max_chars]
-            truncated = True
+        if content:
+            asyncio.create_task(
+                self.db.cache_store(url, content, title=result.get("title", "") or None)
+            )
+        truncated = len(content) > max_chars
         return {
             "url": result.get("url", url),
             "title": result.get("title", ""),
-            "text": content,
-            "char_count": len(content),
+            "text": content[:max_chars],
+            "char_count": min(len(content), max_chars),
             "truncated": truncated,
+            "cached": False,
         }
 
     async def run_page_scrape(

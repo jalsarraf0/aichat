@@ -869,6 +869,28 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "conv_search_history",
+        "description": (
+            "Search past conversation turns by semantic similarity using LM Studio embeddings. "
+            "Returns the most relevant past exchanges from previous sessions. "
+            "Requires LM Studio to be running for embedding generation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to find semantically similar past turns.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -1961,6 +1983,23 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                     blocks.extend(_image_content_blocks(hp, os.path.basename(hp)))
             blocks.insert(0, _text("\n".join(lines))[0])
             return blocks
+
+        if name == "conv_search_history":
+            query = str(arguments.get("query", "")).strip()
+            limit = int(arguments.get("limit", 5))
+            if not query:
+                return _text("conv_search_history: 'query' is required")
+            results = await mgr.run_conv_search_history(query, limit, _APPROVAL, None)
+            if not results:
+                return _text("No matching past conversation turns found.")
+            lines = [f"Past turns matching '{query}' ({len(results)} results):"]
+            for r in results:
+                ts = str(r.get("timestamp", ""))[:10]
+                role = r.get("role", "")
+                snippet = str(r.get("content", ""))[:200].replace("\n", " ")
+                sim = round(r.get("similarity", 0), 3)
+                lines.append(f"  [{ts}] {role} (sim={sim}): {snippet}")
+            return _text("\n".join(lines))
 
         return _text(f"Unknown tool: {name}")
 

@@ -1771,3 +1771,51 @@ class TestLoggingSystem:
         }
         missing = expected - names
         assert not missing, f"stdio MCP missing tools: {missing}"
+
+    def test_mcp_stdio_includes_conv_search_history(self):
+        """stdio MCP server must expose conv_search_history tool."""
+        import aichat.mcp_server as mcp
+        names = {t["name"] for t in mcp._TOOL_SCHEMAS}
+        assert "conv_search_history" in names, \
+            f"conv_search_history missing from MCP _TOOL_SCHEMAS; found: {sorted(names)}"
+
+
+# ===========================================================================
+# Manager defaults + new attributes
+# ===========================================================================
+
+class TestManagerDefaults:
+    """Verify ToolManager constructor defaults and new attributes."""
+
+    def test_default_max_tool_calls_is_6(self):
+        tm = ToolManager()
+        assert tm.max_tool_calls_per_turn == 6, \
+            f"ToolManager() default should be 6, got {tm.max_tool_calls_per_turn}"
+
+    def test_conv_attribute_is_conversation_store(self):
+        from aichat.tools.conversation_store import ConversationStoreTool
+        tm = ToolManager()
+        assert hasattr(tm, "conv"), "ToolManager missing 'conv' attribute"
+        assert isinstance(tm.conv, ConversationStoreTool), \
+            f"tm.conv is {type(tm.conv)}, expected ConversationStoreTool"
+
+    def test_toolname_conv_search_history_exists(self):
+        from aichat.tools.manager import ToolName
+        assert hasattr(ToolName, "CONV_SEARCH_HISTORY"), \
+            "ToolName.CONV_SEARCH_HISTORY not found"
+        assert ToolName.CONV_SEARCH_HISTORY.value == "conv_search_history"
+
+    def test_web_fetch_result_has_cached_field(self):
+        """run_web_fetch result dict must include 'cached' key for both paths."""
+        # Check source-level: cached key must appear in run_web_fetch
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent /
+               "src/aichat/tools/manager.py").read_text()
+        import re
+        fn = re.search(
+            r"async def run_web_fetch.*?(?=\n    async def |\nclass |\Z)",
+            src, re.DOTALL,
+        )
+        assert fn, "run_web_fetch not found in manager.py"
+        assert '"cached"' in fn.group(0) or "'cached'" in fn.group(0), \
+            "'cached' key not returned by run_web_fetch"

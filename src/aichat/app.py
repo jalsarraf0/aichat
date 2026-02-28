@@ -109,6 +109,8 @@ class AIChatApp(App):
         self._pending_tools: int = 0
         self._last_status_ts: float = 0.0
         self._last_refresh_ts: float = 0.0
+        self._rag_context_query: str = ""
+        self._rag_context_cache: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -141,6 +143,7 @@ class AIChatApp(App):
         self._refresh_sessions()
         asyncio.create_task(self._load_default_model())
         asyncio.create_task(self.tools.refresh_custom_tools())
+        asyncio.create_task(self._maybe_resume_last_session())
 
     def apply_theme(self, name: str) -> None:
         selected_name = name if name in THEMES else "cyberpunk"
@@ -217,6 +220,8 @@ class AIChatApp(App):
             asyncio.create_task(self._handle_shell_command(text[1:], allow_toggle=False))
             return
         self.tools.reset_turn()
+        self._rag_context_query = ""
+        self._rag_context_cache = ""
         user = Message("user", text)
         self.messages.append(user)
         self.transcript_store.append(user)
@@ -272,6 +277,7 @@ class AIChatApp(App):
                     pass
             self.state.busy = False
             self.active_task = None
+            self._last_status_ts = 0.0  # force status bar refresh after turn
             await self.update_status()
             self._refresh_sessions()
 
@@ -448,6 +454,12 @@ class AIChatApp(App):
                 return
             if text.startswith("/context"):
                 await self._handle_context_toggle(text[8:].strip())
+                return
+            if text.startswith("/resume"):
+                await self._handle_resume_command(text[7:].strip())
+                return
+            if text.startswith("/stats"):
+                await self._handle_stats_command()
                 return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
@@ -911,10 +923,28 @@ class AIChatApp(App):
 
     async def _run_followup_response(self) -> None:
         content = ""
+        _live_msg: ChatMessage | None = None
         if self.state.streaming:
+            _live_msg = ChatMessage("Assistant", "_…_", classes="chat-msg chat-assistant")
+            scroll = self._safe_query_one("#transcript", VerticalScroll)
+            if scroll is not None:
+                scroll.mount(_live_msg)
+                self.call_after_refresh(scroll.scroll_end, animate=False)
+
+            def _on_chunk(text: str) -> None:
+                if _live_msg is not None:
+                    _live_msg.update_content(text)
+
             async for chunk in self.client.chat_stream(self.state.model, await self._llm_messages(),
                                                         max_tokens=self._max_response_tokens or None):
                 content += chunk
+                _on_chunk(content)
+            if _live_msg is not None:
+                try:
+                    _live_msg.remove()
+                except Exception:
+                    pass
+                _live_msg = None
         else:
             content = await self.client.chat_once(self.state.model, await self._llm_messages(),
                                                    max_tokens=self._max_response_tokens or None)
@@ -962,24 +992,44 @@ class AIChatApp(App):
 
     async def _fetch_rag_context(self, query: str) -> str:
         """Embed *query*, search past turns by cosine similarity, return formatted snippet block."""
+        if query == self._rag_context_query:
+            return self._rag_context_cache
         try:
             vecs = await self.tools.lm.embed([query[:2000]])
             if not vecs:
+                self._rag_context_query = query
+                self._rag_context_cache = ""
                 return ""
             results = await self.tools.conv.search_turns(
                 vecs[0], limit=4, exclude_session=self.state.session_id
             )
             if not results:
+                self._rag_context_query = query
+                self._rag_context_cache = ""
                 return ""
             lines = ["\n\n---\n**Past context (from earlier sessions):**"]
+            any_relevant = False
             for r in results:
+                if r.get("similarity", 0) < 0.3:
+                    continue
+                any_relevant = True
                 ts = r.get("timestamp", "")[:10]
                 role = r.get("role", "")
                 snippet = r.get("content", "")[:200].replace("\n", " ")
-                lines.append(f"> [{ts}] {role}: {snippet}")
+                sim = r.get("similarity", 0)
+                lines.append(f"> [{ts}] {role} (sim={sim:.2f}): {snippet}")
+            if not any_relevant:
+                self._rag_context_query = query
+                self._rag_context_cache = ""
+                return ""
             lines.append("---")
-            return "\n".join(lines)
+            rag = "\n".join(lines)
+            self._rag_context_query = query
+            self._rag_context_cache = rag
+            return rag
         except Exception:
+            self._rag_context_query = query
+            self._rag_context_cache = ""
             return ""
 
     def _build_system_prompt(self) -> str:
@@ -1033,9 +1083,10 @@ class AIChatApp(App):
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
         asyncio.create_task(self._auto_save_turn(assistant, len(self.messages) - 1))
-        # Generate a session title after ≥3 user turns if title is still blank
+        # Generate a session title after ≥3 user turns — only once per session
         user_count = sum(1 for m in self.messages if m.role == "user")
-        if user_count >= 3:
+        if user_count >= 3 and not self.state.session_title_set:
+            self.state.session_title_set = True
             asyncio.create_task(self._auto_generate_title())
 
     def _tool_log(self, message: str) -> None:
@@ -1149,9 +1200,12 @@ class AIChatApp(App):
         if scroll is not None:
             scroll.remove_children()
         self.state.session_id = str(_uuid.uuid4())
-        asyncio.create_task(
-            self.tools.conv.create_session(self.state.session_id, model=self.state.model)
-        )
+        # Session row is created lazily on first _auto_save_turn (avoids orphan empty sessions)
+        self._last_refresh_ts = 0.0
+        self._last_status_ts = 0.0
+        self.state.session_title_set = False
+        self._rag_context_query = ""
+        self._rag_context_cache = ""
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
@@ -1171,6 +1225,9 @@ class AIChatApp(App):
         content = msg.full_content or msg.content
         if not content.strip() or not self.state.session_id:
             return
+        # Idempotent create_session ensures the FK constraint is satisfied before the turn insert.
+        # Session row is only created when there is actual content to store (no orphan empty sessions).
+        await self.tools.conv.create_session(self.state.session_id, model=self.state.model)
         embedding: list[float] | None = None
         if self.state.rag_context_enabled and msg.role in ("user", "assistant"):
             try:
@@ -1212,23 +1269,35 @@ class AIChatApp(App):
             return
         try:
             vecs = await self.tools.lm.embed([query])
-            if not vecs:
-                self._write_transcript("Assistant", "Embedding unavailable — LM Studio may be offline.")
+            if vecs:
+                results = await self.tools.conv.search_turns(vecs[0], limit=8)
+            else:
+                results = []
+        except Exception:
+            vecs = []
+            results = []
+        # Full-text fallback when embedding unavailable or returned no results
+        if not results:
+            try:
+                results = await self.tools.conv.search_turns_text(query, limit=8)
+                mode_label = "full-text"
+            except Exception as exc:
+                self._write_transcript("Assistant", f"History search error: {exc}")
                 return
-            results = await self.tools.conv.search_turns(vecs[0], limit=8)
-            if not results:
-                self._write_transcript("Assistant", "No matching past conversation turns found.")
-                return
-            lines = [f"**Past turns matching** `{query}`:", ""]
-            for r in results:
-                ts = r.get("timestamp", "")[:10]
-                role = r.get("role", "")
-                snippet = r.get("content", "")[:200].replace("\n", " ")
-                sim = round(r.get("similarity", 0), 3)
-                lines.append(f"- [{ts}] **{role}** (sim={sim}): {snippet}")
-            self._write_transcript("Assistant", "\n".join(lines))
-        except Exception as exc:
-            self._write_transcript("Assistant", f"History search error: {exc}")
+        else:
+            mode_label = "semantic"
+        if not results:
+            self._write_transcript("Assistant", "No matching past conversation turns found.")
+            return
+        lines = [f"**Past turns matching** `{query}` ({mode_label}):", ""]
+        for r in results:
+            ts = r.get("timestamp", "")[:10]
+            role = r.get("role", "")
+            snippet = r.get("content", "")[:200].replace("\n", " ")
+            sim = r.get("similarity")
+            sim_str = f" (sim={round(sim, 3)})" if sim is not None else ""
+            lines.append(f"- [{ts}] **{role}**{sim_str}: {snippet}")
+        self._write_transcript("Assistant", "\n".join(lines))
 
     async def _handle_sessions_command(self) -> None:
         """List recent conversation sessions: /sessions"""
@@ -1261,6 +1330,89 @@ class AIChatApp(App):
         self._write_transcript("Assistant", f"RAG context injection: **{state_str}**")
         self._last_status_ts = 0.0  # force status bar refresh
         await self.update_status()
+
+    async def _handle_resume_command(self, partial_id: str) -> None:
+        """/resume <partial_session_id> — load a past session by id prefix."""
+        if not partial_id:
+            self._write_transcript("Assistant", "Usage: /resume <session-id-prefix>")
+            return
+        try:
+            sessions = await self.tools.conv.list_sessions(50)
+            match = next((s for s in sessions if s["session_id"].startswith(partial_id)), None)
+            if not match:
+                self._write_transcript("Assistant", f"No session found matching `{partial_id}`.")
+                return
+            data = await self.tools.conv.get_session(match["session_id"], limit=200)
+            turns = data.get("turns", [])
+            if not turns:
+                self._write_transcript("Assistant", "Session has no turns.")
+                return
+            self._start_new_chat(initial=False)
+            for t in turns:
+                msg = Message(t["role"], t["content"])
+                self.messages.append(msg)
+                self._write_transcript(t["role"].capitalize(), t["content"])
+            self.state.session_id = match["session_id"]  # continue in same session
+            self._write_transcript(
+                "Assistant",
+                f"Resumed session `{match['session_id'][:8]}…` — {len(turns)} turns loaded.",
+            )
+        except Exception as exc:
+            self._write_transcript("Assistant", f"Resume error: {exc}")
+
+    async def _handle_stats_command(self) -> None:
+        """/stats — show conversation DB statistics."""
+        try:
+            sessions = await self.tools.conv.list_sessions(1000)
+            total_turns = sum(s.get("turn_count", 0) for s in sessions)
+            newest = sessions[0].get("updated_at", "")[:10] if sessions else "—"
+            oldest = sessions[-1].get("created_at", "")[:10] if sessions else "—"
+            current_sid = (
+                f"- Current session: `{self.state.session_id[:8]}…`"
+                if self.state.session_id
+                else "- No active session"
+            )
+            self._write_transcript(
+                "Assistant",
+                "\n".join(
+                    [
+                        "**Conversation DB stats:**",
+                        f"- Sessions: {len(sessions)}",
+                        f"- Total turns: {total_turns}",
+                        f"- Newest: {newest}  Oldest: {oldest}",
+                        f"- RAG: {'ON' if self.state.rag_context_enabled else 'OFF'}",
+                        current_sid,
+                    ]
+                ),
+            )
+        except Exception as exc:
+            self._write_transcript("Assistant", f"Stats error: {exc}")
+
+    async def _maybe_resume_last_session(self) -> None:
+        """On startup, hint (via notify toast) if a recent session exists (< 2 hours old)."""
+        try:
+            sessions = await self.tools.conv.list_sessions(1)
+            if not sessions:
+                return
+            recent = sessions[0]
+            if recent.get("turn_count", 0) < 2:
+                return  # skip sessions with no real content (avoids test churn)
+            from datetime import datetime, timezone, timedelta
+            ts_str = recent.get("updated_at", "")
+            if not ts_str:
+                return
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - ts > timedelta(hours=2):
+                return
+            title = recent.get("title") or "(untitled)"
+            sid = recent["session_id"][:8]
+            turns = recent.get("turn_count", 0)
+            self.notify(
+                f"Recent: {title} ({turns} turns) — type /resume {sid} to continue",
+                timeout=10,
+            )
+        except Exception:
+            pass
 
     async def _rss_store_topic(self, topic: str) -> None:
         """Discover feeds for a topic and store their articles in PostgreSQL."""
@@ -1608,7 +1760,25 @@ class AIChatApp(App):
 
 
     async def action_help(self) -> None:
-        self.notify(render_keybinds())
+        help_text = (
+            "**Keyboard shortcuts:**\n"
+            + render_keybinds()
+            + "\n\n**Slash commands:**\n"
+            "- `/new` · `/clear` · `/export` · `/copy`\n"
+            "- `/history <query>` — semantic (or full-text) search past conversations\n"
+            "- `/sessions` — list recent sessions\n"
+            "- `/resume <id>` — reload a past session by id prefix\n"
+            "- `/stats` — conversation DB statistics\n"
+            "- `/context [on|off]` — toggle RAG context injection\n"
+            "- `/search <query>` · `/fetch <url>`\n"
+            "- `/db search <q>` · `/rss <topic>`\n"
+            "- `/memory recall [key]` · `/memory store <k> <v>`\n"
+            "- `/shell [cmd]` · `/endpoint <url>`\n"
+            "- `/persona [id]` · `/concise` · `/verbose`\n"
+            "- `/tool list|delete <name>`\n"
+            "- `/help` — this message\n"
+        )
+        self._write_transcript("Assistant", help_text)
 
     async def action_pick_model(self) -> None:
         try:
