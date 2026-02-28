@@ -13,6 +13,22 @@ class SanitizedResponse:
 
 _THINK_RE = re.compile(r"(?is)<think>.*?</think>")
 _ANALYSIS_RE = re.compile(r"(?is)<analysis>.*?</analysis>")
+
+
+def extract_thinking(text: str) -> tuple[str, str]:
+    """Extract content from the first ``<think>…</think>`` block.
+
+    Returns ``(thinking_text, text_without_think_block)``.
+    *thinking_text* is an empty string if no block is found.
+    """
+    raw = text or ""
+    m = _THINK_RE.search(raw)
+    if not m:
+        return "", raw
+    block = m.group(0)
+    inner = block[len("<think>") : -len("</think>")].strip()
+    cleaned = (raw[: m.start()] + raw[m.end() :]).strip()
+    return inner, cleaned
 _LEADING_TAG_RE = re.compile(r"^\s*(<[^>\n]+>\s*)+", re.MULTILINE)
 # GLM-4 and similar models wrap final answers in box tokens.
 _BOX_RE = re.compile(r"<\|begin_of_box\|>(.*?)<\|end_of_box\|>", re.DOTALL)

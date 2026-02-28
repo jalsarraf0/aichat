@@ -205,6 +205,11 @@ class TestRunCompact:
         app._compact_events = []        # event log
         app._tool_log = lambda msg: None
         app.personalities = []          # persona-aware prompt needs this
+        app._thinking_enabled = False   # v4: needed by handle_submit auto-thinking
+        app._thinking_paths = 3
+        app._thinking_model = ""
+        app._thinking_temperature = 0.8
+        app._thinking_count = 0
 
         class FakeState:
             session_id = ""  # no DB persist in unit tests

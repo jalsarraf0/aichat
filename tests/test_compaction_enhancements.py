@@ -190,6 +190,11 @@ def _bare_app():
     app._compact_summary = ""
     app._compact_from_idx = 0
     app._ctx_history = []          # needed by _context_pct() (v3 addition)
+    app._thinking_enabled = False  # v4: needed by handle_submit auto-thinking
+    app._thinking_paths = 3
+    app._thinking_model = ""
+    app._thinking_temperature = 0.8
+    app._thinking_count = 0
     app.messages = []
     return app
 
@@ -284,6 +289,11 @@ def _compact_app(compact_summary="", compact_from_idx=0, tool_turns=True, sessio
     app._compact_threshold_pct = 95
     app._ctx_history = []          # v3: needed by _context_pct
     app.personalities = []         # v3: needed by persona-aware compaction
+    app._thinking_enabled = False  # v4: needed by handle_submit
+    app._thinking_paths = 3
+    app._thinking_model = ""
+    app._thinking_temperature = 0.8
+    app._thinking_count = 0
     app._tool_log = lambda msg: None
 
     _sid = session_id  # capture before class body (class scope can't see enclosing locals)
@@ -644,6 +654,11 @@ def _finalize_app(ctx_pct_value: int, compaction_enabled=True, compact_pending=F
     app._compact_threshold_pct = 95  # v3: needed by _effective_threshold_pct
     app._context_length = 35063      # v3: needed by _effective_threshold_pct
     app._ctx_history = []            # v3: needed by _context_pct
+    app._thinking_enabled = False    # v4: needed by handle_submit auto-thinking
+    app._thinking_paths = 3
+    app._thinking_model = ""
+    app._thinking_temperature = 0.8
+    app._thinking_count = 0
 
     class FakeState:
         compaction_enabled = True
