@@ -46,5 +46,5 @@ class AppState:
     busy: bool = False
     cwd: str = "."
     max_tool_calls_per_turn: int = 4
-    tool_concurrency: int = 1
+    tool_concurrency: int = 6
     tool_calls_this_turn: int = 0

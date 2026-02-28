@@ -42,7 +42,7 @@ class ToolScheduler:
     ) -> None:
         self.runner = runner
         self.log = log
-        self.concurrency = max(1, min(concurrency, 2))
+        self.concurrency = max(1, min(concurrency, 6))
         self.max_attempts = max_attempts
         self.sleep = sleep or asyncio.sleep
         self.jitter = jitter or random.random
