@@ -1124,10 +1124,12 @@ class TestWebSearchToolUnit:
         from aichat.tools.search import WebSearchTool
         browser = BrowserTool()
         tool = WebSearchTool(browser)
+        # Patch Tier 2 to raise so Tier 1 wins unambiguously in the race.
         with patch.object(browser, "search", new=AsyncMock(
             return_value={"query": "test", "url": "https://ddg.com", "content": "result text"}
         )):
-            result = await tool.search("test")
+            with patch.object(tool, "_tier2_httpx", side_effect=RuntimeError("tier2 suppressed")):
+                result = await tool.search("test")
         assert result["tier"] == 1
         assert result["content"] == "result text"
 
@@ -1178,10 +1180,12 @@ class TestWebSearchToolUnit:
         browser = BrowserTool()
         tool = WebSearchTool(browser)
         long_content = "x" * 10000
+        # Suppress Tier 2 so Tier 1 wins; no real HTTP calls in unit tests.
         with patch.object(browser, "search", new=AsyncMock(
             return_value={"query": "test", "url": "https://ddg.com", "content": long_content}
         )):
-            result = await tool.search("test", max_chars=500)
+            with patch.object(tool, "_tier2_httpx", side_effect=RuntimeError("tier2 suppressed")):
+                result = await tool.search("test", max_chars=500)
         assert len(result["content"]) == 500
 
     @pytest.mark.asyncio
@@ -1199,6 +1203,272 @@ class TestWebSearchToolUnit:
             )):
                 result = await tool.search("test")
         assert result["tier"] == 2
+
+
+# ---------------------------------------------------------------------------
+# WebSearchTool — parallel race tests (mocked, no real I/O)
+# ---------------------------------------------------------------------------
+
+class TestWebSearchParallelRace:
+    """Verify Tier 1 + Tier 2 truly launch in parallel and the winner logic
+    works correctly under various race conditions."""
+
+    @pytest.mark.asyncio
+    async def test_tier2_wins_race_when_faster(self):
+        """Tier 2 returns immediately; Tier 1 is slow → Tier 2 wins, Tier 1 cancelled."""
+        import asyncio
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+
+        tier1_started = asyncio.Event()
+        tier1_cancelled = False
+
+        async def slow_browser(query: str) -> dict:
+            tier1_started.set()
+            try:
+                await asyncio.sleep(60)  # will be cancelled
+            except asyncio.CancelledError:
+                nonlocal tier1_cancelled
+                tier1_cancelled = True
+                raise
+            return {"url": "", "content": "browser result"}
+
+        with patch.object(browser, "search", new=slow_browser):
+            with patch.object(tool, "_tier2_httpx", new=AsyncMock(
+                return_value={"url": "https://ddg.com", "content": "fast httpx result"}
+            )):
+                result = await tool.search("python")
+
+        assert result["tier"] == 2, f"Expected Tier 2 to win, got tier={result['tier']}"
+        assert result["content"] == "fast httpx result"
+        assert tier1_started.is_set(), "Tier 1 should have started (both launched)"
+        assert tier1_cancelled, "Tier 1 task should have been cancelled after Tier 2 won"
+
+    @pytest.mark.asyncio
+    async def test_tier1_wins_race_when_faster(self):
+        """Tier 1 returns immediately; Tier 2 is slow → Tier 1 wins, Tier 2 cancelled."""
+        import asyncio
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+
+        tier2_started = asyncio.Event()
+        tier2_cancelled = False
+
+        async def slow_httpx(query: str) -> dict:
+            tier2_started.set()
+            try:
+                await asyncio.sleep(60)  # will be cancelled
+            except asyncio.CancelledError:
+                nonlocal tier2_cancelled
+                tier2_cancelled = True
+                raise
+            return {"url": "", "content": "httpx result"}
+
+        with patch.object(browser, "search", new=AsyncMock(
+            return_value={"url": "https://ddg.com", "content": "fast browser result"}
+        )):
+            with patch.object(tool, "_tier2_httpx", new=slow_httpx):
+                result = await tool.search("python")
+
+        assert result["tier"] == 1, f"Expected Tier 1 to win, got tier={result['tier']}"
+        assert result["content"] == "fast browser result"
+        assert tier2_started.is_set(), "Tier 2 should have started (both launched)"
+        assert tier2_cancelled, "Tier 2 task should have been cancelled after Tier 1 won"
+
+    @pytest.mark.asyncio
+    async def test_both_t1_t2_launched_before_either_returns(self):
+        """Both Tier 1 and Tier 2 tasks start before either result is delivered."""
+        import asyncio
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+
+        t1_started = asyncio.Event()
+        t2_started = asyncio.Event()
+        barrier = asyncio.Event()
+
+        async def t1_impl(query: str) -> dict:
+            t1_started.set()
+            await barrier.wait()
+            return {"url": "u1", "content": "content1"}
+
+        async def t2_impl(query: str) -> dict:
+            t2_started.set()
+            await barrier.wait()
+            return {"url": "u2", "content": "content2"}
+
+        async def run():
+            search_task = asyncio.create_task(tool.search("test"))
+            # Give both tasks a chance to start
+            await asyncio.sleep(0.01)
+            assert t1_started.is_set(), "Tier 1 must start before any result is returned"
+            assert t2_started.is_set(), "Tier 2 must start before any result is returned"
+            barrier.set()
+            return await search_task
+
+        with patch.object(browser, "search", new=t1_impl):
+            with patch.object(tool, "_tier2_httpx", new=t2_impl):
+                result = await run()
+
+        assert result["tier"] in (1, 2), f"Expected tier 1 or 2, got {result['tier']}"
+        assert result["content"], "Expected non-empty result"
+
+    @pytest.mark.asyncio
+    async def test_t1_fails_t2_wins_race(self):
+        """Tier 1 raises in the race; Tier 2 returns content → Tier 2 wins."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", side_effect=RuntimeError("browser crash")):
+            with patch.object(tool, "_tier2_httpx", new=AsyncMock(
+                return_value={"url": "https://ddg.com", "content": "tier2 wins"}
+            )):
+                result = await tool.search("query")
+        assert result["tier"] == 2
+        assert result["content"] == "tier2 wins"
+
+    @pytest.mark.asyncio
+    async def test_t1_t2_both_fail_tier3_used(self):
+        """Both Tier 1 and Tier 2 fail → Tier 3 (DDG lite) is used as fallback."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+        with patch.object(browser, "search", side_effect=RuntimeError("browser down")):
+            with patch.object(tool, "_tier2_httpx", side_effect=RuntimeError("httpx down")):
+                with patch.object(tool, "_tier3_api", new=AsyncMock(
+                    return_value={"url": "https://lite.ddg.com", "content": "lite results"}
+                )):
+                    result = await tool.search("query")
+        assert result["tier"] == 3
+        assert result["content"] == "lite results"
+
+    @pytest.mark.asyncio
+    async def test_t1_empty_content_t2_wins(self):
+        """Tier 1 returns empty content (not an error); Tier 2 has content → Tier 2 wins."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        browser = BrowserTool()
+        tool = WebSearchTool(browser)
+
+        async def slow_empty_browser(query: str) -> dict:
+            await asyncio.sleep(0.1)  # Slightly slower
+            return {"url": "https://ddg.com", "content": ""}  # empty content
+
+        with patch.object(browser, "search", new=slow_empty_browser):
+            with patch.object(tool, "_tier2_httpx", new=AsyncMock(
+                return_value={"url": "https://ddg.com", "content": "tier2 content"}
+            )):
+                result = await tool.search("query")
+        assert result["tier"] == 2, f"Expected tier 2 (t1 had empty content), got {result['tier']}"
+
+    def test_run_tier1_and_run_tier2_methods_exist(self):
+        """OOP: _run_tier1 and _run_tier2 wrapper methods must exist on WebSearchTool."""
+        from aichat.tools.browser import BrowserTool
+        from aichat.tools.search import WebSearchTool
+        tool = WebSearchTool(BrowserTool())
+        assert hasattr(tool, "_run_tier1"), "_run_tier1 missing"
+        assert hasattr(tool, "_run_tier2"), "_run_tier2 missing"
+        import asyncio
+        import inspect
+        assert inspect.iscoroutinefunction(tool._run_tier1), "_run_tier1 must be async"
+        assert inspect.iscoroutinefunction(tool._run_tier2), "_run_tier2 must be async"
+
+
+# ---------------------------------------------------------------------------
+# ToolScheduler — concurrency cap tests
+# ---------------------------------------------------------------------------
+
+class TestToolSchedulerConcurrencyCapSix:
+    """Concurrency cap raised from 2 to 6; verify enforcement and parallel execution."""
+
+    async def _make_scheduler(self, concurrency: int) -> "ToolScheduler":
+        from aichat.tool_scheduler import ToolScheduler
+
+        async def noop(call):
+            return "ok"
+
+        return ToolScheduler(noop, concurrency=concurrency)
+
+    @pytest.mark.asyncio
+    async def test_cap_enforced_at_6(self):
+        """Requesting concurrency=10 is silently capped at 6."""
+        from aichat.tool_scheduler import ToolScheduler
+
+        async def noop(call):
+            return "ok"
+
+        s = ToolScheduler(noop, concurrency=10)
+        assert s.concurrency == 6, f"Expected cap=6, got {s.concurrency}"
+
+    @pytest.mark.asyncio
+    async def test_cap_allows_6(self):
+        """Requesting concurrency=6 is accepted unchanged."""
+        from aichat.tool_scheduler import ToolScheduler
+
+        async def noop(call):
+            return "ok"
+
+        s = ToolScheduler(noop, concurrency=6)
+        assert s.concurrency == 6
+
+    @pytest.mark.asyncio
+    async def test_6_tasks_run_in_parallel(self):
+        """6 tasks with concurrency=6 all start before any finish (true parallelism)."""
+        import asyncio
+        from aichat.tool_scheduler import ToolCall, ToolScheduler
+
+        started = 0
+        max_concurrent = 0
+        running = 0
+        barrier = asyncio.Event()
+
+        async def track(call: ToolCall) -> str:
+            nonlocal started, max_concurrent, running
+            started += 1
+            running += 1
+            max_concurrent = max(max_concurrent, running)
+            await barrier.wait()
+            running -= 1
+            return f"done-{call.name}"
+
+        scheduler = ToolScheduler(track, concurrency=6)
+        calls = [
+            ToolCall(index=i, name=f"tool{i}", args={}, call_id=str(i), label=f"tool{i}")
+            for i in range(6)
+        ]
+
+        async def run_and_release():
+            task = asyncio.create_task(scheduler.run_batch(calls))
+            # Let all 6 workers start before releasing the barrier
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if started >= 6:
+                    break
+            barrier.set()
+            return await task
+
+        results = await run_and_release()
+        assert max_concurrent == 6, f"Expected 6 concurrent tasks, peak was {max_concurrent}"
+        assert len(results) == 6
+        assert all(r.ok for r in results)
+
+    @pytest.mark.asyncio
+    async def test_default_tool_concurrency_in_state(self):
+        """AppState.tool_concurrency default is now 6."""
+        from aichat.state import AppState
+        state = AppState()
+        assert state.tool_concurrency == 6, \
+            f"Expected default tool_concurrency=6, got {state.tool_concurrency}"
 
 
 # ---------------------------------------------------------------------------
