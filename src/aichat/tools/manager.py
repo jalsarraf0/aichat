@@ -11,6 +11,7 @@ from enum import Enum
 from ..state import ApprovalMode
 from .browser import BrowserTool
 from .code_interpreter import CodeInterpreterTool
+from .conversation_store import ConversationStoreTool
 from .database import DatabaseTool
 from .lm_studio import LMStudioTool
 from .memory import MemoryTool
@@ -133,6 +134,7 @@ class ToolName(str, Enum):
     SMART_SUMMARIZE = "smart_summarize"
     IMAGE_CAPTION = "image_caption"
     STRUCTURED_EXTRACT = "structured_extract"
+    CONV_SEARCH_HISTORY = "conv_search_history"
 
 
 class ToolManager:
@@ -151,6 +153,8 @@ class ToolManager:
         self.lm = LMStudioTool(_LM_STUDIO_URL)
         # Sandboxed Python subprocess executor.
         self.code = CodeInterpreterTool()
+        # Persistent conversation store (PostgreSQL via aichat-database).
+        self.conv = ConversationStoreTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
@@ -1028,6 +1032,20 @@ class ToolManager:
         """Extract structured JSON from text using LM Studio json_object mode."""
         await self._check_approval(mode, ToolName.STRUCTURED_EXTRACT.value, confirmer)
         return await self.lm.extract(content, schema_json=schema_json or "", instructions=instructions or "")
+
+    async def run_conv_search_history(
+        self,
+        query: str,
+        limit: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> list[dict]:
+        """Search past conversation turns by semantic similarity."""
+        await self._check_approval(mode, ToolName.CONV_SEARCH_HISTORY.value, confirmer)
+        vecs = await self.lm.embed([query])
+        if not vecs:
+            return []
+        return await self.conv.search_turns(vecs[0], limit=limit or 5)
 
     async def run_fetch_image(
         self,
