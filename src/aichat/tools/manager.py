@@ -511,7 +511,7 @@ class ToolManager:
                 for page_url in t1_urls[:5]:
                     try:
                         pi = await self.run_page_images(
-                            page_url, mode, confirmer, scroll=True, max_scrolls=2
+                            page_url, mode, confirmer, scroll=True, max_scrolls=1
                         )
                         page_imgs = pi.get("images", [])
                         if len(page_imgs) < 3:   # auth wall / stub — skip
@@ -540,6 +540,21 @@ class ToolManager:
                     except Exception:
                         pass
                 all_candidates.append(img2)
+        except Exception:
+            pass
+
+        # Tier 3: Bing Images — different corpus from DDG, different CDNs
+        try:
+            bing_url = f"https://www.bing.com/images/search?q={_qp(query)}&form=HDRSC2&first=1"
+            pi3 = await self.run_page_images(
+                bing_url, mode, confirmer, scroll=True, max_scrolls=2
+            )
+            for img3 in pi3.get("images", []):
+                u3 = img3.get("url", "")
+                # Bing wraps images in /th?id=... proxy URLs — skip thumbnails
+                if "bing.com/th" in u3 or "tse1.mm.bing" in u3:
+                    continue
+                all_candidates.append(img3)
         except Exception:
             pass
 
