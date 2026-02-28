@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -12,6 +13,21 @@ class LLMClientError(RuntimeError):
 
 class ModelNotFoundError(LLMClientError):
     pass
+
+
+# Separate timeouts for streaming vs non-streaming requests.
+# Streaming uses read=None so that individual chunk gaps are not limited
+# (the model may pause between tokens), while connect/write stay short.
+# Non-streaming uses a fixed 60 s read.
+_STREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=5.0)
+
+# Transient errors that warrant a single automatic retry (connection-level only).
+_RETRIABLE = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.LocalProtocolError,
+)
 
 
 class LLMClient:
@@ -99,33 +115,30 @@ class LLMClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMClientError("Malformed chat response") from exc
 
-    async def chat_stream_events(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, object]] | None = None,
-        tool_choice: str | None = None,
-        max_tokens: int | None = None,
+    async def _raw_stream(
+        self, payload: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
-        await self.ensure_model(model)
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice or "auto"
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
+        """Low-level SSE streaming iterator (no retry logic).
+
+        Parses ``data: …`` lines from LM Studio's OpenAI-compatible stream.
+        SSE comment lines (``": …"``) and blank lines are silently skipped per spec.
+        Raises :class:`LLMClientError` on transport failures.
+        """
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:
+            async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if not line.startswith("data:"):
+                        # Skip blank lines and SSE comment/keepalive lines.
+                        if not line or not line.startswith("data:"):
                             continue
                         data = line[5:].strip()
                         if data == "[DONE]":
-                            break
+                            return
                         try:
                             parsed = json.loads(data)
                         except json.JSONDecodeError:
@@ -138,11 +151,77 @@ class LLMClient:
         except httpx.TimeoutException as exc:
             raise LLMClientError("Streaming timed out") from exc
         except httpx.HTTPStatusError as exc:
-            raise LLMClientError(f"Streaming failed with HTTP {exc.response.status_code}") from exc
+            raise LLMClientError(
+                f"Streaming failed with HTTP {exc.response.status_code}"
+            ) from exc
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except asyncio.TimeoutError as exc:
+            raise LLMClientError("Streaming cancelled by asyncio timeout") from exc
+        except _RETRIABLE as exc:
+            raise LLMClientError(f"Streaming network error: {exc}") from exc
         except httpx.HTTPError as exc:
             raise LLMClientError(f"Streaming network error: {exc}") from exc
 
-    async def chat_stream(self, model: str, messages: list[dict[str, Any]], max_tokens: int | None = None) -> AsyncIterator[str]:
+    async def chat_stream_events(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream chat-completion events with one automatic retry on transient errors.
+
+        A retry is attempted only if the connection failed *before* any event was
+        delivered, so the caller never sees partial duplicate content.
+
+        Yields dicts with keys ``type`` (``"content"`` or ``"tool_calls"``) and
+        ``value``.  Raises :class:`LLMClientError` on unrecoverable failure.
+        """
+        await self.ensure_model(model)
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        events_yielded = 0
+        last_exc: Exception | None = None
+
+        for attempt in range(2):  # up to 1 retry
+            if attempt > 0:
+                # Only retry if we received nothing — avoids duplicate content.
+                if events_yielded > 0:
+                    break
+                await asyncio.sleep(0.5)
+
+            try:
+                async for event in self._raw_stream(payload):
+                    events_yielded += 1
+                    yield event
+                return  # clean completion
+
+            except LLMClientError as exc:
+                last_exc = exc
+                # Only retry on connection-level errors (not 4xx/5xx/timeout).
+                cause = exc.__cause__
+                if not isinstance(cause, _RETRIABLE):
+                    raise
+                if events_yielded > 0:
+                    raise  # partial stream — don't retry
+                # Will retry on next loop iteration.
+
+        if last_exc is not None:
+            raise last_exc
+
+    async def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
         async for event in self.chat_stream_events(model, messages, max_tokens=max_tokens):
             if event.get("type") == "content":
                 yield event.get("value", "")
