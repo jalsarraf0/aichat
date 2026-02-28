@@ -130,6 +130,12 @@ class AIChatApp(App):
         self._rag_recency_days: float = float(cfg.get("rag_recency_days", 30.0))
         self._compact_events: list[dict] = []   # history of compaction events this session
         self._ctx_history: list[int] = []       # rolling CTX% readings (last 20)
+        self._thinking_enabled: bool = bool(cfg.get("thinking_enabled", False))
+        self._thinking_paths: int = int(cfg.get("thinking_paths", 3))
+        self._thinking_model: str = str(cfg.get("thinking_model", ""))
+        self._thinking_temperature: float = float(cfg.get("thinking_temperature", 0.8))
+        self._thinking_count: int = 0   # total think_and_answer calls this session
+        self.tools.think_tool.model = self._thinking_model
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -246,6 +252,7 @@ class AIChatApp(App):
         ctx_str = f" | CTX:{ctx_pct}%" if ctx_pct > 20 else ""
         rag_str = " | RAG:ON" if self.state.rag_context_enabled else " | RAG:OFF"
         cmp_str = f" | CMP:{self._compact_from_idx}" if self._compact_from_idx > 0 else ""
+        thk_str = " | THK:ON" if self._thinking_enabled else ""
         model_line.update(
             f"model={self.state.model} | base={self.state.base_url} | server={'UP' if up else 'DOWN'}"
         )
@@ -260,6 +267,7 @@ class AIChatApp(App):
             + ctx_str
             + rag_str
             + cmp_str
+            + thk_str
         )
 
     async def action_send(self) -> None:
@@ -289,6 +297,10 @@ class AIChatApp(App):
         self.transcript_store.append(user)
         self._write_transcript("You", text)
         asyncio.create_task(self._auto_save_turn(user, len(self.messages) - 1))
+        if self._thinking_enabled:
+            _think_out = await self._apply_thinking(text)
+            if _think_out:
+                self._write_transcript("Assistant", f"**[Parallel Think]**\n\n{_think_out}")
         self.active_task = asyncio.create_task(self.run_llm_turn())
         await self.active_task
 
@@ -528,6 +540,20 @@ class AIChatApp(App):
                 return
             if text.startswith("/fork"):
                 await self._handle_fork_command()
+                return
+            if text.startswith("/think ") or text == "/think":
+                query = text[7:].strip() if text.startswith("/think ") else ""
+                if not query:
+                    self._write_transcript("Assistant", "Usage: /think <question>")
+                    return
+                self._write_transcript("Assistant", "_Thinking in parallel\u2026_")
+                out = await self._apply_thinking(query)
+                self._write_transcript(
+                    "Assistant", out or "Thinking failed \u2014 no answer generated."
+                )
+                return
+            if text.startswith("/thinking"):
+                await self._handle_thinking_command(text[9:].strip())
                 return
             if text.startswith("/ctx"):
                 arg = text[4:].strip()
@@ -1197,6 +1223,13 @@ class AIChatApp(App):
         self.call_after_refresh(scroll.scroll_end, animate=False)
 
     def _finalize_assistant_response(self, content: str) -> None:
+        from .sanitizer import extract_thinking as _extract_thinking
+        _thinking_txt, content = _extract_thinking(content)
+        if _thinking_txt:
+            self._write_transcript(
+                "Assistant",
+                f"> **[thinking]** {_thinking_txt[:300]}{'...' if len(_thinking_txt) > 300 else ''}",
+            )
         sanitized = sanitize_response(content)
         if sanitized.structured_hidden:
             display = format_structured(sanitized.text)
@@ -1291,7 +1324,13 @@ class AIChatApp(App):
             self._refresh_sessions()
 
     async def _execute_tool_from_call(self, call: ToolCall) -> str:
-        return await self._execute_tool_call(call.name, call.args)
+        cached = self.tools.check_cache(call.name, call.args)
+        if cached is not None:
+            self._tool_log(f"[cache hit] {call.name}")
+            return cached
+        result = await self._execute_tool_call(call.name, call.args)
+        self.tools.store_cache(call.name, call.args, result)
+        return result
 
     def _refresh_sessions(self) -> None:
         now = time.monotonic()
@@ -1542,6 +1581,63 @@ class AIChatApp(App):
             )
         except Exception as exc:
             self._write_transcript("Assistant", f"Stats error: {exc}")
+
+    async def _apply_thinking(self, question: str) -> str | None:
+        """Fan-out parallel thinking and return formatted output, or None on failure."""
+        if not question.strip():
+            return None
+        try:
+            result = await self.tools.run_think(
+                question, self._thinking_paths, self._thinking_temperature,
+                self.state.approval, self._confirm_tool,
+            )
+        except Exception:
+            return None
+        if not result.answer:
+            return None
+        self._thinking_count += 1
+        meta = f"\n\n*({result.paths_tried} paths, score {result.best_score:.2f}, {result.duration_ms}ms)*"
+        if result.reasoning and result.reasoning != result.answer:
+            snippet = result.reasoning[:300] + ("..." if len(result.reasoning) > 300 else "")
+            return f"> **[thinking]** {snippet}\n\n{result.answer}{meta}"
+        return f"{result.answer}{meta}"
+
+    async def _handle_thinking_command(self, arg: str) -> None:
+        """/thinking [on|off|status|paths N|model NAME]"""
+        parts = arg.split()
+        sub = parts[0].lower() if parts else ""
+        if sub == "on":
+            self._thinking_enabled = True
+            self._write_transcript(
+                "Assistant",
+                "Thinking mode **ON** \u2014 every query will use parallel chain-of-thought.",
+            )
+        elif sub == "off":
+            self._thinking_enabled = False
+            self._write_transcript("Assistant", "Thinking mode **OFF**.")
+        elif sub == "paths" and len(parts) >= 2 and parts[1].isdigit():
+            self._thinking_paths = max(1, min(10, int(parts[1])))
+            self._write_transcript(
+                "Assistant", f"Thinking paths set to **{self._thinking_paths}**."
+            )
+        elif sub == "model" and len(parts) >= 2:
+            self._thinking_model = " ".join(parts[1:])
+            self.tools.think_tool.model = self._thinking_model
+            self._write_transcript(
+                "Assistant", f"Thinking model set to `{self._thinking_model}`."
+            )
+        else:
+            status = "ON" if self._thinking_enabled else "OFF"
+            self._write_transcript(
+                "Assistant",
+                f"**Thinking:** {status} | paths={self._thinking_paths} | "
+                f"temp={self._thinking_temperature} | "
+                f"model={'(main)' if not self._thinking_model else self._thinking_model} | "
+                f"calls this session={self._thinking_count}\n\n"
+                "Commands: `/thinking on` \u00b7 `/thinking off` \u00b7 `/thinking paths N` \u00b7 "
+                "`/thinking model NAME` \u00b7 `/thinking status`",
+            )
+        await self.update_status()
 
     async def _handle_fork_command(self) -> None:
         """/fork — start a new chat, pre-seeding compact summary from the current session."""

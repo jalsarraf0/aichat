@@ -135,6 +135,7 @@ class ToolName(str, Enum):
     IMAGE_CAPTION = "image_caption"
     STRUCTURED_EXTRACT = "structured_extract"
     CONV_SEARCH_HISTORY = "conv_search_history"
+    THINK = "think"
 
 
 class ToolManager:
@@ -155,6 +156,9 @@ class ToolManager:
         self.code = CodeInterpreterTool()
         # Persistent conversation store (PostgreSQL via aichat-database).
         self.conv = ConversationStoreTool()
+        # Parallel chain-of-thought reasoning engine.
+        from .thinking import ThinkingTool as _ThinkingTool
+        self.think_tool = _ThinkingTool(lm=self.lm, model="")
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
@@ -169,6 +173,34 @@ class ToolManager:
     def clear_tool_cache(self) -> None:
         """Discard all cached tool results (call between sessions or after /new)."""
         self._tool_result_cache.clear()
+
+    def check_cache(self, name: str, args: dict) -> str | None:
+        """Return cached tool result for *name*+*args*, or ``None`` if not cached."""
+        import hashlib
+        import json as _j
+        key = f"{name}:{hashlib.md5(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
+        return self._tool_result_cache.get(key)
+
+    def store_cache(self, name: str, args: dict, result: str) -> None:
+        """Cache *result* for *name*+*args* for the current turn."""
+        import hashlib
+        import json as _j
+        key = f"{name}:{hashlib.md5(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
+        self._tool_result_cache[key] = result
+
+    async def run_think(
+        self,
+        question: str,
+        n_paths: int,
+        temperature: float,
+        mode: "ApprovalMode",
+        confirmer: "Callable | None",
+    ) -> "ThinkResult":
+        """Run parallel chain-of-thought reasoning (approval-gated)."""
+        await self._check_approval(mode, ToolName.THINK.value, confirmer)
+        return await self.think_tool.think_and_answer(
+            question, n_paths=n_paths, temperature=temperature
+        )
 
     # ------------------------------------------------------------------
     # Custom tool registry

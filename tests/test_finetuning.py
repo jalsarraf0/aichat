@@ -62,6 +62,11 @@ def _bare_app():
     app._rag_recency_days = 30.0
     app._compact_events = []
     app._ctx_history = []
+    app._thinking_enabled = False
+    app._thinking_paths = 3
+    app._thinking_model = ""
+    app._thinking_temperature = 0.8
+    app._thinking_count = 0
     app.messages = []
     app.personalities = []
     return app

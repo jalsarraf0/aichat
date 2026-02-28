@@ -40,6 +40,10 @@ class AppConfig:
     compact_model: str = ""            # dedicated fast model for compaction (empty = use main model)
     tool_result_max_chars: int = 2000  # max chars per tool result stored in history
     rag_recency_days: float = 30.0     # recency half-life for date-weighted RAG scoring
+    thinking_enabled: bool = False          # apply parallel thinking to every query
+    thinking_paths: int = 3                 # parallel reasoning chains (1–10)
+    thinking_model: str = ""                # dedicated model for thinking (empty = main)
+    thinking_temperature: float = 0.8      # temperature for reasoning chains
     config_version: int = 6
 
 
@@ -101,6 +105,12 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     merged["tool_result_max_chars"] = int(raw_trmc) if isinstance(raw_trmc, (int, float)) and int(raw_trmc) >= 100 else defaults["tool_result_max_chars"]
     raw_rrd = merged.get("rag_recency_days", defaults["rag_recency_days"])
     merged["rag_recency_days"] = float(raw_rrd) if isinstance(raw_rrd, (int, float)) and float(raw_rrd) > 0 else defaults["rag_recency_days"]
+    merged["thinking_enabled"] = bool(merged.get("thinking_enabled", defaults["thinking_enabled"]))
+    raw_tp = merged.get("thinking_paths", defaults["thinking_paths"])
+    merged["thinking_paths"] = int(raw_tp) if isinstance(raw_tp, (int, float)) and 1 <= int(raw_tp) <= 10 else defaults["thinking_paths"]
+    merged["thinking_model"] = str(merged.get("thinking_model", defaults["thinking_model"]))
+    raw_tt = merged.get("thinking_temperature", defaults["thinking_temperature"])
+    merged["thinking_temperature"] = float(raw_tt) if isinstance(raw_tt, (int, float)) and 0.0 < float(raw_tt) <= 2.0 else defaults["thinking_temperature"]
     merged["config_version"] = defaults["config_version"]
     return merged
 
