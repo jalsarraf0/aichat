@@ -50,3 +50,4 @@ class AppState:
     tool_calls_this_turn: int = 0
     session_id: str = ""
     rag_context_enabled: bool = True
+    session_title_set: bool = False

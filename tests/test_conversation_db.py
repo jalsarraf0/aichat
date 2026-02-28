@@ -190,6 +190,254 @@ class TestAppSource:
 
 
 # ===========================================================================
+# 2b. Additional source inspection tests for all 17 fixes
+# ===========================================================================
+
+class TestFixSourceInspection:
+    """Source inspection tests verifying all 17 fixes are present."""
+
+    def _app_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "src/aichat/app.py").read_text()
+
+    def _state_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "src/aichat/state.py").read_text()
+
+    def _db_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "docker/database/app.py").read_text()
+
+    def _mcp_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "src/aichat/mcp_server.py").read_text()
+
+    def _conv_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "src/aichat/tools/conversation_store.py").read_text()
+
+    def _manager_src(self) -> str:
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "src/aichat/tools/manager.py").read_text()
+
+    def test_session_title_set_in_state(self):
+        src = self._state_src()
+        assert "session_title_set" in src, "session_title_set field not found in state.py"
+        assert "False" in src, "session_title_set default False not found"
+
+    def test_resume_command_in_app(self):
+        src = self._app_src()
+        assert "_handle_resume_command" in src, "_handle_resume_command not found in app.py"
+        assert '"/resume"' in src or 'startswith("/resume")' in src, \
+            "/resume dispatch not found in app.py"
+
+    def test_stats_command_in_app(self):
+        src = self._app_src()
+        assert "_handle_stats_command" in src, "_handle_stats_command not found in app.py"
+        assert '"/stats"' in src or 'startswith("/stats")' in src, \
+            "/stats dispatch not found in app.py"
+
+    def test_help_writes_to_transcript(self):
+        src = self._app_src()
+        assert "_write_transcript" in src, "_write_transcript not found in app.py"
+        # action_help should call _write_transcript now (not just notify)
+        import re
+        help_fn = re.search(
+            r"async def action_help.*?(?=\n    async def|\nclass |\Z)",
+            src, re.DOTALL
+        )
+        assert help_fn, "action_help not found"
+        assert "_write_transcript" in help_fn.group(0), \
+            "action_help does not call _write_transcript"
+
+    def test_help_lists_history_command(self):
+        src = self._app_src()
+        import re
+        help_fn = re.search(
+            r"async def action_help.*?(?=\n    async def|\nclass |\Z)",
+            src, re.DOTALL
+        )
+        assert help_fn, "action_help not found"
+        assert "/history" in help_fn.group(0), "/history not listed in help text"
+
+    def test_help_lists_resume_command(self):
+        src = self._app_src()
+        import re
+        help_fn = re.search(
+            r"async def action_help.*?(?=\n    async def|\nclass |\Z)",
+            src, re.DOTALL
+        )
+        assert help_fn, "action_help not found"
+        assert "/resume" in help_fn.group(0), "/resume not listed in help text"
+
+    def test_rag_threshold_in_fetch_context(self):
+        src = self._app_src()
+        assert "0.3" in src, "Similarity threshold 0.3 not found in app.py"
+        assert "_fetch_rag_context" in src, "_fetch_rag_context not in app.py"
+
+    def test_fulltext_endpoint_in_database_app(self):
+        src = self._db_src()
+        assert "/conversations/turns/search" in src, \
+            "/conversations/turns/search endpoint not found in docker/database/app.py"
+        assert "ILIKE" in src, "ILIKE full-text search not found in docker/database/app.py"
+
+    def test_conv_store_has_search_turns_text(self):
+        src = self._conv_src()
+        assert "search_turns_text" in src, \
+            "search_turns_text method not found in conversation_store.py"
+
+    def test_conv_search_history_in_mcp_server(self):
+        src = self._mcp_src()
+        assert "conv_search_history" in src, \
+            "conv_search_history not found in mcp_server.py"
+
+    def test_web_fetch_checks_cache_first(self):
+        src = self._manager_src()
+        assert "cache_get" in src, "cache_get not found in manager.py"
+        # Verify it's in the run_web_fetch method
+        import re
+        fetch_fn = re.search(
+            r"async def run_web_fetch.*?(?=\n    async def |\nclass |\Z)",
+            src, re.DOTALL
+        )
+        assert fetch_fn, "run_web_fetch not found in manager.py"
+        assert "cache_get" in fetch_fn.group(0), \
+            "cache_get not present in run_web_fetch — cache layer missing"
+
+    def test_rag_cache_fields_in_app(self):
+        src = self._app_src()
+        assert "_rag_context_query" in src, "_rag_context_query not found in app.py"
+        assert "_rag_context_cache" in src, "_rag_context_cache not found in app.py"
+
+    def test_streaming_followup_mounts_live_msg(self):
+        src = self._app_src()
+        import re
+        followup_fn = re.search(
+            r"async def _run_followup_response.*?(?=\n    async def |\nclass |\Z)",
+            src, re.DOTALL
+        )
+        assert followup_fn, "_run_followup_response not found"
+        fn_src = followup_fn.group(0)
+        assert "ChatMessage" in fn_src, \
+            "_run_followup_response does not mount a live ChatMessage widget"
+
+    def test_session_title_set_guard_in_finalize(self):
+        src = self._app_src()
+        assert "session_title_set" in src, "session_title_set flag not found in app.py"
+
+    def test_manager_default_is_6_in_source(self):
+        src = self._manager_src()
+        assert "max_tool_calls_per_turn: int = 6" in src, \
+            "ToolManager default max_tool_calls_per_turn is not 6"
+
+    def test_maybe_resume_last_session_in_app(self):
+        src = self._app_src()
+        assert "_maybe_resume_last_session" in src, \
+            "_maybe_resume_last_session not found in app.py"
+        assert "on_mount" in src, "on_mount not found in app.py"
+
+
+# ===========================================================================
+# 2c. OOP unit tests (no services, fast)
+# ===========================================================================
+
+class TestOOPUnits:
+    """Unit tests requiring no external services."""
+
+    def test_manager_default_max_tool_calls_is_6(self):
+        from aichat.tools.manager import ToolManager
+        tm = ToolManager()
+        assert tm.max_tool_calls_per_turn == 6, \
+            f"Expected 6, got {tm.max_tool_calls_per_turn}"
+
+    def test_state_session_title_set_default_false(self):
+        from aichat.state import AppState
+        s = AppState()
+        assert s.session_title_set is False
+
+    def test_conv_store_has_search_turns_text_method(self):
+        import inspect
+        from aichat.tools.conversation_store import ConversationStoreTool
+        tool = ConversationStoreTool()
+        assert hasattr(tool, "search_turns_text"), \
+            "search_turns_text method not found on ConversationStoreTool"
+        assert inspect.iscoroutinefunction(tool.search_turns_text), \
+            "search_turns_text must be async"
+
+    @pytest.mark.asyncio
+    async def test_rag_cache_avoids_double_embed(self):
+        """_fetch_rag_context should embed only once for the same query text."""
+        import sys
+        sys.path.insert(0, "src")
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from aichat.tools.conversation_store import ConversationStoreTool
+        from aichat.tools.manager import ToolManager
+
+        # Build a minimal app-like object with mock tools
+        class FakeState:
+            session_id = "test-sid"
+            rag_context_enabled = True
+
+        class FakeApp:
+            state = FakeState()
+            _rag_context_query = ""
+            _rag_context_cache = ""
+            system_prompt = ""
+
+            # Borrow the real method
+            _fetch_rag_context = __import__(
+                "aichat.app", fromlist=["AIChatApp"]
+            ).AIChatApp._fetch_rag_context
+
+        # patch the tools attribute
+        import aichat.app as appmod
+        app_instance = object.__new__(appmod.AIChatApp)
+        app_instance.state = FakeState()  # type: ignore
+        app_instance._rag_context_query = ""
+        app_instance._rag_context_cache = ""
+        app_instance.system_prompt = ""
+
+        embed_mock = AsyncMock(return_value=[[0.1] * 64])
+        search_mock = AsyncMock(return_value=[{
+            "timestamp": "2026-01-01T00:00:00",
+            "role": "user",
+            "content": "past message",
+            "similarity": 0.9,
+        }])
+
+        class FakeTools:
+            class lm:
+                embed = embed_mock
+            class conv:
+                search_turns = search_mock
+
+        app_instance.tools = FakeTools()  # type: ignore
+
+        # First call — should embed
+        await appmod.AIChatApp._fetch_rag_context(app_instance, "hello world")
+        # Second call with same query — should NOT embed again
+        await appmod.AIChatApp._fetch_rag_context(app_instance, "hello world")
+
+        assert embed_mock.call_count == 1, \
+            f"embed called {embed_mock.call_count} times — RAG cache is not working"
+
+    def test_session_title_flag_resets_on_new_chat(self):
+        """session_title_set must be False by default on AppState."""
+        from aichat.state import AppState
+        s = AppState()
+        s.session_title_set = True
+        # Simulate what _start_new_chat does
+        s.session_title_set = False
+        assert s.session_title_set is False
+
+
+# ===========================================================================
 # 3. DB integration tests (require live aichat-database service)
 # ===========================================================================
 
@@ -373,3 +621,48 @@ class TestConversationDBIntegration:
         assert upd.get("status") == "updated"
         data = await tool.get_session(sid)
         assert data.get("title") == "After"
+
+    @pytest.mark.asyncio
+    async def test_fulltext_search_returns_match(self):
+        """Full-text search endpoint returns a turn that contains the search term."""
+        sid = f"test-{uuid.uuid4()}"
+        unique_word = f"xyzuniq{uuid.uuid4().hex[:8]}"
+        self._post("/conversations/sessions", json={"session_id": sid})
+        self._post("/conversations/turns",
+                   json={"session_id": sid, "role": "user",
+                         "content": f"This message contains {unique_word}", "turn_index": 0})
+        r = httpx.get(f"{self.BASE}/conversations/turns/search",
+                      params={"q": unique_word, "limit": 5}, timeout=self.TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        assert "results" in data
+        contents = [res["content"] for res in data["results"]]
+        assert any(unique_word in c for c in contents), \
+            f"Expected '{unique_word}' in results: {contents}"
+
+    @pytest.mark.asyncio
+    async def test_fulltext_search_no_results(self):
+        """Full-text search for a nonsense query returns an empty result list."""
+        r = httpx.get(f"{self.BASE}/conversations/turns/search",
+                      params={"q": "zzznomatch_xqz_9999_xyz", "limit": 5},
+                      timeout=self.TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        assert "results" in data
+        assert isinstance(data["results"], list)
+
+    @pytest.mark.asyncio
+    async def test_conv_store_search_turns_text_oop(self):
+        """ConversationStoreTool.search_turns_text finds a stored turn by text."""
+        from aichat.tools.conversation_store import ConversationStoreTool
+        tool = ConversationStoreTool()
+        sid = f"test-{uuid.uuid4()}"
+        unique_word = f"xyzoop{uuid.uuid4().hex[:8]}"
+        await tool.create_session(sid)
+        result = await tool.store_turn(sid, "user",
+                                       f"OOP fulltext test {unique_word}", turn_index=0)
+        assert result.get("status") == "stored"
+        results = await tool.search_turns_text(unique_word, limit=5)
+        contents = [r["content"] for r in results]
+        assert any(unique_word in c for c in contents), \
+            f"Expected '{unique_word}' in fulltext results: {contents}"

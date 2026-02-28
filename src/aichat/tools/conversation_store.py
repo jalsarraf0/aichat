@@ -87,3 +87,14 @@ class ConversationStoreTool:
             json={"title": title},
         )
         return result if isinstance(result, dict) else {}
+
+    async def search_turns_text(self, query: str, limit: int = 8) -> list[dict]:
+        """Full-text (ILIKE) search on conversation_turns — fallback when embeddings unavailable."""
+        result = await self._request(
+            "GET",
+            "/conversations/turns/search",
+            params={"q": query, "limit": limit},
+        )
+        if isinstance(result, dict):
+            return result.get("results", [])
+        return []
