@@ -10,7 +10,9 @@ from enum import Enum
 
 from ..state import ApprovalMode
 from .browser import BrowserTool
+from .code_interpreter import CodeInterpreterTool
 from .database import DatabaseTool
+from .lm_studio import LMStudioTool
 from .memory import MemoryTool
 from .researchbox import ResearchboxTool
 from .search import WebSearchTool
@@ -124,6 +126,13 @@ class ToolName(str, Enum):
     FETCH_IMAGE = "fetch_image"
     CALL_CUSTOM_TOOL = "call_custom_tool"
     GET_ERRORS = "get_errors"
+    TTS = "tts"
+    EMBED_STORE = "embed_store"
+    EMBED_SEARCH = "embed_search"
+    CODE_RUN = "code_run"
+    SMART_SUMMARIZE = "smart_summarize"
+    IMAGE_CAPTION = "image_caption"
+    STRUCTURED_EXTRACT = "structured_extract"
 
 
 class ToolManager:
@@ -138,6 +147,10 @@ class ToolManager:
         self.search_tool = WebSearchTool(self.browser)
         # PostgreSQL-backed storage/cache (replaces rssfeed + fetch services).
         self.db = DatabaseTool()
+        # LM Studio OpenAI-compatible inference client (TTS, embeddings, chat, vision).
+        self.lm = LMStudioTool(_LM_STUDIO_URL)
+        # Sandboxed Python subprocess executor.
+        self.code = CodeInterpreterTool()
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self._calls_this_turn = 0
         # name → {description, parameters} for custom tools loaded from toolkit
@@ -920,6 +933,101 @@ class ToolManager:
     ) -> dict:
         await self._check_approval(mode, ToolName.GET_ERRORS.value, confirmer)
         return await self.db.get_errors(limit=limit, service=service or None)
+
+    # ------------------------------------------------------------------
+    # LM Studio / code interpreter tools
+    # ------------------------------------------------------------------
+
+    async def run_tts(
+        self,
+        text: str,
+        voice: str,
+        speed: float,
+        fmt: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Text-to-speech via LM Studio /v1/audio/speech. Returns audio bytes."""
+        await self._check_approval(mode, ToolName.TTS.value, confirmer)
+        audio = await self.lm.tts(text, voice=voice or "alloy", speed=speed or 1.0, fmt=fmt or "mp3")
+        return {"bytes": len(audio), "audio": audio}
+
+    async def run_embed_store(
+        self,
+        key: str,
+        content: str,
+        topic: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Embed text via LM Studio and store in DB. Returns stored key."""
+        await self._check_approval(mode, ToolName.EMBED_STORE.value, confirmer)
+        vecs = await self.lm.embed([content])
+        if not vecs:
+            return {"status": "error", "detail": "LM Studio returned no embeddings"}
+        return await self.db.store_embedding(key=key, content=content, embedding=vecs[0], topic=topic or "")
+
+    async def run_embed_search(
+        self,
+        query: str,
+        limit: int,
+        topic: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Embed query text and search DB for semantically similar documents."""
+        await self._check_approval(mode, ToolName.EMBED_SEARCH.value, confirmer)
+        vecs = await self.lm.embed([query])
+        if not vecs:
+            return {"results": [], "detail": "LM Studio returned no embeddings"}
+        return await self.db.search_by_embedding(embedding=vecs[0], limit=limit or 5, topic=topic or "")
+
+    async def run_code_run(
+        self,
+        code: str,
+        packages: list[str] | None,
+        timeout: int,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Run Python code in a sandboxed subprocess. Returns stdout/stderr/exit_code."""
+        await self._check_approval(mode, ToolName.CODE_RUN.value, confirmer)
+        return await self.code.run(code, packages=packages or None, timeout=timeout or None)
+
+    async def run_smart_summarize(
+        self,
+        content: str,
+        style: str,
+        max_words: int | None,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> str:
+        """Summarize text using LM Studio chat completions."""
+        await self._check_approval(mode, ToolName.SMART_SUMMARIZE.value, confirmer)
+        return await self.lm.summarize(content, style=style or "brief", max_words=max_words or None)
+
+    async def run_image_caption(
+        self,
+        b64: str,
+        detail_level: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> str:
+        """Describe an image using LM Studio vision model."""
+        await self._check_approval(mode, ToolName.IMAGE_CAPTION.value, confirmer)
+        return await self.lm.caption(b64, detail_level=detail_level or "detailed")
+
+    async def run_structured_extract(
+        self,
+        content: str,
+        schema_json: str,
+        instructions: str,
+        mode: ApprovalMode,
+        confirmer: Callable[[str], Awaitable[bool]] | None,
+    ) -> dict:
+        """Extract structured JSON from text using LM Studio json_object mode."""
+        await self._check_approval(mode, ToolName.STRUCTURED_EXTRACT.value, confirmer)
+        return await self.lm.extract(content, schema_json=schema_json or "", instructions=instructions or "")
 
     async def run_fetch_image(
         self,

@@ -1053,14 +1053,14 @@ class TestNewToolsAdvertised:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_40(self):
+    def test_total_tool_count_is_47(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 100, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
+        assert len(tools) == 47, f"Expected 47 tools, got {len(tools)}"
 
     def test_new_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1279,14 +1279,14 @@ class TestImageGeneration:
             assert tname in names, f"'{tname}' missing from tools/list"
 
     @skip_mcp
-    def test_total_tool_count_is_40_imggen(self):
+    def test_total_tool_count_is_47_imggen(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 201, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
+        assert len(tools) == 47, f"Expected 47 tools, got {len(tools)}"
 
     def test_gen_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1640,14 +1640,14 @@ class TestBrowserImageDownload:
     # -- MCP HTTP schema checks (skip if MCP not running) --------------------
 
     @skip_mcp
-    def test_tool_count_is_40(self):
+    def test_tool_count_is_47(self):
         r = httpx.post(
             f"{MCP_URL}/mcp",
             json={"jsonrpc": "2.0", "id": 400, "method": "tools/list", "params": {}},
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 40, f"Expected 40 tools, got {len(tools)}"
+        assert len(tools) == 47, f"Expected 47 tools, got {len(tools)}"
 
     @skip_mcp
     def test_browser_save_images_in_mcp_http_schema(self):
@@ -1975,3 +1975,232 @@ class TestImageRecognition:
         assert found, f"Stored image not found by subject search (subject={test_subject})"
         assert found[0]["phash"] == "abcdef1234567890", f"phash mismatch: {found[0]}"
         assert found[0]["quality_score"] >= 0.9 - 1e-6, f"quality_score mismatch: {found[0]}"
+
+
+# ===========================================================================
+# 26. New LM Studio tools — TTS, embeddings, code_run, summarize, caption, extract
+# ===========================================================================
+
+
+class TestNewLMStudioTools:
+    """Pure unit + source-inspection + DB + MCP integration tests for the 7
+    new LM Studio tools added in this session."""
+
+    # ── Pure unit: import checks ───────────────────────────────────────────
+
+    def test_lm_studio_tool_importable(self):
+        from aichat.tools.lm_studio import LMStudioTool
+        lm = LMStudioTool()
+        assert hasattr(lm, "tts")
+        assert hasattr(lm, "embed")
+        assert hasattr(lm, "chat")
+        assert hasattr(lm, "caption")
+        assert hasattr(lm, "summarize")
+        assert hasattr(lm, "extract")
+
+    def test_code_interpreter_importable(self):
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        ci = CodeInterpreterTool()
+        assert hasattr(ci, "run")
+        assert ci.timeout == 30
+
+    def test_cosine_similarity_function(self):
+        from aichat.tools.lm_studio import cosine_similarity
+        # Identical vectors → 1.0
+        a = [1.0, 0.0, 0.0]
+        assert abs(cosine_similarity(a, a) - 1.0) < 1e-9
+        # Orthogonal vectors → 0.0
+        b = [0.0, 1.0, 0.0]
+        assert abs(cosine_similarity(a, b)) < 1e-9
+        # Empty → 0.0
+        assert cosine_similarity([], []) == 0.0
+
+    def test_tool_name_entries_exist(self):
+        from aichat.tools.manager import ToolName
+        for expected in ("tts", "embed_store", "embed_search", "code_run",
+                         "smart_summarize", "image_caption", "structured_extract"):
+            names = {t.value for t in ToolName}
+            assert expected in names, f"ToolName.{expected.upper()} missing"
+
+    def test_lm_and_code_attrs_on_manager(self):
+        from aichat.tools.manager import ToolManager
+        from aichat.tools.lm_studio import LMStudioTool
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        mgr = ToolManager()
+        assert isinstance(mgr.lm, LMStudioTool), "ToolManager.lm must be LMStudioTool"
+        assert isinstance(mgr.code, CodeInterpreterTool), "ToolManager.code must be CodeInterpreterTool"
+
+    # ── Pure unit: CodeInterpreterTool subprocess tests ───────────────────
+
+    def test_code_interpreter_basic(self):
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        ci = CodeInterpreterTool()
+        result = asyncio.run(ci.run("print(1+1)"))
+        assert result["exit_code"] == 0, f"Expected exit 0: {result}"
+        assert "2" in result["stdout"], f"Expected '2' in stdout: {result['stdout']}"
+        assert result["error"] is None
+
+    def test_code_interpreter_timeout(self):
+        import time as _time
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        ci = CodeInterpreterTool(timeout=2)
+        t0 = _time.monotonic()
+        result = asyncio.run(ci.run("while True: pass"))
+        elapsed = _time.monotonic() - t0
+        assert result["exit_code"] == -1, f"Expected timeout exit -1: {result}"
+        assert elapsed < 5.0, f"Timeout took too long: {elapsed:.1f}s"
+
+    def test_code_interpreter_syntax_error(self):
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        ci = CodeInterpreterTool()
+        result = asyncio.run(ci.run("def f( : pass"))
+        assert result["exit_code"] != 0, f"Syntax error should give non-zero exit: {result}"
+        assert result["stderr"].strip(), f"Syntax error should produce stderr: {result}"
+
+    def test_code_interpreter_packages_stdlib(self):
+        """Requesting stdlib 'json' as a package should not error on execution."""
+        from aichat.tools.code_interpreter import CodeInterpreterTool
+        ci = CodeInterpreterTool()
+        result = asyncio.run(
+            ci.run("import json; print(json.dumps({'ok': True}))", packages=["json"])
+        )
+        assert result["exit_code"] == 0, f"Expected exit 0: {result}"
+        assert "ok" in result["stdout"]
+
+    # ── Source-inspection: new tool schemas present in docker/mcp/app.py ──
+
+    def _mcp_src(self) -> str:
+        with open("docker/mcp/app.py") as f:
+            return f.read()
+
+    def test_tts_schema_in_mcp(self):
+        assert '"tts"' in self._mcp_src() or "'tts'" in self._mcp_src(), \
+            "tts schema missing from docker/mcp/app.py"
+
+    def test_embed_store_schema_in_mcp(self):
+        assert "embed_store" in self._mcp_src(), \
+            "embed_store schema missing from docker/mcp/app.py"
+
+    def test_embed_search_schema_in_mcp(self):
+        assert "embed_search" in self._mcp_src(), \
+            "embed_search schema missing from docker/mcp/app.py"
+
+    def test_code_run_schema_in_mcp(self):
+        assert "code_run" in self._mcp_src(), \
+            "code_run schema missing from docker/mcp/app.py"
+
+    def test_smart_summarize_schema_in_mcp(self):
+        assert "smart_summarize" in self._mcp_src(), \
+            "smart_summarize schema missing from docker/mcp/app.py"
+
+    def test_image_caption_schema_in_mcp(self):
+        assert "image_caption" in self._mcp_src(), \
+            "image_caption schema missing from docker/mcp/app.py"
+
+    def test_structured_extract_schema_in_mcp(self):
+        assert "structured_extract" in self._mcp_src(), \
+            "structured_extract schema missing from docker/mcp/app.py"
+
+    # ── DB integration: embeddings endpoint ───────────────────────────────
+
+    @skip_db
+    def test_embeddings_store_endpoint(self):
+        """POST /embeddings/store returns status=stored (or updated) for a fresh key."""
+        key = f"test_embed_{uuid.uuid4().hex}"
+        embedding = [0.1] * 128
+        r = httpx.post(
+            f"{DB_URL}/embeddings/store",
+            json={"key": key, "content": "test content", "embedding": embedding,
+                  "model": "test-model", "topic": "test"},
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data.get("status") in ("stored", "updated"), f"Unexpected status: {data}"
+
+    @skip_db
+    def test_embeddings_search_endpoint_cosine(self):
+        """Store two docs, search returns the more similar one first."""
+        # Embed doc A: 1-axis vector
+        vec_a = [1.0, 0.0, 0.0] + [0.0] * 125
+        # Embed doc B: 2-axis vector
+        vec_b = [0.0, 1.0, 0.0] + [0.0] * 125
+        key_a = f"emb_a_{uuid.uuid4().hex}"
+        key_b = f"emb_b_{uuid.uuid4().hex}"
+        topic = f"test_search_{uuid.uuid4().hex[:8]}"
+
+        httpx.post(f"{DB_URL}/embeddings/store",
+                   json={"key": key_a, "content": "doc A", "embedding": vec_a, "topic": topic},
+                   timeout=10)
+        httpx.post(f"{DB_URL}/embeddings/store",
+                   json={"key": key_b, "content": "doc B", "embedding": vec_b, "topic": topic},
+                   timeout=10)
+
+        # Query with vec_a — doc A should rank higher
+        r = httpx.post(
+            f"{DB_URL}/embeddings/search",
+            json={"embedding": vec_a, "limit": 5, "topic": topic},
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        results = r.json().get("results", [])
+        assert results, "Expected at least one result"
+        assert results[0]["key"] == key_a, \
+            f"Expected key_a as top result, got {results[0]['key']}"
+
+    # ── MCP integration: end-to-end tool calls ─────────────────────────────
+
+    @skip_mcp
+    def test_mcp_code_run(self):
+        """code_run tool should execute Python and return the output."""
+        blocks = _mcp_content("code_run", {"code": 'print("hello_mcp_code_run")'})
+        text = " ".join(b.get("text", "") for b in blocks)
+        assert "hello_mcp_code_run" in text, f"Expected stdout in response: {text}"
+
+    @skip_mcp
+    def test_mcp_code_run_missing_code_returns_error(self):
+        blocks = _mcp_content("code_run", {})
+        text = " ".join(b.get("text", "") for b in blocks)
+        assert "code" in text.lower() and "required" in text.lower(), \
+            f"Expected validation error: {text}"
+
+    @skip_mcp
+    def test_mcp_smart_summarize(self):
+        """smart_summarize should return a non-empty response (even if model isn't loaded)."""
+        content = (
+            "Python is a high-level, general-purpose programming language. "
+            "Its design philosophy emphasizes code readability. "
+            "It supports multiple programming paradigms including structured, "
+            "object-oriented, and functional programming."
+        )
+        blocks = _mcp_content("smart_summarize", {"content": content, "style": "brief"})
+        text = " ".join(b.get("text", "") for b in blocks)
+        # Either the summary or a helpful error about loading a model
+        assert text.strip(), f"Expected non-empty response: {text}"
+
+    @skip_mcp
+    def test_mcp_tts_missing_text_returns_error(self):
+        blocks = _mcp_content("tts", {})
+        text = " ".join(b.get("text", "") for b in blocks)
+        assert "text" in text.lower() and "required" in text.lower(), \
+            f"Expected validation error: {text}"
+
+    @skip_mcp
+    def test_mcp_embed_store_missing_key_returns_error(self):
+        blocks = _mcp_content("embed_store", {"content": "some text"})
+        text = " ".join(b.get("text", "") for b in blocks)
+        assert "key" in text.lower() and "required" in text.lower(), \
+            f"Expected validation error: {text}"
+
+    @skip_mcp
+    def test_mcp_new_7_tools_in_tools_list(self):
+        """All 7 new tools must appear in the MCP tools/list response."""
+        r = httpx.post(
+            f"{MCP_URL}/mcp",
+            json={"jsonrpc": "2.0", "id": 500, "method": "tools/list", "params": {}},
+            timeout=10,
+        )
+        names = {t["name"] for t in r.json()["result"]["tools"]}
+        for tname in ("tts", "embed_store", "embed_search", "code_run",
+                      "smart_summarize", "image_caption", "structured_extract"):
+            assert tname in names, f"'{tname}' missing from MCP tools/list"

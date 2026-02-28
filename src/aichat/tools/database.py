@@ -131,3 +131,31 @@ class DatabaseTool:
         if service:
             params["service"] = service
         return await self._request("GET", "/errors/recent", params=params)
+
+    async def store_embedding(
+        self,
+        key: str,
+        content: str,
+        embedding: list,
+        model: str = "",
+        topic: str = "",
+    ) -> dict:
+        """Store a text embedding (float array) keyed by *key* (URL or hash)."""
+        return await self._request(
+            "POST",
+            "/embeddings/store",
+            json={"key": key, "content": content, "embedding": embedding,
+                  "model": model, "topic": topic},
+        )
+
+    async def search_by_embedding(
+        self,
+        embedding: list,
+        limit: int = 5,
+        topic: str = "",
+    ) -> dict:
+        """Return the top-N most semantically similar stored documents."""
+        body: dict = {"embedding": embedding, "limit": limit}
+        if topic:
+            body["topic"] = topic
+        return await self._request("POST", "/embeddings/search", json=body)
