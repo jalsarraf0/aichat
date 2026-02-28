@@ -52,6 +52,12 @@ from .ui.keybind_bar import KeybindBar
 from .ui.keybinds import binding_list, render_keybinds
 from .ui.modals import ChoiceModal, PersonalityAddModal, SearchModal, SettingsModal
 
+# ---------------------------------------------------------------------------
+# Contextual compaction constants
+# ---------------------------------------------------------------------------
+_COMPACT_MIN_MSGS: int = 8        # min visible messages before auto-compact triggers
+_COMPACT_KEEP_RATIO: float = 0.5  # compact oldest 50%, keep newest 50%
+
 
 class ChatMessage(Widget):
     """A single chat message bubble with a speaker label and markdown body."""
@@ -111,6 +117,9 @@ class AIChatApp(App):
         self._last_refresh_ts: float = 0.0
         self._rag_context_query: str = ""
         self._rag_context_cache: str = ""
+        self._compact_summary: str = ""    # LLM-generated summary of compacted turns
+        self._compact_from_idx: int = 0    # messages[:idx] are covered by _compact_summary
+        self._compact_pending: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -185,6 +194,7 @@ class AIChatApp(App):
         ctx_pct = min(100, int(used_tokens * 100 // ctx_tokens))
         ctx_str = f" | CTX:{ctx_pct}%" if ctx_pct > 20 else ""
         rag_str = " | RAG:ON" if self.state.rag_context_enabled else " | RAG:OFF"
+        cmp_str = f" | CMP:{self._compact_from_idx}" if self._compact_from_idx > 0 else ""
         model_line.update(
             f"model={self.state.model} | base={self.state.base_url} | server={'UP' if up else 'DOWN'}"
         )
@@ -198,6 +208,7 @@ class AIChatApp(App):
             + f" | cmd={self.state.cwd}"
             + ctx_str
             + rag_str
+            + cmp_str
         )
 
     async def action_send(self) -> None:
@@ -460,6 +471,9 @@ class AIChatApp(App):
                 return
             if text.startswith("/stats"):
                 await self._handle_stats_command()
+                return
+            if text.startswith("/compact"):
+                await self._handle_compact_command(text[8:].strip())
                 return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
@@ -951,34 +965,68 @@ class AIChatApp(App):
         self._finalize_assistant_response(content)
 
     async def _llm_messages(self) -> list[dict[str, object]]:
-        system_msg: dict[str, object] = {"role": "system", "content": self.system_prompt}
-        history = [m.as_chat_dict() for m in self.messages]
+        def _est(text: str) -> int:
+            return max(1, len(text) // 4) + 4  # chars/4 + per-message overhead
+
+        # Build system content (compact summary appended when available)
+        system_content = self.system_prompt
+        if self._compact_summary:
+            system_content += (
+                "\n\n[Earlier conversation summary]\n"
+                + self._compact_summary
+                + "\n[/summary]"
+            )
+
+        # History from uncompacted portion only
+        history = [m.as_chat_dict() for m in self.messages[self._compact_from_idx:]]
 
         ctx = self._context_length
         reserve = self._max_response_tokens
-        if not ctx or not reserve or ctx <= reserve:
-            trimmed = history
-        else:
-            # Token budget for conversation history (rough: 1 token ≈ 4 chars)
-            def _est(text: str) -> int:
-                return max(1, len(text) // 4) + 4  # chars/4 + per-message overhead
+        if ctx and reserve and ctx > reserve:
+            budget = ctx - reserve - _est(system_content)
+            total_tokens = sum(_est(str(msg.get("content", "") or "")) for msg in history)
 
-            budget = ctx - reserve - _est(self.system_prompt)
+            # Auto-compaction when trimming would be needed
+            if (
+                total_tokens > budget
+                and self.state.compaction_enabled
+                and not self._compact_pending
+                and len(self.messages) - self._compact_from_idx >= _COMPACT_MIN_MSGS
+            ):
+                await self._maybe_compact()
+                # Rebuild after potential compaction
+                system_content = self.system_prompt
+                if self._compact_summary:
+                    system_content += (
+                        "\n\n[Earlier conversation summary]\n"
+                        + self._compact_summary
+                        + "\n[/summary]"
+                    )
+                history = [m.as_chat_dict() for m in self.messages[self._compact_from_idx:]]
+                budget = ctx - reserve - _est(system_content)
 
-            trimmed = []
+            # Standard trimming fallback (handles disabled compaction or insufficient compaction)
+            trimmed: list[dict[str, object]] = []
             used = 0
             for msg in reversed(history):
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     tokens = _est(content)
                 elif isinstance(content, list):
-                    tokens = sum(_est(str(b.get("text", b) if isinstance(b, dict) else b)) for b in content) + 4
+                    tokens = sum(
+                        _est(str(b.get("text", b) if isinstance(b, dict) else b))
+                        for b in content
+                    ) + 4
                 else:
                     tokens = 50
                 if used + tokens > budget and trimmed:
                     break  # oldest messages dropped to stay within context budget
                 trimmed.insert(0, msg)
                 used += tokens
+        else:
+            trimmed = history
+
+        system_msg: dict[str, object] = {"role": "system", "content": system_content}
 
         # RAG: inject semantically relevant past turns into the system prompt
         if self.state.rag_context_enabled and self.state.session_id:
@@ -986,7 +1034,7 @@ class AIChatApp(App):
             if last_user:
                 rag = await self._fetch_rag_context(last_user.content)
                 if rag:
-                    system_msg = {"role": "system", "content": self.system_prompt + rag}
+                    system_msg = {"role": "system", "content": system_content + rag}
 
         return [system_msg, *trimmed]
 
@@ -1206,6 +1254,9 @@ class AIChatApp(App):
         self.state.session_title_set = False
         self._rag_context_query = ""
         self._rag_context_cache = ""
+        self._compact_summary = ""
+        self._compact_from_idx = 0
+        self._compact_pending = False
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
@@ -1413,6 +1464,109 @@ class AIChatApp(App):
             )
         except Exception:
             pass
+
+    async def _run_compact(self, to_compact: "list[Message]", n_advance: int) -> None:
+        """Summarize *to_compact* messages and advance _compact_from_idx by *n_advance*.
+
+        Fail-open: on any exception (LM Studio offline, etc.) state is unchanged.
+        """
+        conv_text = "\n".join(
+            f"{m.role.upper()}: {(m.full_content or m.content)[:400]}"
+            for m in to_compact
+        )
+        self._compact_pending = True
+        try:
+            summary = await self.tools.lm.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a conversation compactor. "
+                            "Summarize the following conversation turns concisely, "
+                            "preserving key facts, decisions, context, code snippets, "
+                            "and user intent. Be brief (under 300 words). "
+                            "Use bullet points."
+                        ),
+                    },
+                    {"role": "user", "content": conv_text},
+                ],
+                max_tokens=400,
+                temperature=0.2,
+            )
+            if summary and summary.strip():
+                if self._compact_summary:
+                    self._compact_summary = (
+                        self._compact_summary.rstrip() + "\n\n" + summary.strip()
+                    )
+                else:
+                    self._compact_summary = summary.strip()
+                self._compact_from_idx += n_advance
+                self._tool_log(
+                    f"[compact] {n_advance} turns → {len(summary.split())} word summary"
+                )
+        except Exception:
+            pass  # fail-open — normal trimming takes over
+        finally:
+            self._compact_pending = False
+
+    async def _maybe_compact(self) -> None:
+        """Auto-triggered compaction: compact oldest 50% of visible messages."""
+        if self._compact_pending or not self.state.compaction_enabled:
+            return
+        visible = self.messages[self._compact_from_idx:]
+        n = len(visible)
+        if n < _COMPACT_MIN_MSGS:
+            return
+        n_compact = max(4, int(n * _COMPACT_KEEP_RATIO))
+        to_compact = [m for m in visible[:n_compact] if m.role in ("user", "assistant")]
+        if len(to_compact) < 4:
+            return
+        await self._run_compact(to_compact, n_compact)
+
+    async def _handle_compact_command(self, arg: str) -> None:
+        """/compact [on|off|now] — control contextual compaction."""
+        if arg.lower() in ("off", "0", "false", "no"):
+            self.state.compaction_enabled = False
+            self._write_transcript("Assistant", "Contextual compaction: **OFF**")
+            self._last_status_ts = 0.0
+            await self.update_status()
+            return
+        if arg.lower() in ("on", "1", "true", "yes"):
+            self.state.compaction_enabled = True
+            self._write_transcript("Assistant", "Contextual compaction: **ON**")
+            self._last_status_ts = 0.0
+            await self.update_status()
+            return
+        # /compact or /compact now — force immediate compaction
+        visible = self.messages[self._compact_from_idx:]
+        n = len(visible)
+        if n < 4:
+            self._write_transcript("Assistant", "Not enough messages to compact (need ≥4).")
+            return
+        if self._compact_pending:
+            self._write_transcript("Assistant", "Compaction already in progress.")
+            return
+        n_compact = max(2, n // 2)
+        to_compact = [m for m in visible[:n_compact] if m.role in ("user", "assistant")]
+        if not to_compact:
+            self._write_transcript("Assistant", "No user/assistant messages to compact.")
+            return
+        before = self._compact_from_idx
+        await self._run_compact(to_compact, n_compact)
+        if self._compact_from_idx > before:
+            compacted = self._compact_from_idx - before
+            self._last_status_ts = 0.0
+            await self.update_status()
+            self._write_transcript(
+                "Assistant",
+                f"Compacted **{compacted}** turns into summary. "
+                "Context freed; summary injected into system prompt.",
+            )
+        else:
+            self._write_transcript(
+                "Assistant",
+                "Compaction failed (LM Studio unavailable or too few messages).",
+            )
 
     async def _rss_store_topic(self, topic: str) -> None:
         """Discover feeds for a topic and store their articles in PostgreSQL."""
@@ -1776,6 +1930,7 @@ class AIChatApp(App):
             "- `/shell [cmd]` · `/endpoint <url>`\n"
             "- `/persona [id]` · `/concise` · `/verbose`\n"
             "- `/tool list|delete <name>`\n"
+            "- `/compact [on|off|now]` — contextual compaction (summarize old turns)\n"
             "- `/help` — this message\n"
         )
         self._write_transcript("Assistant", help_text)
