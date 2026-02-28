@@ -104,6 +104,11 @@ class AIChatApp(App):
         )
         self._context_length: int = int(cfg.get("context_length", 35063))
         self._max_response_tokens: int = int(cfg.get("max_response_tokens", 4096))
+        self._compact_threshold_pct: int = int(cfg.get("compact_threshold_pct", 95))
+        self._compact_min_msgs: int = int(cfg.get("compact_min_msgs", 8))
+        self._compact_keep_ratio: float = float(cfg.get("compact_keep_ratio", 0.5))
+        self._compact_tool_turns: bool = bool(cfg.get("compact_tool_turns", True))
+        self.state.compaction_enabled = bool(cfg.get("compaction_enabled", True))
         self.client = LLMClient(self.state.base_url)
         self.tools = ToolManager(max_tool_calls_per_turn=self.state.max_tool_calls_per_turn)
         self.transcript_store = TranscriptStore()
@@ -178,6 +183,21 @@ class AIChatApp(App):
 
     _STATUS_CACHE_TTL = 4.0  # seconds between network health-check polls
 
+    def _context_pct(self) -> int:
+        """Return context usage % from _compact_from_idx onward (0-100).
+
+        Uses only uncompacted history + compact summary so the number reflects
+        what is actually sent to the LLM.
+        """
+        ctx = self._context_length or 35063
+        reserve = self._max_response_tokens or 0
+        budget = max(1, ctx - reserve)
+        summary_tokens = len(self._compact_summary) // 4 if self._compact_summary else 0
+        history_tokens = sum(
+            len(m.content) // 4 for m in self.messages[self._compact_from_idx:]
+        )
+        return min(100, int((summary_tokens + history_tokens) * 100 // budget))
+
     async def update_status(self) -> None:
         now = time.monotonic()
         if now - self._last_status_ts < self._STATUS_CACHE_TTL:
@@ -188,10 +208,7 @@ class AIChatApp(App):
         status_line = self._safe_query_one("#status", Static)
         if model_line is None or status_line is None:
             return
-        # Rough context-window usage estimate (1 token ≈ 4 chars)
-        used_tokens = sum(len(m.content) // 4 for m in self.messages)
-        ctx_tokens = self._context_length or 35063
-        ctx_pct = min(100, int(used_tokens * 100 // ctx_tokens))
+        ctx_pct = self._context_pct()
         ctx_str = f" | CTX:{ctx_pct}%" if ctx_pct > 20 else ""
         rag_str = " | RAG:ON" if self.state.rag_context_enabled else " | RAG:OFF"
         cmp_str = f" | CMP:{self._compact_from_idx}" if self._compact_from_idx > 0 else ""
@@ -986,12 +1003,12 @@ class AIChatApp(App):
             budget = ctx - reserve - _est(system_content)
             total_tokens = sum(_est(str(msg.get("content", "") or "")) for msg in history)
 
-            # Auto-compaction when trimming would be needed
+            # Auto-compaction when approaching context threshold
             if (
-                total_tokens > budget
+                total_tokens > budget * self._compact_threshold_pct / 100
                 and self.state.compaction_enabled
                 and not self._compact_pending
-                and len(self.messages) - self._compact_from_idx >= _COMPACT_MIN_MSGS
+                and len(self.messages) - self._compact_from_idx >= self._compact_min_msgs
             ):
                 await self._maybe_compact()
                 # Rebuild after potential compaction
@@ -1131,6 +1148,14 @@ class AIChatApp(App):
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
         asyncio.create_task(self._auto_save_turn(assistant, len(self.messages) - 1))
+        # Proactive background compaction: warm up summary before hitting the threshold
+        if (
+            self._context_pct() >= 70
+            and self.state.compaction_enabled
+            and not self._compact_pending
+            and len(self.messages) - self._compact_from_idx >= self._compact_min_msgs
+        ):
+            asyncio.create_task(self._maybe_compact())
         # Generate a session title after ≥3 user turns — only once per session
         user_count = sum(1 for m in self.messages if m.role == "user")
         if user_count >= 3 and not self.state.session_title_set:
@@ -1404,9 +1429,20 @@ class AIChatApp(App):
                 self.messages.append(msg)
                 self._write_transcript(t["role"].capitalize(), t["content"])
             self.state.session_id = match["session_id"]  # continue in same session
+            # Restore compaction overlay from persisted DB state
+            self._compact_summary = data.get("compact_summary", "") or ""
+            self._compact_from_idx = int(data.get("compact_from_idx", 0) or 0)
+            self._compact_pending = False
+            self._last_status_ts = 0.0
+            await self.update_status()
+            cmp_note = (
+                f" (compact overlay: {self._compact_from_idx} turns summarized)"
+                if self._compact_from_idx > 0
+                else ""
+            )
             self._write_transcript(
                 "Assistant",
-                f"Resumed session `{match['session_id'][:8]}…` — {len(turns)} turns loaded.",
+                f"Resumed session `{match['session_id'][:8]}…` — {len(turns)} turns loaded{cmp_note}.",
             )
         except Exception as exc:
             self._write_transcript("Assistant", f"Resume error: {exc}")
@@ -1469,41 +1505,69 @@ class AIChatApp(App):
         """Summarize *to_compact* messages and advance _compact_from_idx by *n_advance*.
 
         Fail-open: on any exception (LM Studio offline, etc.) state is unchanged.
+        Meta-compaction: when a prior summary exists, merge it with new turns into a
+        single fresh summary (keeps summary size bounded across multiple compactions).
         """
-        conv_text = "\n".join(
-            f"{m.role.upper()}: {(m.full_content or m.content)[:400]}"
-            for m in to_compact
-        )
+        valid_roles: set[str] = {"user", "assistant"}
+        if self._compact_tool_turns:
+            valid_roles.add("tool")
+
+        def _fmt(m: "Message") -> str:
+            body = (m.full_content or m.content)[:300 if m.role == "tool" else 400]
+            return f"{m.role.upper()}: {body}"
+
+        conv_text = "\n".join(_fmt(m) for m in to_compact if m.role in valid_roles)
+        if not conv_text.strip():
+            return
+
         self._compact_pending = True
         try:
+            if self._compact_summary:
+                # Meta-compaction: merge old summary + new turns into a single fresh summary
+                sys_txt = (
+                    "You are a conversation compactor. "
+                    "Merge the PREVIOUS SUMMARY with the NEW TURNS into a single "
+                    "concise summary. Preserve all key facts, decisions, context, "
+                    "code snippets, and user intent. Output under 400 words. "
+                    "Use bullet points."
+                )
+                user_txt = (
+                    f"PREVIOUS SUMMARY:\n{self._compact_summary}\n\n"
+                    f"NEW TURNS:\n{conv_text}"
+                )
+            else:
+                sys_txt = (
+                    "You are a conversation compactor. "
+                    "Summarize the following conversation turns concisely, "
+                    "preserving key facts, decisions, context, code snippets, "
+                    "and user intent. Be brief (under 300 words). "
+                    "Use bullet points."
+                )
+                user_txt = conv_text
+
             summary = await self.tools.lm.chat(
                 [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a conversation compactor. "
-                            "Summarize the following conversation turns concisely, "
-                            "preserving key facts, decisions, context, code snippets, "
-                            "and user intent. Be brief (under 300 words). "
-                            "Use bullet points."
-                        ),
-                    },
-                    {"role": "user", "content": conv_text},
+                    {"role": "system", "content": sys_txt},
+                    {"role": "user", "content": user_txt},
                 ],
                 max_tokens=400,
                 temperature=0.2,
             )
             if summary and summary.strip():
-                if self._compact_summary:
-                    self._compact_summary = (
-                        self._compact_summary.rstrip() + "\n\n" + summary.strip()
-                    )
-                else:
-                    self._compact_summary = summary.strip()
+                self._compact_summary = summary.strip()  # always replace (meta-compact)
                 self._compact_from_idx += n_advance
                 self._tool_log(
                     f"[compact] {n_advance} turns → {len(summary.split())} word summary"
                 )
+                # Persist compact state to DB (fire-and-forget, fail-open)
+                if self.state.session_id:
+                    asyncio.create_task(
+                        self.tools.conv.update_compact_state(
+                            self.state.session_id,
+                            self._compact_summary,
+                            self._compact_from_idx,
+                        )
+                    )
         except Exception:
             pass  # fail-open — normal trimming takes over
         finally:
@@ -1515,27 +1579,48 @@ class AIChatApp(App):
             return
         visible = self.messages[self._compact_from_idx:]
         n = len(visible)
-        if n < _COMPACT_MIN_MSGS:
+        if n < self._compact_min_msgs:
             return
-        n_compact = max(4, int(n * _COMPACT_KEEP_RATIO))
+        n_compact = max(4, int(n * self._compact_keep_ratio))
         to_compact = [m for m in visible[:n_compact] if m.role in ("user", "assistant")]
         if len(to_compact) < 4:
             return
         await self._run_compact(to_compact, n_compact)
 
     async def _handle_compact_command(self, arg: str) -> None:
-        """/compact [on|off|now] — control contextual compaction."""
+        """/compact [on|off|now|status] — control contextual compaction."""
+        if arg.lower() == "status":
+            if self._compact_summary:
+                self._write_transcript(
+                    "Assistant",
+                    f"**Compaction active** — {self._compact_from_idx} turns summarized.\n\n"
+                    f"**Current summary:**\n{self._compact_summary}",
+                )
+            else:
+                self._write_transcript(
+                    "Assistant",
+                    "No active compaction summary. Context is uncompacted.",
+                )
+            return
         if arg.lower() in ("off", "0", "false", "no"):
             self.state.compaction_enabled = False
             self._write_transcript("Assistant", "Contextual compaction: **OFF**")
             self._last_status_ts = 0.0
             await self.update_status()
+            from .config import load_config, save_config as _save_cfg
+            _cfg = dict(load_config())
+            _cfg["compaction_enabled"] = False
+            _save_cfg(_cfg)
             return
         if arg.lower() in ("on", "1", "true", "yes"):
             self.state.compaction_enabled = True
             self._write_transcript("Assistant", "Contextual compaction: **ON**")
             self._last_status_ts = 0.0
             await self.update_status()
+            from .config import load_config, save_config as _save_cfg
+            _cfg = dict(load_config())
+            _cfg["compaction_enabled"] = True
+            _save_cfg(_cfg)
             return
         # /compact or /compact now — force immediate compaction
         visible = self.messages[self._compact_from_idx:]
@@ -1930,7 +2015,7 @@ class AIChatApp(App):
             "- `/shell [cmd]` · `/endpoint <url>`\n"
             "- `/persona [id]` · `/concise` · `/verbose`\n"
             "- `/tool list|delete <name>`\n"
-            "- `/compact [on|off|now]` — contextual compaction (summarize old turns)\n"
+            "- `/compact [on|off|now|status]` — contextual compaction (summarize old turns)\n"
             "- `/help` — this message\n"
         )
         self._write_transcript("Assistant", help_text)

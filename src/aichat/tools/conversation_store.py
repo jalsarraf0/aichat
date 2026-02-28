@@ -88,6 +88,17 @@ class ConversationStoreTool:
         )
         return result if isinstance(result, dict) else {}
 
+    async def update_compact_state(
+        self, session_id: str, compact_summary: str, compact_from_idx: int
+    ) -> dict:
+        """Persist compaction overlay state for a session (fail-open)."""
+        result = await self._request(
+            "PATCH",
+            f"/conversations/sessions/{session_id}/compact",
+            json={"compact_summary": compact_summary, "compact_from_idx": compact_from_idx},
+        )
+        return result if isinstance(result, dict) else {}
+
     async def search_turns_text(self, query: str, limit: int = 8) -> list[dict]:
         """Full-text (ILIKE) search on conversation_turns — fallback when embeddings unavailable."""
         result = await self._request(
