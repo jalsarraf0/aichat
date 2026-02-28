@@ -125,6 +125,11 @@ class AIChatApp(App):
         self._compact_summary: str = ""    # LLM-generated summary of compacted turns
         self._compact_from_idx: int = 0    # messages[:idx] are covered by _compact_summary
         self._compact_pending: bool = False
+        self._compact_model: str = str(cfg.get("compact_model", ""))
+        self._tool_result_max_chars: int = int(cfg.get("tool_result_max_chars", 2000))
+        self._rag_recency_days: float = float(cfg.get("rag_recency_days", 30.0))
+        self._compact_events: list[dict] = []   # history of compaction events this session
+        self._ctx_history: list[int] = []       # rolling CTX% readings (last 20)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -183,6 +188,32 @@ class AIChatApp(App):
 
     _STATUS_CACHE_TTL = 4.0  # seconds between network health-check polls
 
+    def _effective_threshold_pct(self) -> int:
+        """Scale compact threshold: 80% for ≤8k ctx, up to _compact_threshold_pct for ≥128k.
+
+        Small-context models need to compact sooner; large-context models can wait longer.
+        Uses log-linear interpolation between 8k and 128k.
+        """
+        import math
+        ctx = self._context_length or 35063
+        lo_ctx, hi_ctx = 8192, 131072
+        lo_thr, hi_thr = 80, self._compact_threshold_pct
+        if ctx <= lo_ctx:
+            return lo_thr
+        if ctx >= hi_ctx:
+            return hi_thr
+        t = (math.log2(ctx) - math.log2(lo_ctx)) / (math.log2(hi_ctx) - math.log2(lo_ctx))
+        return int(lo_thr + t * (hi_thr - lo_thr))
+
+    def _ctx_sparkline(self) -> str:
+        """Return ASCII sparkline string of recent CTX% history (last 20 readings)."""
+        bars = "▁▂▃▄▅▆▇█"
+        if not self._ctx_history:
+            return "(no data yet)"
+        mx = max(self._ctx_history) or 1
+        spark = "".join(bars[min(7, int(v * 8 // (mx + 1)))] for v in self._ctx_history)
+        return f"`{spark}` ({len(self._ctx_history)} readings, peak {mx}%)"
+
     def _context_pct(self) -> int:
         """Return context usage % from _compact_from_idx onward (0-100).
 
@@ -196,7 +227,10 @@ class AIChatApp(App):
         history_tokens = sum(
             len(m.content) // 4 for m in self.messages[self._compact_from_idx:]
         )
-        return min(100, int((summary_tokens + history_tokens) * 100 // budget))
+        pct = min(100, int((summary_tokens + history_tokens) * 100 // budget))
+        if not self._ctx_history or self._ctx_history[-1] != pct:
+            self._ctx_history = (self._ctx_history + [pct])[-20:]
+        return pct
 
     async def update_status(self) -> None:
         now = time.monotonic()
@@ -491,6 +525,19 @@ class AIChatApp(App):
                 return
             if text.startswith("/compact"):
                 await self._handle_compact_command(text[8:].strip())
+                return
+            if text.startswith("/fork"):
+                await self._handle_fork_command()
+                return
+            if text.startswith("/ctx"):
+                arg = text[4:].strip()
+                if arg in ("graph", ""):
+                    self._write_transcript(
+                        "Assistant",
+                        f"**CTX history:** {self._ctx_sparkline()}\n\nCurrent: **{self._context_pct()}%**",
+                    )
+                else:
+                    self._write_transcript("Assistant", "Usage: /ctx  or  /ctx graph")
                 return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
@@ -1003,9 +1050,9 @@ class AIChatApp(App):
             budget = ctx - reserve - _est(system_content)
             total_tokens = sum(_est(str(msg.get("content", "") or "")) for msg in history)
 
-            # Auto-compaction when approaching context threshold
+            # Auto-compaction when approaching context threshold (adaptive per ctx size)
             if (
-                total_tokens > budget * self._compact_threshold_pct / 100
+                total_tokens > budget * self._effective_threshold_pct() / 100
                 and self.state.compaction_enabled
                 and not self._compact_pending
                 and len(self.messages) - self._compact_from_idx >= self._compact_min_msgs
@@ -1074,15 +1121,29 @@ class AIChatApp(App):
                 return ""
             lines = ["\n\n---\n**Past context (from earlier sessions):**"]
             any_relevant = False
+            import math as _math
+            from datetime import datetime as _dt, timezone as _tz
             for r in results:
-                if r.get("similarity", 0) < 0.3:
+                sim = r.get("similarity", 0)
+                if sim < 0.25:
+                    continue
+                # Date-weighted: score = sim * exp(-age_days / rag_recency_days)
+                ts_str = r.get("timestamp", "")
+                age_days = 0.0
+                if ts_str:
+                    try:
+                        ts_dt = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        age_days = (_dt.now(_tz.utc) - ts_dt).total_seconds() / 86400
+                    except Exception:
+                        pass
+                weighted = sim * _math.exp(-age_days / max(1.0, self._rag_recency_days))
+                if weighted < 0.2:
                     continue
                 any_relevant = True
-                ts = r.get("timestamp", "")[:10]
+                ts_label = ts_str[:10]
                 role = r.get("role", "")
                 snippet = r.get("content", "")[:200].replace("\n", " ")
-                sim = r.get("similarity", 0)
-                lines.append(f"> [{ts}] {role} (sim={sim:.2f}): {snippet}")
+                lines.append(f"> [{ts_label}] {role} (w={weighted:.2f}): {snippet}")
             if not any_relevant:
                 self._rag_context_query = query
                 self._rag_context_cache = ""
@@ -1150,7 +1211,7 @@ class AIChatApp(App):
         asyncio.create_task(self._auto_save_turn(assistant, len(self.messages) - 1))
         # Proactive background compaction: warm up summary before hitting the threshold
         if (
-            self._context_pct() >= 70
+            self._context_pct() >= max(60, self._effective_threshold_pct() - 20)
             and self.state.compaction_enabled
             and not self._compact_pending
             and len(self.messages) - self._compact_from_idx >= self._compact_min_msgs
@@ -1197,7 +1258,7 @@ class AIChatApp(App):
             payload = result.output if result.ok else (result.error or "Tool failed")
             tool_msg = Message(
                 "tool",
-                payload[:4000],
+                payload[:self._tool_result_max_chars],
                 full_content=payload,
                 metadata={"tool_call_id": result.call.call_id},
             )
@@ -1432,6 +1493,13 @@ class AIChatApp(App):
             # Restore compaction overlay from persisted DB state
             self._compact_summary = data.get("compact_summary", "") or ""
             self._compact_from_idx = int(data.get("compact_from_idx", 0) or 0)
+            # Integrity check: idx must not exceed actual turn count
+            if self._compact_from_idx > len(turns):
+                self._tool_log(
+                    f"[compact] integrity: idx {self._compact_from_idx} > {len(turns)} turns → reset"
+                )
+                self._compact_summary = ""
+                self._compact_from_idx = 0
             self._compact_pending = False
             self._last_status_ts = 0.0
             await self.update_status()
@@ -1474,6 +1542,22 @@ class AIChatApp(App):
             )
         except Exception as exc:
             self._write_transcript("Assistant", f"Stats error: {exc}")
+
+    async def _handle_fork_command(self) -> None:
+        """/fork — start a new chat, pre-seeding compact summary from the current session."""
+        summary = self._compact_summary
+        turn_count = len(self.messages)
+        await self.action_new_chat()
+        if summary:
+            self._compact_summary = f"[Forked from {turn_count}-turn session]\n\n{summary}"
+            self._compact_from_idx = 0
+            self._write_transcript(
+                "Assistant",
+                f"Forked — {turn_count}-turn session context pre-loaded. "
+                "The compaction summary from the previous session is active.",
+            )
+        else:
+            self._write_transcript("Assistant", "Forked — new session started (no prior summary).")
 
     async def _maybe_resume_last_session(self) -> None:
         """On startup, hint (via notify toast) if a recent session exists (< 2 hours old)."""
@@ -1520,6 +1604,16 @@ class AIChatApp(App):
         if not conv_text.strip():
             return
 
+        # Persona-aware compaction prompt
+        persona_name = next(
+            (p.get("name", "") for p in self.personalities
+             if p.get("id") == self.state.personality_id), ""
+        )
+        persona_note = (
+            f" You are compacting a conversation with persona '{persona_name}'."
+            if persona_name else ""
+        )
+
         self._compact_pending = True
         try:
             if self._compact_summary:
@@ -1529,7 +1623,7 @@ class AIChatApp(App):
                     "Merge the PREVIOUS SUMMARY with the NEW TURNS into a single "
                     "concise summary. Preserve all key facts, decisions, context, "
                     "code snippets, and user intent. Output under 400 words. "
-                    "Use bullet points."
+                    f"Use bullet points.{persona_note}"
                 )
                 user_txt = (
                     f"PREVIOUS SUMMARY:\n{self._compact_summary}\n\n"
@@ -1541,11 +1635,14 @@ class AIChatApp(App):
                     "Summarize the following conversation turns concisely, "
                     "preserving key facts, decisions, context, code snippets, "
                     "and user intent. Be brief (under 300 words). "
-                    "Use bullet points."
+                    f"Use bullet points.{persona_note}"
                 )
                 user_txt = conv_text
 
-            summary = await self.tools.lm.chat(
+            # Use dedicated compact_model if configured, else fall back to main LM
+            from .tools.lm_studio import LMStudioTool as _LMT
+            _lm = _LMT(self.tools.lm.base_url, self._compact_model) if self._compact_model else self.tools.lm
+            summary = await _lm.chat(
                 [
                     {"role": "system", "content": sys_txt},
                     {"role": "user", "content": user_txt},
@@ -1559,6 +1656,13 @@ class AIChatApp(App):
                 self._tool_log(
                     f"[compact] {n_advance} turns → {len(summary.split())} word summary"
                 )
+                # Track compaction event
+                from datetime import timezone as _tz
+                self._compact_events.append({
+                    "time": datetime.now(_tz.utc).isoformat(timespec="seconds"),
+                    "n_turns": n_advance,
+                    "words": len(summary.split()),
+                })
                 # Persist compact state to DB (fire-and-forget, fail-open)
                 if self.state.session_id:
                     asyncio.create_task(
@@ -1582,13 +1686,51 @@ class AIChatApp(App):
         if n < self._compact_min_msgs:
             return
         n_compact = max(4, int(n * self._compact_keep_ratio))
-        to_compact = [m for m in visible[:n_compact] if m.role in ("user", "assistant")]
+
+        # Differential compaction: prefer complete user→assistant pairs
+        pairs: list[Message] = []
+        i = 0
+        window = visible[:n_compact]
+        while i < len(window) - 1:
+            if window[i].role == "user" and window[i + 1].role == "assistant":
+                pairs.extend([window[i], window[i + 1]])
+                i += 2
+            else:
+                i += 1
+        to_compact = pairs if len(pairs) >= 4 else [m for m in window if m.role in ("user", "assistant")]
         if len(to_compact) < 4:
             return
         await self._run_compact(to_compact, n_compact)
 
     async def _handle_compact_command(self, arg: str) -> None:
-        """/compact [on|off|now|status] — control contextual compaction."""
+        """/compact [on|off|now|status|dry|history] — control contextual compaction."""
+        if arg.lower() == "dry":
+            visible = self.messages[self._compact_from_idx:]
+            n = len(visible)
+            if n < 4:
+                self._write_transcript("Assistant", "Too few messages to compact (need ≥4).")
+                return
+            n_compact = max(2, n // 2)
+            chars = sum(len(m.content) for m in visible[:n_compact])
+            tokens = chars // 4
+            budget = max(1, (self._context_length or 35063) - (self._max_response_tokens or 0))
+            pct_freed = min(100, int(tokens * 100 // budget))
+            self._write_transcript(
+                "Assistant",
+                f"**Dry-run compact:** would compact {n_compact}/{n} messages, "
+                f"freeing ~{tokens:,} tokens (~{pct_freed}% of context budget). "
+                f"Run `/compact now` to execute.",
+            )
+            return
+        if arg.lower() == "history":
+            if not self._compact_events:
+                self._write_transcript("Assistant", "No compaction events this session.")
+                return
+            lines = ["**Compaction history (this session):**"]
+            for i, ev in enumerate(self._compact_events, 1):
+                lines.append(f"{i}. `{ev['time']}` — {ev['n_turns']} turns → {ev['words']} words")
+            self._write_transcript("Assistant", "\n".join(lines))
+            return
         if arg.lower() == "status":
             if self._compact_summary:
                 self._write_transcript(
@@ -1941,11 +2083,29 @@ class AIChatApp(App):
             return
         if not models:
             return
+        # Always try to update context length from model metadata (fail-open)
+        try:
+            info = await self.client.model_info()
+            if self.state.model in info and info[self.state.model] > 0:
+                self._context_length = info[self.state.model]
+        except Exception:
+            pass
         if self.state.model not in models:
             self.state.model = models[0]
             self._persist_config()
             await self.update_status()
             self._log_session(f"Default model set to {self.state.model}")
+            # Update context length for the newly selected model
+            try:
+                info = await self.client.model_info()
+                ctx = info.get(self.state.model, 0)
+                if ctx > 0:
+                    self._context_length = ctx
+                    self._log_session(f"Context length: {ctx:,} tokens")
+                    self._last_status_ts = 0.0
+                    await self.update_status()
+            except Exception:
+                pass
 
     async def action_toggle_shell(self) -> None:
         self.state.shell_enabled = not self.state.shell_enabled

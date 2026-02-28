@@ -110,6 +110,29 @@ class LMStudioTool:
             return []
 
     # ------------------------------------------------------------------
+    # Token counting
+    # ------------------------------------------------------------------
+
+    async def tokenize(self, text: str) -> int:
+        """Count tokens in *text* via ``/v1/tokenize``.
+
+        Falls back to ``len(text) // 4`` on any failure (fail-open).
+        """
+        try:
+            payload = self._payload({"text": text})
+            r = await self._post("/v1/tokenize", payload)
+            r.raise_for_status()
+            data = r.json()
+            tokens = data.get("token_count") or data.get("tokens")
+            if isinstance(tokens, int):
+                return tokens
+            if isinstance(tokens, list):
+                return len(tokens)
+        except Exception:
+            pass
+        return max(0, len(text) // 4)
+
+    # ------------------------------------------------------------------
     # Chat completions
     # ------------------------------------------------------------------
 

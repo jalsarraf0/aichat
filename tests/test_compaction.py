@@ -201,10 +201,14 @@ class TestRunCompact:
         app._compact_from_idx = 0
         app._compact_pending = False
         app._compact_tool_turns = True  # include tool turns
+        app._compact_model = ""         # use main model
+        app._compact_events = []        # event log
         app._tool_log = lambda msg: None
+        app.personalities = []          # persona-aware prompt needs this
 
         class FakeState:
             session_id = ""  # no DB persist in unit tests
+            personality_id = ""
 
         app.state = FakeState()
         return app

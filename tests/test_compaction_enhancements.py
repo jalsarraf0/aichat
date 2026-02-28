@@ -189,6 +189,7 @@ def _bare_app():
     app._max_response_tokens = 1000
     app._compact_summary = ""
     app._compact_from_idx = 0
+    app._ctx_history = []          # needed by _context_pct() (v3 addition)
     app.messages = []
     return app
 
@@ -276,6 +277,13 @@ def _compact_app(compact_summary="", compact_from_idx=0, tool_turns=True, sessio
     app._compact_tool_turns = tool_turns
     app._compact_min_msgs = 8
     app._compact_keep_ratio = 0.5
+    app._compact_model = ""        # v3: dedicated compact model (empty = use main)
+    app._compact_events = []       # v3: event log
+    app._context_length = 10000    # v3: needed by _effective_threshold_pct (via _finalize)
+    app._max_response_tokens = 1000
+    app._compact_threshold_pct = 95
+    app._ctx_history = []          # v3: needed by _context_pct
+    app.personalities = []         # v3: needed by persona-aware compaction
     app._tool_log = lambda msg: None
 
     _sid = session_id  # capture before class body (class scope can't see enclosing locals)
@@ -283,6 +291,7 @@ def _compact_app(compact_summary="", compact_from_idx=0, tool_turns=True, sessio
     class FakeState:
         compaction_enabled = True
         session_id = _sid
+        personality_id = ""  # v3: needed by persona-aware compaction
 
     app.state = FakeState()
     return app
@@ -632,6 +641,9 @@ def _finalize_app(ctx_pct_value: int, compaction_enabled=True, compact_pending=F
     app._compact_keep_ratio = 0.5
     app._compact_tool_turns = True
     app._compact_summary = ""
+    app._compact_threshold_pct = 95  # v3: needed by _effective_threshold_pct
+    app._context_length = 35063      # v3: needed by _effective_threshold_pct
+    app._ctx_history = []            # v3: needed by _context_pct
 
     class FakeState:
         compaction_enabled = True
