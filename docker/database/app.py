@@ -9,7 +9,9 @@ query application-level errors.
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -95,6 +97,19 @@ def _create_tables(c: psycopg.Connection) -> None:
     ]:
         c.execute(col_sql)
     c.execute("CREATE INDEX IF NOT EXISTS idx_images_subject ON images (subject)")
+    # Embeddings table for semantic search (cosine similarity computed in Python)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id        SERIAL PRIMARY KEY,
+            key       TEXT UNIQUE NOT NULL,
+            content   TEXT NOT NULL,
+            embedding TEXT NOT NULL,
+            model     TEXT DEFAULT '',
+            topic     TEXT DEFAULT '',
+            stored_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_topic ON embeddings (topic)")
 
 
 # ---------------------------------------------------------------------------
@@ -473,4 +488,130 @@ def cache_check(url: str) -> dict:
         return {"cached": bool(row), "cached_at": row[0].isoformat() if row else None}
     except Exception as exc:
         log.error("cache_check failed for %s: %s", url[:80], exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Embeddings  (semantic search via cosine similarity)
+# ---------------------------------------------------------------------------
+
+def _cosine_sim(a: list, b: list) -> float:
+    """Pure-Python cosine similarity; returns 0.0 on empty/mismatched vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot   = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    return 0.0 if mag_a == 0.0 or mag_b == 0.0 else dot / (mag_a * mag_b)
+
+
+class EmbeddingIn(BaseModel):
+    key:       str
+    content:   str
+    embedding: list          # JSON array of floats
+    model:     Optional[str] = None
+    topic:     Optional[str] = None
+
+
+class EmbeddingSearchIn(BaseModel):
+    embedding: list          # query embedding (float array)
+    limit:     int = 5
+    topic:     Optional[str] = None
+
+
+@app.post("/embeddings/store")
+def embeddings_store(item: EmbeddingIn) -> dict:
+    try:
+        emb_json = json.dumps(item.embedding)
+        with conn() as c:
+            c.execute(
+                """
+                INSERT INTO embeddings (key, content, embedding, model, topic, stored_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key) DO UPDATE
+                  SET content   = EXCLUDED.content,
+                      embedding = EXCLUDED.embedding,
+                      model     = COALESCE(NULLIF(EXCLUDED.model,  ''), embeddings.model),
+                      topic     = COALESCE(NULLIF(EXCLUDED.topic,  ''), embeddings.topic),
+                      stored_at = EXCLUDED.stored_at
+                """,
+                (
+                    item.key, item.content[:4000], emb_json,
+                    item.model or "", item.topic or "",
+                    datetime.now(timezone.utc),
+                ),
+            )
+        return {"status": "stored", "key": item.key}
+    except Exception as exc:
+        log.error("embeddings_store failed for %s: %s", item.key[:80], exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/embeddings/search")
+def embeddings_search(req: EmbeddingSearchIn) -> dict:
+    """Return the top-N most similar embeddings by cosine similarity."""
+    try:
+        limit = max(1, min(req.limit, 50))
+        with conn() as c:
+            if req.topic:
+                rows = c.execute(
+                    "SELECT key, content, embedding, model, topic, stored_at "
+                    "FROM embeddings WHERE topic = %s",
+                    (req.topic,),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT key, content, embedding, model, topic, stored_at "
+                    "FROM embeddings"
+                ).fetchall()
+
+        query_vec = req.embedding
+        scored: list[dict] = []
+        for row in rows:
+            try:
+                vec = json.loads(row[2])
+                sim = _cosine_sim(query_vec, vec)
+                scored.append({
+                    "key":        row[0],
+                    "content":    row[1],
+                    "similarity": round(sim, 6),
+                    "model":      row[3],
+                    "topic":      row[4],
+                    "stored_at":  row[5].isoformat() if row[5] else "",
+                })
+            except Exception:
+                continue
+
+        scored.sort(key=lambda d: d["similarity"], reverse=True)
+        return {"results": scored[:limit], "count": len(scored)}
+    except Exception as exc:
+        log.error("embeddings_search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/embeddings/list")
+def embeddings_list(limit: int = 20, topic: Optional[str] = None) -> dict:
+    try:
+        with conn() as c:
+            if topic:
+                rows = c.execute(
+                    "SELECT key, content, model, topic, stored_at FROM embeddings "
+                    "WHERE topic = %s ORDER BY stored_at DESC LIMIT %s",
+                    (topic, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT key, content, model, topic, stored_at FROM embeddings "
+                    "ORDER BY stored_at DESC LIMIT %s",
+                    (limit,),
+                ).fetchall()
+        return {
+            "embeddings": [
+                {"key": r[0], "content": r[1][:200], "model": r[2],
+                 "topic": r[3], "stored_at": r[4].isoformat() if r[4] else ""}
+                for r in rows
+            ]
+        }
+    except Exception as exc:
+        log.error("embeddings_list failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

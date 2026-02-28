@@ -1177,6 +1177,196 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["path"],
         },
     },
+    {
+        "name": "tts",
+        "description": (
+            "Convert text to speech using LM Studio's /v1/audio/speech endpoint. "
+            "Saves the audio file to the workspace and returns the file path. "
+            "Requires a TTS-capable model loaded in LM Studio. "
+            "Supports multiple voices and output formats."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to convert to speech.",
+                },
+                "voice": {
+                    "type": "string",
+                    "description": "Voice name (default 'alloy'). Options: alloy, echo, fable, onyx, nova, shimmer.",
+                },
+                "speed": {
+                    "type": "number",
+                    "description": "Speech speed multiplier 0.25–4.0 (default 1.0).",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: mp3, opus, aac, flac, wav (default mp3).",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "embed_store",
+        "description": (
+            "Embed a piece of text using LM Studio's /v1/embeddings endpoint and store it in the "
+            "PostgreSQL database for later semantic search. "
+            "Use a meaningful key (e.g. URL or doc ID) and optional topic for filtering. "
+            "Pipeline: embed_store → embed_search to find semantically similar documents."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Unique identifier for this document (URL, hash, or descriptive ID).",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text to embed and store (up to ~8000 chars).",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Optional topic tag for filtering (e.g. 'science', 'news').",
+                },
+            },
+            "required": ["key", "content"],
+        },
+    },
+    {
+        "name": "embed_search",
+        "description": (
+            "Embed a query string and find the most semantically similar documents previously stored "
+            "via embed_store. Uses cosine similarity on LM Studio embeddings. "
+            "Returns ranked results with similarity scores."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to embed and match against stored documents.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5).",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Filter results to a specific topic tag (optional).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "code_run",
+        "description": (
+            "Execute arbitrary Python code in a sandboxed subprocess with a 30-second timeout. "
+            "Returns stdout, stderr, exit code, and duration. "
+            "Optionally installs pip packages before running. "
+            "Use for data analysis, calculations, file manipulation, or testing code snippets."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python source code to execute.",
+                },
+                "packages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of pip packages to install before running (e.g. ['requests', 'pandas']).",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Wall-clock timeout in seconds (default 30, max 120).",
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "smart_summarize",
+        "description": (
+            "Summarize text using LM Studio's chat completion endpoint. "
+            "Supports 3 styles: brief (2-3 sentences), detailed (full paragraph), bullets (markdown list). "
+            "Pass the raw text directly (already fetched from web_fetch or db_cache_get)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Text to summarize (up to ~8000 chars; longer content is truncated).",
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["brief", "detailed", "bullets"],
+                    "description": "Summary style: brief (2-3 sentences), detailed (paragraph), bullets (markdown list).",
+                },
+                "max_words": {
+                    "type": "integer",
+                    "description": "Approximate target word count for the summary (optional).",
+                },
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "image_caption",
+        "description": (
+            "Describe an image in detail using LM Studio's vision model. "
+            "Pass the image as a base64-encoded JPEG string. "
+            "Returns a detailed description including subject, colors, style, and notable elements. "
+            "Pipeline: fetch_image → image_caption (describe) or screenshot → image_caption."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "b64": {
+                    "type": "string",
+                    "description": "Base64-encoded JPEG image data (without data: URI prefix).",
+                },
+                "detail_level": {
+                    "type": "string",
+                    "enum": ["brief", "detailed"],
+                    "description": "brief = one sentence, detailed = full description with colors/mood/style (default detailed).",
+                },
+            },
+            "required": ["b64"],
+        },
+    },
+    {
+        "name": "structured_extract",
+        "description": (
+            "Extract structured JSON data from text using LM Studio's json_object response mode. "
+            "Provide the text to parse and a JSON Schema describing the desired output shape. "
+            "Uses response_format: json_object for strict JSON output. "
+            "Ideal for pulling structured facts from articles, product pages, or research text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Text to extract structured data from (up to ~6000 chars).",
+                },
+                "schema_json": {
+                    "type": "string",
+                    "description": 'JSON Schema string describing the output shape, e.g. \'{"type":"object","properties":{"title":{"type":"string"}}}\'.',
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Additional extraction instructions or context (optional).",
+                },
+            },
+            "required": ["content", "schema_json"],
+        },
+    },
 ]
 
 
@@ -3080,6 +3270,338 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     f"image_search: no image found for '{query}'.\n"
                     "Try: page_images on a specific URL, or refine the query."
                 )
+
+            # ----------------------------------------------------------------
+            # tts — text-to-speech via LM Studio /v1/audio/speech
+            # ----------------------------------------------------------------
+            if name == "tts":
+                import tempfile as _tmpfile, os as _os_tts
+                text_in  = str(args.get("text", "")).strip()
+                if not text_in:
+                    return _text("tts: 'text' is required")
+                voice  = str(args.get("voice", "alloy")).strip() or "alloy"
+                speed  = max(0.25, min(4.0, float(args.get("speed", 1.0))))
+                fmt    = str(args.get("format", "mp3")).strip() or "mp3"
+                payload_tts: dict = {
+                    "input": text_in,
+                    "voice": voice,
+                    "speed": speed,
+                    "response_format": fmt,
+                }
+                if IMAGE_GEN_MODEL:
+                    payload_tts["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=60.0) as hc_tts:
+                    try:
+                        r_tts = await hc_tts.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/audio/speech",
+                            json=payload_tts,
+                        )
+                        if r_tts.status_code != 200:
+                            return _text(
+                                f"tts: LM Studio returned {r_tts.status_code}. "
+                                "Make sure a TTS-capable model is loaded."
+                            )
+                        audio_bytes = r_tts.content
+                    except Exception as exc:
+                        return _text(f"tts: request failed — {exc}")
+                # Save to workspace
+                ts_tts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+                fname   = f"tts_{ts_tts}.{fmt}"
+                ws_path = _os_tts.path.join(BROWSER_WORKSPACE, fname)
+                try:
+                    with open(ws_path, "wb") as fh:
+                        fh.write(audio_bytes)
+                    return _text(
+                        f"tts: saved {len(audio_bytes):,} bytes → {ws_path}\n"
+                        f"voice={voice} speed={speed} format={fmt}"
+                    )
+                except Exception as exc:
+                    return _text(f"tts: audio generated ({len(audio_bytes):,} bytes) but could not save: {exc}")
+
+            # ----------------------------------------------------------------
+            # embed_store — embed text + persist to DB
+            # ----------------------------------------------------------------
+            if name == "embed_store":
+                import json as _js_emb
+                key_e    = str(args.get("key", "")).strip()
+                content_e = str(args.get("content", "")).strip()
+                topic_e  = str(args.get("topic", "")).strip()
+                if not key_e:     return _text("embed_store: 'key' is required")
+                if not content_e: return _text("embed_store: 'content' is required")
+                emb_payload = {"input": [content_e]}
+                if IMAGE_GEN_MODEL:
+                    emb_payload["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=30.0) as hc_emb:
+                    try:
+                        r_emb = await hc_emb.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=emb_payload
+                        )
+                        r_emb.raise_for_status()
+                        embedding = r_emb.json()["data"][0]["embedding"]
+                    except Exception as exc:
+                        return _text(f"embed_store: LM Studio embedding failed — {exc}")
+                    # Store in DB
+                    try:
+                        r_db = await hc_emb.post(
+                            f"{DATABASE_URL}/embeddings/store",
+                            json={"key": key_e, "content": content_e,
+                                  "embedding": embedding,
+                                  "model": IMAGE_GEN_MODEL, "topic": topic_e},
+                        )
+                        r_db.raise_for_status()
+                        return _text(
+                            f"embed_store: stored key='{key_e}' "
+                            f"dims={len(embedding)} topic='{topic_e}'"
+                        )
+                    except Exception as exc:
+                        return _text(f"embed_store: DB store failed — {exc}")
+
+            # ----------------------------------------------------------------
+            # embed_search — semantic search over stored embeddings
+            # ----------------------------------------------------------------
+            if name == "embed_search":
+                import json as _js_es
+                query_es  = str(args.get("query", "")).strip()
+                limit_es  = max(1, min(20, int(args.get("limit", 5))))
+                topic_es  = str(args.get("topic", "")).strip()
+                if not query_es: return _text("embed_search: 'query' is required")
+                emb_payload_s = {"input": [query_es]}
+                if IMAGE_GEN_MODEL:
+                    emb_payload_s["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=30.0) as hc_es:
+                    try:
+                        r_es = await hc_es.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=emb_payload_s
+                        )
+                        r_es.raise_for_status()
+                        q_vec = r_es.json()["data"][0]["embedding"]
+                    except Exception as exc:
+                        return _text(f"embed_search: LM Studio embedding failed — {exc}")
+                    body_es: dict = {"embedding": q_vec, "limit": limit_es}
+                    if topic_es:
+                        body_es["topic"] = topic_es
+                    try:
+                        r_db_es = await hc_es.post(
+                            f"{DATABASE_URL}/embeddings/search", json=body_es
+                        )
+                        r_db_es.raise_for_status()
+                        results_es = r_db_es.json().get("results", [])
+                    except Exception as exc:
+                        return _text(f"embed_search: DB search failed — {exc}")
+                if not results_es:
+                    return _text(f"embed_search: no results found for '{query_es}'")
+                lines = [f"embed_search: {len(results_es)} result(s) for '{query_es}'\n"]
+                for i, r in enumerate(results_es, 1):
+                    lines.append(
+                        f"{i}. [{r.get('similarity', 0):.3f}] key={r.get('key','')} "
+                        f"topic={r.get('topic','')}\n   {r.get('content','')[:200]}"
+                    )
+                return _text("\n".join(lines))
+
+            # ----------------------------------------------------------------
+            # code_run — sandboxed Python subprocess execution
+            # ----------------------------------------------------------------
+            if name == "code_run":
+                import tempfile as _tmpfile_cr, os as _os_cr, time as _time_cr
+                code_cr    = str(args.get("code", "")).strip()
+                pkgs_cr    = args.get("packages") or []
+                timeout_cr = max(1, min(120, int(args.get("timeout", 30))))
+                if not code_cr:
+                    return _text("code_run: 'code' is required")
+                install_log_cr: list[str] = []
+                if pkgs_cr:
+                    for pkg in pkgs_cr:
+                        pkg = str(pkg).strip()
+                        if not pkg:
+                            continue
+                        try:
+                            proc_pip = await asyncio.create_subprocess_exec(
+                                "python3", "-m", "pip", "install", "--quiet", pkg,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.STDOUT,
+                            )
+                            out_pip, _ = await asyncio.wait_for(
+                                proc_pip.communicate(), timeout=15.0
+                            )
+                            install_log_cr.append(
+                                f"pip install {pkg}: exit {proc_pip.returncode}"
+                            )
+                        except asyncio.TimeoutError:
+                            install_log_cr.append(f"pip install {pkg}: timed out")
+                        except Exception as exc:
+                            install_log_cr.append(f"pip install {pkg}: {exc}")
+                # Write code to tempfile
+                import sys as _sys_cr
+                with _tmpfile_cr.NamedTemporaryFile(
+                    suffix=".py", mode="w", encoding="utf-8", delete=False
+                ) as _tf:
+                    _tf.write(code_cr)
+                    tmp_path_cr = _tf.name
+                t0_cr = _time_cr.monotonic()
+                try:
+                    proc_cr = await asyncio.create_subprocess_exec(
+                        _sys_cr.executable, tmp_path_cr,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        stdout_b, stderr_b = await asyncio.wait_for(
+                            proc_cr.communicate(), timeout=float(timeout_cr)
+                        )
+                        exit_code_cr = proc_cr.returncode
+                    except asyncio.TimeoutError:
+                        proc_cr.kill()
+                        await proc_cr.wait()
+                        return _text(
+                            f"code_run: timed out after {timeout_cr}s\n"
+                            + ("\nInstall log:\n" + "\n".join(install_log_cr) if install_log_cr else "")
+                        )
+                    duration_ms = int((_time_cr.monotonic() - t0_cr) * 1000)
+                    stdout_s = stdout_b.decode(errors="replace")
+                    stderr_s = stderr_b.decode(errors="replace")
+                    parts = [f"code_run: exit={exit_code_cr} duration={duration_ms}ms"]
+                    if stdout_s.strip():
+                        parts.append(f"stdout:\n{stdout_s.strip()}")
+                    if stderr_s.strip():
+                        parts.append(f"stderr:\n{stderr_s.strip()}")
+                    if install_log_cr:
+                        parts.append("install_log:\n" + "\n".join(install_log_cr))
+                    return _text("\n\n".join(parts))
+                finally:
+                    try:
+                        _os_cr.unlink(tmp_path_cr)
+                    except OSError:
+                        pass
+
+            # ----------------------------------------------------------------
+            # smart_summarize — LLM summarization of text
+            # ----------------------------------------------------------------
+            if name == "smart_summarize":
+                content_ss = str(args.get("content", "")).strip()
+                style_ss   = str(args.get("style", "brief")).strip() or "brief"
+                max_words  = args.get("max_words")
+                if not content_ss:
+                    return _text("smart_summarize: 'content' is required")
+                text_ss = content_ss[:8000]
+                if style_ss == "bullets":
+                    instruction_ss = "Summarize the following text as a concise markdown bullet list."
+                elif style_ss == "detailed":
+                    instruction_ss = "Write a detailed, comprehensive summary of the following text."
+                else:
+                    instruction_ss = "Summarize the following text in 2–3 sentences."
+                if max_words:
+                    instruction_ss += f" Aim for approximately {int(max_words)} words."
+                msgs_ss = [
+                    {"role": "system", "content": "You are a helpful summarizer. Be concise and accurate."},
+                    {"role": "user",   "content": f"{instruction_ss}\n\n---\n{text_ss}"},
+                ]
+                payload_ss: dict = {"messages": msgs_ss, "max_tokens": 600, "temperature": 0.3}
+                if IMAGE_GEN_MODEL:
+                    payload_ss["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=30.0) as hc_ss:
+                    try:
+                        r_ss = await hc_ss.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_ss
+                        )
+                        r_ss.raise_for_status()
+                        summary = r_ss.json()["choices"][0]["message"]["content"].strip()
+                        return _text(summary if summary else "smart_summarize: empty response from model")
+                    except Exception as exc:
+                        return _text(
+                            f"smart_summarize: LM Studio request failed — {exc}\n"
+                            "Make sure a chat model is loaded in LM Studio."
+                        )
+
+            # ----------------------------------------------------------------
+            # image_caption — vision model image description
+            # ----------------------------------------------------------------
+            if name == "image_caption":
+                b64_ic     = str(args.get("b64", "")).strip()
+                detail_ic  = str(args.get("detail_level", "detailed")).strip() or "detailed"
+                if not b64_ic:
+                    return _text("image_caption: 'b64' is required (base64-encoded JPEG)")
+                if detail_ic == "brief":
+                    prompt_ic = "Describe this image in one concise sentence."
+                else:
+                    prompt_ic = (
+                        "Describe this image in detail. Include: the main subject, "
+                        "background, colors, style, mood, and any notable elements. "
+                        "Be specific and vivid."
+                    )
+                msgs_ic = [{"role": "user", "content": [
+                    {"type": "text",      "text": prompt_ic},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_ic}"}},
+                ]}]
+                payload_ic: dict = {
+                    "messages": msgs_ic,
+                    "max_tokens": 300 if detail_ic == "detailed" else 80,
+                    "temperature": 0.3,
+                }
+                if IMAGE_GEN_MODEL:
+                    payload_ic["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=30.0) as hc_ic:
+                    try:
+                        r_ic = await asyncio.wait_for(
+                            hc_ic.post(
+                                f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_ic
+                            ),
+                            timeout=12.0,
+                        )
+                        r_ic.raise_for_status()
+                        caption = r_ic.json()["choices"][0]["message"]["content"].strip()
+                        return _text(caption if caption else "image_caption: empty response from vision model")
+                    except Exception as exc:
+                        return _text(
+                            f"image_caption: LM Studio vision request failed — {exc}\n"
+                            "Make sure a vision-capable model is loaded in LM Studio."
+                        )
+
+            # ----------------------------------------------------------------
+            # structured_extract — JSON extraction with json_object mode
+            # ----------------------------------------------------------------
+            if name == "structured_extract":
+                import json as _js_se
+                content_se = str(args.get("content", "")).strip()
+                schema_se  = str(args.get("schema_json", "")).strip()
+                extra_se   = str(args.get("instructions", "")).strip()
+                if not content_se:
+                    return _text("structured_extract: 'content' is required")
+                text_se    = content_se[:6000]
+                schema_hint = f"\n\nExtract data matching this schema:\n{schema_se}" if schema_se else ""
+                extra_hint  = f"\n\nAdditional instructions: {extra_se}" if extra_se else ""
+                msgs_se = [
+                    {"role": "system", "content": (
+                        "You are a structured data extractor. Extract information from the provided "
+                        "text and return it as valid JSON matching the requested schema. "
+                        "Return ONLY the JSON object, no extra text."
+                    )},
+                    {"role": "user", "content": f"Extract from this text:{schema_hint}{extra_hint}\n\n---\n{text_se}"},
+                ]
+                payload_se: dict = {
+                    "messages": msgs_se,
+                    "max_tokens": 800,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                }
+                if IMAGE_GEN_MODEL:
+                    payload_se["model"] = IMAGE_GEN_MODEL
+                async with httpx.AsyncClient(timeout=30.0) as hc_se:
+                    try:
+                        r_se = await hc_se.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_se
+                        )
+                        r_se.raise_for_status()
+                        raw_se = r_se.json()["choices"][0]["message"]["content"].strip()
+                        try:
+                            parsed = _js_se.loads(raw_se)
+                            return _text(_js_se.dumps(parsed, indent=2))
+                        except _js_se.JSONDecodeError:
+                            return _text(f"structured_extract: model returned non-JSON:\n{raw_se}")
+                    except Exception as exc:
+                        return _text(
+                            f"structured_extract: LM Studio request failed — {exc}\n"
+                            "Make sure a chat model is loaded (ideally one that supports json_object mode)."
+                        )
 
             return _text(f"Unknown tool: {name}")
 
