@@ -1,6 +1,6 @@
 # AIChat
 
-A local-first AI chat TUI (Terminal User Interface) built with [Textual](https://github.com/Textualize/textual). Connects to a local LLM via [LM Studio](https://lmstudio.ai), with a full suite of Docker-backed tools: web browsing, shell execution, RSS feeds, research, persistent memory, and a live Chromium browser.
+A local-first AI chat TUI (Terminal User Interface) built with [Textual](https://github.com/Textualize/textual). Connects to a local LLM via [LM Studio](https://lmstudio.ai), with a full suite of Docker-backed tools: real Chromium browsing (Playwright), image search and processing pipeline, shell execution, RSS/research, persistent memory, and a WhatsApp bot.
 
 ---
 
@@ -12,7 +12,7 @@ A local-first AI chat TUI (Terminal User Interface) built with [Textual](https:/
 | LM Studio | Running locally or remotely (configurable via `base_url`) |
 | Docker + Compose | Required for all tool services |
 | `docker` group | Your user must be in the `docker` group |
-| human_browser container | Required for the `browser` tool (see below) |
+| human_browser container | Required for all browser/screenshot/image tools (see below) |
 
 ---
 
@@ -187,8 +187,6 @@ Type these directly in the prompt input.
 
 ## Tool Approval Modes
 
-Control whether tools run automatically or require confirmation:
-
 | Mode | Behaviour |
 |------|-----------|
 | `AUTO` | All tools run immediately (default) |
@@ -201,11 +199,11 @@ Cycle with **F4** or set permanently in `~/.config/aichat/config.yml` (`approval
 
 ## Built-in Tools
 
-These tools are always available to the LLM without any setup beyond the Docker stack.
+All tools are exposed via both the MCP HTTP server (`aichat-mcp`) and the stdio MCP server (`aichat mcp`). The complete tool inventory is grouped below.
 
-### `browser` — Real Chromium Browser
+### Browser Tools — Real Chromium (Playwright)
 
-Controls a live Chromium browser in the `human_browser` Docker container via Playwright.
+All browser/screenshot operations run inside the `human_browser` Docker container via a Playwright/FastAPI server that is auto-deployed and auto-upgraded on first use.
 
 **Setup**: Start the `human_browser` container once:
 ```bash
@@ -217,105 +215,118 @@ docker run -d --name human_browser \
   human-browser:latest
 ```
 
-On first use, aichat automatically deploys the Playwright API server into the container and starts it. No manual steps needed after the container is running.
+The browser server auto-upgrades when a newer version is detected — simply use aichat and it redeployes transparently. The current v17 server includes:
 
-The browser server **auto-upgrades** when a newer version is detected — simply use aichat and it will redeploy transparently. The v3 server includes:
-
-- **Extended stealth**: spoofs `navigator.plugins`, `navigator.languages`, `window.chrome.runtime`, and the Permissions API — not just the `webdriver` flag
-- **Randomized viewport**: picks from common desktop sizes (1366×768, 1440×900, 1920×1080, etc.) to avoid a fixed fingerprint
-- **Human-like typing**: DuckDuckGo searches use `page.type()` with random per-keystroke delays (60–140 ms) and a natural pause before submitting
-- **Pre-screenshot scroll**: simulates a user scrolling the page before capturing
-- **Image fallback pipeline**: if a screenshot is blocked, the tool extracts `<img>` URLs from the page DOM and returns the first downloadable image inline
-
-All httpx-based fetches (web_search, screenshot_search, web_fetch) use full Chrome browser headers (`Accept`, `Sec-Fetch-*`, `DNT`, etc.) and, for screenshot_search, a 2–5 second random pause between consecutive page loads to avoid triggering rate limits.
-
-**web_search** uses a three-tier approach: Chromium browser (Tier 1, most reliable) → DuckDuckGo HTML via httpx (Tier 2) → DDG lite fallback (Tier 3).
-
-**screenshot_search** uses a three-tier URL extraction strategy: DDG `uddg=` redirect params → direct `href` links → Chromium browser DOM eval. Screenshots are compressed to JPEG at max 1280×1024 before base64-encoding for LM Studio compatibility.
-
-**fetch_image** retries once on 429 responses, respecting the `Retry-After` header.
-
-**Actions:**
-
-| Action | Required params | Description |
-|--------|----------------|-------------|
-| `navigate` | `url` | Go to a URL; returns page title + readable text |
-| `read` | — | Return current page title + text (no navigation) |
-| `screenshot` | `url` (optional) | Take a PNG screenshot; returns file path at `/workspace/` |
-| `click` | `selector` | Click a CSS selector; returns updated page content |
-| `fill` | `selector`, `value` | Type text into an input field |
-| `eval` | `code` | Run a JavaScript expression; returns its result |
-
-The browser session persists between calls — navigate, click, fill, read all operate on the same live page.
-
-If a screenshot fails (e.g. the page blocks headless browsers), the MCP server and aichat TUI both automatically fall back to fetching a real image from the page DOM and returning it inline.
+- **15-section stealth JS**: removes `webdriver` flag, spoofs `navigator.plugins`, `navigator.languages`, canvas fingerprint noise (per-session XOR seed), WebGL GPU (NVIDIA RTX 3070), AudioContext noise, screen geometry, `deviceMemory = 8`, media devices stub, `navigator.vendor = "Google Inc."`, `maxTouchPoints`, `cookieEnabled`, `onLine`, `window.name` — eliminates every signal checked by Cloudflare Turnstile, PerimeterX, DataDome, and Kasada
+- **Human-like mouse movement**: real Playwright `mouse.move()` events fire after navigation, satisfying bot detectors that require at least one `mousemove` event
+- **Route-based ad blocking**: 30+ ad/tracker domains are aborted before they load (no extension required)
+- **Scroll jitter**: randomised inter-step timing (`0.6–1.5×`) prevents robotic fixed-interval scrolling
+- **Screenshot block-retry**: if a Cloudflare / captcha page is captured, the context is rotated and the screenshot retried automatically
+- **Randomised viewport**: picks from common desktop sizes (1366×768, 1440×900, 1920×1080, etc.) on every new context
+- **Context rotation on block**: `_ALWAYS_ROTATE_DOMAINS` (Twitter, Reddit, Pinterest, Instagram) get a fresh browser context on every visit
+- **Browser crash recovery**: full Chromium restart on WebSocket close or OOM
 
 The noVNC web UI is accessible at `http://localhost:36411` to watch the browser in real time.
 
-### `web_fetch` — Fetch a Web Page
+| Tool | Description |
+|------|-------------|
+| `screenshot` | Navigate to a URL and take a screenshot. Supports `find_text` (scroll to and clip text region) and `find_image` (clip to a specific `<img>` element). Returns image inline. |
+| `browser` | Navigate/read/click/fill/eval on the live page. Session persists between calls. |
+| `scroll_screenshot` | Full-page screenshot assembled from multiple viewport-height scrolls. |
+| `bulk_screenshot` | Screenshot multiple URLs in parallel. |
+| `fetch_image` | Download an image by URL and return it inline; retries on 429. |
+| `screenshot_search` | Web search + screenshot the top result pages. |
+| `browser_save_images` | Download a list of image URLs to the workspace. |
+| `browser_download_page_images` | Download all images found on a page to the workspace. |
+| `page_scrape` | Full-page text extraction with lazy-scroll rendering. Supports `include_links`. |
+| `page_images` | Extract all image URLs from a live page using 7 extraction strategies (img src, srcset, og:image, background-image, picture, data-src, lazy-load attributes). |
 
-Fetches a URL and returns clean readable text (HTML stripped).
+### Web Tools
 
+| Tool | Description |
+|------|-------------|
+| `web_fetch` | Fetch a URL and return clean readable text (HTML stripped). `max_chars` up to 16 000. |
+| `web_search` | DuckDuckGo web search with three-tier fallback. Returns titles + snippets. |
+| `extract_article` | Fetch a URL and extract the main article body (readability-style). |
+| `page_extract` | Structured data extraction from a live page. |
+| `image_search` | Multi-tier image search with diversity guarantee. Returns up to `count` images (default 4). |
+
+#### `image_search` — How it works
+
+- **Query expansion**: game-specific abbreviations auto-expand (e.g. `gfl2` → "Girls Frontline 2", `hsr` → "Honkai Star Rail")
+- **Tier 1** — DDG web search → `page_images` on top article pages (1 scroll each)
+- **Tier 2** — DuckDuckGo Images page → decodes proxy URLs
+- **Tier 3** — Bing Images → different CDN corpus from DDG for variety
+- **Scoring**: `pbs.twimg.com` +10, known good image hosts +6, keyword in alt text +5, keyword in URL +2, natural width ≥ 500 px +4
+- **Domain cap**: max 2 images per domain
+- **Cross-call dedup**: seen URLs stored in `aichat-memory` with 1-hour TTL so repeated calls return new images
+- **Pagination**: `offset` parameter skips the first N candidates
+
+### Image Pipeline Tools
+
+All image tools operate on files in the browser workspace (`/docker/human_browser/workspace`). Pass filenames (not full paths) between tools.
+
+| Tool | Description |
+|------|-------------|
+| `image_crop` | Extract a rectangular region (x, y, width, height). |
+| `image_zoom` | Enlarge a portion of an image with padding context. |
+| `image_scan` | Pass the image to the vision model for OCR / detailed reading. |
+| `image_enhance` | Adjust brightness, contrast, and saturation. |
+| `image_stitch` | Combine multiple images side-by-side or in a grid. |
+| `image_diff` | Pixel-level difference highlight between two images (ImageChops). |
+| `image_annotate` | Draw bounding boxes and labels on an image (ImageDraw). |
+| `image_upscale` | LANCZOS upscale (1.1–8.0×, default 2×) with optional UnsharpMask sharpening. EXIF rotation is applied automatically; output is capped at 8192 px per side to prevent OOM. |
+| `image_generate` | Text-to-image via LM Studio OpenAI-compatible `/v1/images/generations`. Requires a loaded image-gen model. |
+| `image_edit` | Image-to-image / inpainting via `/v1/images/edits`. Supports strength parameter. |
+
+**Pipeline examples:**
 ```
-Fetch the content at https://docs.python.org/3/library/asyncio.html
+image_generate → image_upscale(scale=4) → image_scan   # read fine text in a generated image
+screenshot → image_crop → image_zoom → image_scan       # zoom in on a UI element
+screenshot → image_edit("watercolor style") → image_diff(original, edited)
+image_generate × 2 → image_stitch → image_diff         # compare two generated variants
 ```
 
-- `url`: required
-- `max_chars`: optional, default 4000, max 16000
+### Database / Cache Tools
 
-### `shell_exec` — Run Shell Commands
+| Tool | Description |
+|------|-------------|
+| `db_store_article` | Store an article (title, url, body, topic) in PostgreSQL. |
+| `db_search` | Full-text search across stored articles. Supports `offset` and `summary_only`. |
+| `db_cache_store` | Store a key-value entry in the web cache (with optional TTL). |
+| `db_cache_get` | Retrieve a cached entry by key. |
+| `db_store_image` | Store an image URL + metadata in the database. |
+| `db_list_images` | List stored images, optionally filtered by topic. |
 
-Runs a bash command on the host machine. Working directory persists across calls within a session.
+### Memory Tools
 
-```
-Run: ls -la ~/git/aichat/src
-```
+| Tool | Description |
+|------|-------------|
+| `memory_store` | Store a key-value fact that persists across sessions. Supports `ttl_seconds`. |
+| `memory_recall` | Recall a stored value. Supports SQL `LIKE` patterns for key matching. |
 
-Dangerous commands (rm -rf on critical paths, fork bombs, dd to raw disks, etc.) are blocked automatically.
-Shell must be enabled (`/shell on` or `Ctrl+S`).
+### Research Tools
 
-### `researchbox_search` — Find RSS Feeds
+| Tool | Description |
+|------|-------------|
+| `researchbox_search` | Find RSS feed sources for a given topic. |
+| `researchbox_push` | Fetch a feed URL and store its items under a topic label. |
 
-Searches for RSS feed sources for a given topic.
+### Toolkit Tools
 
-### `researchbox_push` — Ingest RSS Feed
+| Tool | Description |
+|------|-------------|
+| `create_tool` | Write and deploy a new custom Python tool at runtime. |
+| `list_custom_tools` | List all custom tools you have created. |
+| `delete_custom_tool` | Permanently remove a custom tool. |
+| `call_custom_tool` | Call a custom tool by name with arguments. |
 
-Fetches a feed URL and stores its items under a topic label.
+### System Tools
 
-### `memory_store` / `memory_recall` — Persistent Memory
-
-Store and retrieve facts or notes that persist across sessions.
-
-```
-Remember my preferred coding style is 4-space indentation
-```
-
-```
-What was my preferred coding style?
-```
-
-### `create_tool` — Dynamic Tool Creation
-
-Create a new custom tool at runtime. Tools are stored in `~/.config/aichat/tools/` and persist across restarts.
-
-```
-Create a tool that fetches the current Bitcoin price from CoinGecko
-```
-
-The tool code runs inside the `aichat-toolkit` Docker container (isolated). Available libraries: `asyncio`, `json`, `re`, `os`, `math`, `datetime`, `pathlib`, `shlex`, `subprocess`, `httpx`.
-
-Tools can also:
-- Make HTTP calls with `httpx`
-- Run shell commands with `subprocess` or `asyncio.create_subprocess_exec`
-- Read files from the user's git repos at `/data/repos/<reponame>`
-
-### `list_custom_tools` — List Dynamic Tools
-
-Lists all custom tools you have created.
-
-### `delete_custom_tool` — Delete a Dynamic Tool
-
-Permanently removes a custom tool.
+| Tool | Description |
+|------|-------------|
+| `get_errors` | Retrieve recent tool errors from the server log. |
+| `shell_exec` | Run a bash command on the host machine (stdio only). |
 
 ---
 
@@ -328,10 +339,11 @@ All services start automatically with `docker compose up -d --build`.
 | `aichat-db` | 5432 | PostgreSQL — stores articles, images, and web cache |
 | `aichat-database` | 8091 | FastAPI REST wrapper for PostgreSQL |
 | `aichat-researchbox` | 8092 | RSS/feed discovery service |
-| `aichat-memory` | 8094 | Persistent key-value memory store |
+| `aichat-memory` | 8094 | Persistent key-value memory store (SQLite) |
 | `aichat-toolkit` | 8095 | Dynamic tool execution sandbox |
 | `aichat-mcp` | 8096 | MCP HTTP/SSE server (LM Studio / Claude Desktop integration) |
-| `human_browser` | 36411 | Chromium browser + noVNC (managed separately) |
+| `aichat-whatsapp` | 8097 | WhatsApp bot (Baileys + LM Studio + full MCP tool access) |
+| `human_browser` | 36411 | Chromium browser + Playwright API + noVNC |
 
 **Start all services:**
 ```bash
@@ -345,7 +357,7 @@ docker compose down
 
 **View logs:**
 ```bash
-docker compose logs -f aichat-toolkit
+docker compose logs -f aichat-mcp
 docker logs human_browser
 ```
 
@@ -353,21 +365,20 @@ docker logs human_browser
 
 ## MCP Server (LM Studio / Claude Desktop)
 
-`aichat-mcp` exposes all aichat tools over the network via the Model Context Protocol.
-It supports both SSE (legacy) and Streamable HTTP (MCP 2025-03-26) transports.
+`aichat-mcp` exposes all 40 tools over the network via the Model Context Protocol. It supports both SSE (legacy 2024-11-05) and Streamable HTTP (2025-03-26) transports. Tool calls are **non-blocking** — the server returns immediately and delivers results asynchronously, preventing LM Studio timeouts on slow tools.
 
-Available MCP tools: `screenshot`, `fetch_image`, `screenshot_search`, `web_search`,
-`web_fetch`, `browser` (navigate/read/click/fill/eval), `db_store_article`, `db_search`,
-`db_cache_store`, `db_cache_get`, `db_store_image`, `db_list_images`, `memory_store`,
-`memory_recall`, `researchbox_search`, `researchbox_push`, `create_tool`,
-`list_custom_tools`, `delete_custom_tool`, `call_custom_tool`.
+**LM Studio `mcp_servers.json` entry (Streamable HTTP):**
+```json
+{
+  "mcpServers": {
+    "aichat": {
+      "url": "http://<YOUR_MACHINE_IP>:8096/mcp"
+    }
+  }
+}
+```
 
-Tool calls are **non-blocking** — both POST /messages (SSE transport) and POST /mcp
-(Streamable HTTP) return immediately (202 / SSE keepalives) and deliver results
-asynchronously. This prevents LM Studio from timing out on slow tools like
-`screenshot_search` (which can take up to 3 minutes for three browser screenshots).
-
-**LM Studio `mcp_servers.json` entry:**
+**Legacy SSE entry:**
 ```json
 {
   "mcpServers": {
@@ -387,13 +398,39 @@ Returns a JSON object listing active sessions, available tools, and supported tr
 
 ---
 
+## WhatsApp Bot
+
+`aichat-whatsapp` bridges WhatsApp messages to LM Studio via the full MCP tool suite.
+
+**First-run setup** — scan the QR code at `http://localhost:8097` to pair your WhatsApp account. The session is persisted in a Docker volume (`whatsappauth`) so you only need to pair once.
+
+**Features:**
+- Full conversation history per contact (stored in `aichat-memory` with 20-message window)
+- Tool calling: the bot can browse the web, search for images, run shell commands, query the database, etc. — same capabilities as the TUI
+- Up to 5 tool iterations per user message
+- Image/media extraction from incoming messages
+- Group chat support (disabled by default; set `ALLOW_GROUPS=true`)
+
+**Environment variables** (in `docker-compose.yml`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LM_STUDIO_URL` | `http://host.docker.internal:1234` | LM Studio endpoint |
+| `BOT_NAME` | `AI Assistant` | Bot display name |
+| `MAX_HISTORY` | `20` | Messages to keep in context per contact |
+| `MAX_TOOL_ITER` | `5` | Max tool-call iterations per message |
+| `MAX_TOKENS` | `1024` | Max response tokens |
+| `ALLOW_GROUPS` | `false` | Enable group chat responses |
+
+---
+
 ## Themes
 
 Switch with **F5**. Four built-in themes:
 
 | Theme | Description |
 |-------|-------------|
-| `cyberpunk` | Default — green/cyan neon on dark (default) |
+| `cyberpunk` | Default — green/cyan neon on dark |
 | `dark` | Neutral dark |
 | `light` | Light background |
 | `synth` | Purple/pink synthwave |
@@ -444,7 +481,7 @@ Add custom personalities with `/persona add` — they're stored in `~/.config/ai
 ## Transcript Behaviour
 
 - All responses are sanitized: `<think>` blocks, XML tool-call artifacts, and special model tokens are stripped.
-- Structured JSON/XML responses from tools are rendered as formatted Markdown code blocks instead of being hidden.
+- Structured JSON/XML responses from tools are rendered as formatted Markdown code blocks.
 - The full conversation history (including tool messages) is stored at `~/.local/share/aichat/transcript.jsonl`.
 - `/new` starts a fresh context; the old context is archived to `/tmp/context`.
 
@@ -484,8 +521,9 @@ except Exception:
     return f"{host}:{port} is CLOSED or unreachable"
 ```
 
-Tools are saved to `~/.config/aichat/tools/<name>.py` and loaded from `aichat-toolkit` on startup.
-They can access the user's git repos at `/data/repos/<reponame>` (read-only bind mount of `~/git`).
+Tools are saved to `~/.config/aichat/tools/<name>.py` and loaded from `aichat-toolkit` on startup. They can access the user's git repos at `/data/repos/<reponame>` (read-only bind mount of `~/git`).
+
+Available libraries: `asyncio`, `json`, `re`, `os`, `math`, `datetime`, `pathlib`, `shlex`, `subprocess`, `httpx`.
 
 ---
 
@@ -508,20 +546,17 @@ Requirements:
 # All tests
 pytest
 
-# With verbose output
-pytest -v
-
 # Only fast unit tests (no Docker required)
 pytest tests/test_sanitizer.py tests/test_tool_args.py tests/test_keybinds.py
 
-# TUI tests
-pytest tests/test_tui.py
+# Full image pipeline + MCP integration (requires Docker services running)
+pytest tests/test_image_pipeline.py
 
 # Full e2e (requires Docker services running)
 pytest tests/test_tools_e2e.py
 ```
 
-The test suite has 130 tests. Live tool tests skip gracefully when Docker services are not available.
+The test suite has 145 tests. Live tool tests skip gracefully when Docker services are not available.
 
 ---
 

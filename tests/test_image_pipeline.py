@@ -1173,6 +1173,35 @@ class TestImageGeneration:
         blocks = _mcp_content("image_upscale", {"path": "ghost_upscale.png"})
         assert any("not found" in b.get("text", "").lower() for b in blocks)
 
+    @skip_mcp
+    @skip_ws
+    def test_image_upscale_safety_cap(self):
+        """Scale factor that would push output beyond 8192 px is clamped and reported."""
+        from PIL import Image as _PILC
+        img = _PILC.new("RGB", (2000, 2000), color=(200, 200, 200))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG")
+        path = os.path.join(WORKSPACE, "upscale_cap_test.jpg")
+        with open(path, "wb") as fh:
+            fh.write(buf.getvalue())
+        try:
+            blocks = _mcp_content("image_upscale", {"path": "upscale_cap_test.jpg", "scale": 8.0})
+            assert _has_image_block(blocks), "No image returned from capped upscale"
+            texts = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            assert "capped" in texts.lower(), f"Cap notice missing from summary: {texts!r}"
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    @skip_mcp
+    @skip_ws
+    def test_image_upscale_exif_no_crash(self, test_image_path):
+        """EXIF auto-rotation via ImageOps.exif_transpose doesn't raise on normal JPEG."""
+        blocks = _mcp_content("image_upscale", {"path": test_image_path, "scale": 1.5})
+        assert _has_image_block(blocks), "No image returned — EXIF path likely crashed"
+
     # -- upscale → scan pipeline (always works) -----------------------------
 
     @skip_mcp

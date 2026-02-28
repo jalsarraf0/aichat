@@ -1823,7 +1823,8 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
 
         if name == "image_upscale":
             try:
-                from PIL import Image as _PI_up, ImageEnhance as _IE_up, ImageFilter as _IF_up
+                from PIL import Image as _PI_up, ImageEnhance as _IE_up, \
+                                ImageFilter as _IF_up, ImageOps as _IO_up
                 import io as _io_up
             except ImportError:
                 return _text("image_upscale: Pillow is not installed. Run: pip install Pillow")
@@ -1841,8 +1842,15 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             scale_u   = max(1.1, min(float(arguments.get("scale", 2.0)), 8.0))
             sharpen_u = bool(arguments.get("sharpen", True))
             with _PI_up.open(local_u) as src_u:
-                img_u = src_u.convert("RGB").copy()
+                img_u = _IO_up.exif_transpose(src_u).convert("RGB")
             ow_u, oh_u = img_u.size
+            # Safety cap: clamp scale so no output dimension exceeds 8192 px
+            max_dim_u = max(ow_u, oh_u)
+            if max_dim_u * scale_u > 8192:
+                scale_u = 8192 / max_dim_u
+                capped_u = True
+            else:
+                capped_u = False
             nw_u, nh_u = int(ow_u * scale_u), int(oh_u * scale_u)
             up_u = img_u.resize((nw_u, nh_u), _PI_up.LANCZOS)
             if sharpen_u:
@@ -1852,8 +1860,9 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             up_u.convert("RGB").save(buf_u, format="JPEG", quality=92)
             b64_u = base64.standard_b64encode(buf_u.getvalue()).decode("ascii")
             summary_u = (
-                f"Upscaled {scale_u:.1f}×  {ow_u}×{oh_u} → {nw_u}×{nh_u}"
+                f"Upscaled {scale_u:.2f}×  {ow_u}×{oh_u} → {nw_u}×{nh_u}"
                 + (" + sharpen" if sharpen_u else "")
+                + (" [scale capped to 8192px]" if capped_u else "")
                 + f"\nSource: {bname_u}"
             )
             # Save to workspace for pipeline chaining
