@@ -1858,3 +1858,120 @@ class TestBrowserV17:
         with open("docker/mcp/app.py") as f:
             src = f.read()
         assert "bing.com/images" in src, "Bing Images Tier 3 missing from docker/mcp/app.py"
+
+
+# ===========================================================================
+# Image recognition — dHash dedup + vision confirm + DB caching
+# ===========================================================================
+
+class TestImageRecognition:
+    """Unit + integration tests for perceptual hash dedup and DB-backed image caching."""
+
+    # ── Pure-unit: _dhash + _hamming (no services needed) ──────────────────
+
+    def test_dhash_identical_images_have_zero_distance(self):
+        """Same image produces the same hash → Hamming distance 0."""
+        from aichat.tools.manager import _dhash, _hamming
+        from PIL import Image
+        img = Image.new("RGB", (100, 100), (128, 64, 32))
+        h = _dhash(img)
+        assert len(h) == 16, f"Expected 16-char hex, got {len(h)}: {h!r}"
+        assert _hamming(h, h) == 0
+
+    def test_dhash_different_images_have_high_distance(self):
+        """Images with opposite horizontal gradients should differ by many bits."""
+        from aichat.tools.manager import _dhash, _hamming
+        from PIL import Image
+        # Gradient left→right: bright on left, dark on right
+        w, h = 100, 50
+        lr = Image.new("RGB", (w, h))
+        lr.putdata([(int(255 * (1 - x / w)), 0, 0) for y in range(h) for x in range(w)])
+        # Gradient right→left: dark on left, bright on right
+        rl = Image.new("RGB", (w, h))
+        rl.putdata([(int(255 * (x / w)), 0, 0) for y in range(h) for x in range(w)])
+        dist = _hamming(_dhash(lr), _dhash(rl))
+        assert dist > 20, f"Opposite-gradient images should differ by > 20 bits, got {dist}"
+
+    def test_dhash_empty_string_returns_max_distance(self):
+        """Empty/invalid hash sentinel → max distance (64)."""
+        from aichat.tools.manager import _hamming
+        assert _hamming("", "0000000000000000") == 64
+        assert _hamming("0000000000000000", "") == 64
+        assert _hamming("short", "0000000000000000") == 64
+
+    def test_dhash_nearly_identical_images_have_low_distance(self):
+        """Same image with minor brightness tweak should be < 8 bits apart."""
+        from aichat.tools.manager import _dhash, _hamming
+        from PIL import Image, ImageEnhance
+        base = Image.new("RGB", (200, 200), (100, 150, 200))
+        # Add a noise pattern so there's actual gradient information
+        import random
+        pixels = [(random.randint(90, 110), random.randint(140, 160),
+                   random.randint(190, 210)) for _ in range(200 * 200)]
+        base.putdata(pixels)
+        tweaked = ImageEnhance.Brightness(base).enhance(1.02)  # 2% brighter
+        h1 = _dhash(base)
+        h2 = _dhash(tweaked)
+        dist = _hamming(h1, h2)
+        assert dist < 8, f"Near-identical images should have distance < 8, got {dist}"
+
+    def test_dhash_present_in_docker_mcp(self):
+        """docker/mcp/app.py must contain the _dhash and _hamming helpers."""
+        with open("docker/mcp/app.py") as f:
+            src = f.read()
+        assert "def _dhash(" in src, "_dhash helper missing from docker/mcp/app.py"
+        assert "def _hamming(" in src, "_hamming helper missing from docker/mcp/app.py"
+        assert "_vision_confirm" in src, "_vision_confirm helper missing from docker/mcp/app.py"
+
+    def test_db_first_fastpath_present_in_docker_mcp(self):
+        """DB-first fast path should be present in the image_search handler."""
+        with open("docker/mcp/app.py") as f:
+            src = f.read()
+        assert "/images/search" in src, "DB-first /images/search call missing from docker/mcp/app.py"
+        assert "_norm_subject" in src, "_norm_subject variable missing from docker/mcp/app.py"
+
+    # ── Integration: DB /images/search endpoint ────────────────────────────
+
+    @skip_db
+    def test_db_images_search_endpoint_exists(self):
+        """GET /images/search returns structured JSON with images + count keys."""
+        r = httpx.get(
+            f"{DB_URL}/images/search", params={"subject": "test", "limit": 5}, timeout=5
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "images" in data, f"Missing 'images' key: {data}"
+        assert "count" in data,  f"Missing 'count' key: {data}"
+        assert isinstance(data["images"], list)
+
+    @skip_db
+    def test_db_store_and_search_image_rich(self):
+        """Store an image with phash + quality_score, then retrieve it by subject."""
+        test_url = f"https://example.com/test_{uuid.uuid4().hex}.jpg"
+        test_subject = f"test_subj_{uuid.uuid4().hex[:8]}"
+
+        # Store with new fields
+        store_r = httpx.post(
+            f"{DB_URL}/images/store",
+            json={
+                "url": test_url,
+                "subject": test_subject,
+                "description": "a synthetic test image",
+                "phash": "abcdef1234567890",
+                "quality_score": 0.9,
+            },
+            timeout=5,
+        )
+        assert store_r.status_code == 200, store_r.text
+
+        # Retrieve by subject
+        search_r = httpx.get(
+            f"{DB_URL}/images/search",
+            params={"subject": test_subject, "limit": 5},
+            timeout=5,
+        )
+        assert search_r.status_code == 200
+        found = [img for img in search_r.json()["images"] if img["url"] == test_url]
+        assert found, f"Stored image not found by subject search (subject={test_subject})"
+        assert found[0]["phash"] == "abcdef1234567890", f"phash mismatch: {found[0]}"
+        assert found[0]["quality_score"] >= 0.9 - 1e-6, f"quality_score mismatch: {found[0]}"

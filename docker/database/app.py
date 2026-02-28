@@ -86,6 +86,15 @@ def _create_tables(c: psycopg.Connection) -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_error_logs_level_ts   ON error_logs (level, logged_at DESC)")
     # Index for article topic lookups
     c.execute("CREATE INDEX IF NOT EXISTS idx_articles_topic_ts ON articles (topic, stored_at DESC)")
+    # Extend images table with vision/hash columns (idempotent migration)
+    for col_sql in [
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS subject       TEXT DEFAULT ''",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS description   TEXT DEFAULT ''",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS phash         TEXT DEFAULT ''",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS quality_score REAL DEFAULT 0.5",
+    ]:
+        c.execute(col_sql)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_images_subject ON images (subject)")
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +318,13 @@ def search_articles(
 # ---------------------------------------------------------------------------
 
 class ImageIn(BaseModel):
-    url: str
-    host_path: Optional[str] = None
-    alt_text: Optional[str] = None
+    url:           str
+    host_path:     Optional[str]   = None
+    alt_text:      Optional[str]   = None
+    subject:       Optional[str]   = None
+    description:   Optional[str]   = None
+    phash:         Optional[str]   = None
+    quality_score: Optional[float] = None
 
 
 @app.post("/images/store")
@@ -320,14 +333,24 @@ def store_image(image: ImageIn) -> dict:
         with conn() as c:
             c.execute(
                 """
-                INSERT INTO images (url, host_path, alt_text, stored_at)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO images
+                    (url, host_path, alt_text, subject, description, phash, quality_score, stored_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE
-                  SET host_path = EXCLUDED.host_path,
-                      alt_text  = EXCLUDED.alt_text,
-                      stored_at = EXCLUDED.stored_at
+                  SET host_path     = COALESCE(EXCLUDED.host_path,    images.host_path),
+                      alt_text      = COALESCE(EXCLUDED.alt_text,     images.alt_text),
+                      subject       = COALESCE(NULLIF(EXCLUDED.subject,      ''), images.subject),
+                      description   = COALESCE(NULLIF(EXCLUDED.description,  ''), images.description),
+                      phash         = COALESCE(NULLIF(EXCLUDED.phash,        ''), images.phash),
+                      quality_score = COALESCE(EXCLUDED.quality_score, images.quality_score),
+                      stored_at     = EXCLUDED.stored_at
                 """,
-                (image.url, image.host_path, image.alt_text, datetime.now(timezone.utc)),
+                (
+                    image.url, image.host_path, image.alt_text,
+                    image.subject or "", image.description or "", image.phash or "",
+                    image.quality_score if image.quality_score is not None else 0.5,
+                    datetime.now(timezone.utc),
+                ),
             )
         return {"status": "stored", "url": image.url}
     except Exception as exc:
@@ -352,6 +375,37 @@ def list_images(limit: int = 20, offset: int = 0) -> dict:
         }
     except Exception as exc:
         log.error("list_images failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/images/search")
+def search_images(subject: str = "", limit: int = 20) -> dict:
+    """Search confirmed images by subject or description text.  Returns highest quality first."""
+    try:
+        with conn() as c:
+            rows = c.execute(
+                """
+                SELECT url, host_path, alt_text, subject, description, phash, quality_score, stored_at
+                FROM images
+                WHERE (subject ILIKE %s OR description ILIKE %s)
+                  AND quality_score >= 0.5
+                ORDER BY quality_score DESC, stored_at DESC
+                LIMIT %s
+                """,
+                (f"%{subject}%", f"%{subject}%", limit),
+            ).fetchall()
+        images = [
+            {
+                "url": r[0], "host_path": r[1], "alt_text": r[2],
+                "subject": r[3], "description": r[4], "phash": r[5],
+                "quality_score": r[6],
+                "stored_at": r[7].isoformat() if r[7] else "",
+            }
+            for r in rows
+        ]
+        return {"images": images, "count": len(images)}
+    except Exception as exc:
+        log.error("search_images failed (subject=%s): %s", subject, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

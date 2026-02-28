@@ -75,6 +75,32 @@ _IMG_FETCH_HEADERS = {
     "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
 }
 
+# LM Studio endpoint for vision confirmation (same env-var as image generation)
+_LM_STUDIO_URL = os.environ.get(
+    "IMAGE_GEN_BASE_URL", os.environ.get("LM_STUDIO_URL", "http://localhost:1234")
+)
+
+
+def _dhash(img: object) -> str:
+    """64-bit difference hash of a PIL Image → 16-char hex string (pure PIL, no extra packages)."""
+    try:
+        gray = img.convert("L").resize((9, 8), 3)   # 3 = BICUBIC (int; avoids Resampling enum)
+        px   = list(gray.getdata())
+        bits = sum(
+            1 << i for i in range(64)
+            if px[i % 8 + (i // 8) * 9] > px[i % 8 + (i // 8) * 9 + 1]
+        )
+        return f"{bits:016x}"
+    except Exception:
+        return ""
+
+
+def _hamming(h1: str, h2: str) -> int:
+    """Bit-level Hamming distance between two 16-hex-char dHashes."""
+    if not h1 or not h2 or len(h1) != 16 or len(h2) != 16:
+        return 64
+    return bin(int(h1, 16) ^ int(h2, 16)).count("1")
+
 
 class ToolName(str, Enum):
     SHELL = "shell"
@@ -399,9 +425,12 @@ class ToolManager:
         )
 
         # ── Seen-URL dedup via memory service (TTL 3600 s) ───────────────────
-        _qhash   = _hl.md5(query.lower().encode()).hexdigest()[:16]
-        _mem_key = f"imgsr:{_qhash}"
-        _seen_urls: set[str] = set()
+        _qhash        = _hl.md5(query.lower().encode()).hexdigest()[:16]
+        _mem_key      = f"imgsr:{_qhash}"
+        _seen_urls:   set[str]  = set()
+        _seen_hashes: list[str] = []   # intra-call phash dedup
+        _url_to_hash: dict[str, str] = {}
+        _norm_subject = query.lower().strip()
         try:
             mem_r = await self.memory.recall(key=_mem_key)
             if mem_r.get("found"):
@@ -577,8 +606,55 @@ class ToolManager:
                      "text": (f"image_search: no image found for '{query}'.\n"
                               "Try: page_images on a specific URL, or refine the query.")}]
 
+        # ── DB-first: return confirmed images if we have enough cached ─────────
+        async def _fetch_render_simple(
+            url: str, hc: _httpx.AsyncClient
+        ) -> list[dict] | None:
+            """Minimal fetch+encode without side-effects — for DB-cache fast path."""
+            if not url or not url.startswith("http"):
+                return None
+            try:
+                r0 = await hc.get(
+                    url,
+                    headers={"User-Agent": _UA, "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"},
+                    follow_redirects=True,
+                )
+                if r0.status_code != 200:
+                    return None
+                ct0 = r0.headers.get("content-type", "").split(";")[0].strip()
+                if not ct0.startswith("image/"):
+                    return None
+                raw0 = r0.content
+                if len(raw0) < 10_240:
+                    return None
+                b64_0 = _b64.standard_b64encode(raw0).decode("ascii")
+                return [
+                    {"type": "text",  "text": f"Image: {url}\nQuery: {query}"},
+                    {"type": "image", "data": b64_0, "mimeType": ct0},
+                ]
+            except Exception:
+                return None
+
+        try:
+            db_data = await self.db.search_images(_norm_subject, limit=count * 2)
+            db_imgs = db_data.get("images", [])
+            if len(db_imgs) >= count:
+                async with _httpx.AsyncClient(timeout=12.0) as hc_db:
+                    db_blocks: list[dict] = []
+                    for dbi in db_imgs:
+                        fb = await _fetch_render_simple(dbi["url"], hc_db)
+                        if fb:
+                            db_blocks.extend(fb)
+                        if len(db_blocks) >= count * 2:
+                            break
+                    if db_blocks:
+                        return db_blocks
+        except Exception:
+            pass
+
         # ── Parallel image fetch via shared AsyncClient ───────────────────────
         async def _fetch_render(url: str, hc: _httpx.AsyncClient) -> list[dict] | None:
+            """Fetch, resize, phash-dedup, and encode one image URL."""
             if not url or not url.startswith("http"):
                 return None
             url  = _unwrap_thumb(url)
@@ -604,6 +680,15 @@ class ToolManager:
                         if pil.width < 150 or pil.height < 150:
                             return None
                         pil = pil.convert("RGB")
+                        # dHash intra-call dedup
+                        img_hash = _dhash(pil)
+                        if img_hash and any(
+                            _hamming(img_hash, h) < 8 for h in _seen_hashes
+                        ):
+                            return None
+                        if img_hash:
+                            _seen_hashes.append(img_hash)
+                            _url_to_hash[url] = img_hash
                         if pil.width > 1280 or pil.height > 1024:
                             pil.thumbnail((1280, 1024), _PIL.LANCZOS)
                         buf = _bio.BytesIO()
@@ -625,9 +710,78 @@ class ToolManager:
                 return_exceptions=True,
             )
 
+        # ── Vision confirm pass (best-effort, parallel) ────────────────────────
+        async def _vision_confirm_mgr(
+            b64: str, subject: str
+        ) -> "tuple[bool, str, float]":
+            env_flag = os.environ.get("IMAGE_VISION_CONFIRM", "true").lower()
+            if env_flag not in ("1", "true", "yes"):
+                return True, "", 0.6
+            prompt = (
+                f"Describe this image in one short sentence. "
+                f"Then answer: does it clearly show '{subject}'? "
+                f"Format: DESCRIPTION: <text> | MATCH: YES or NO"
+            )
+            payload: dict = {
+                "messages": [{"role": "user", "content": [
+                    {"type": "text",      "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ]}],
+                "max_tokens": 80,
+                "temperature": 0.0,
+            }
+            try:
+                async with _httpx.AsyncClient(timeout=9.0) as _vc:
+                    r2 = await _asyncio.wait_for(
+                        _vc.post(f"{_LM_STUDIO_URL}/v1/chat/completions", json=payload),
+                        timeout=8.0,
+                    )
+                text = r2.json()["choices"][0]["message"]["content"].strip()
+                desc  = ""
+                if "DESCRIPTION:" in text:
+                    desc = text.split("DESCRIPTION:")[1].split("|")[0].strip()
+                match = "MATCH: YES" in text.upper() or text.upper().strip().endswith("YES")
+                return match, desc, 0.9 if match else 0.2
+            except Exception:
+                return True, "", 0.6   # fail-open
+
+        async def _maybe_confirm(
+            blocks: list[dict] | None, url: str, img_hash: str
+        ) -> list[dict] | None:
+            if not blocks:
+                return None
+            img_b64 = next(
+                (b["data"] for b in blocks if b.get("type") == "image"), ""
+            )
+            if not img_b64:
+                return blocks
+            is_match, desc, conf = await _vision_confirm_mgr(img_b64, query)
+            if not is_match:
+                return None
+            # Fire-and-forget: persist confirmed image to DB
+            _asyncio.ensure_future(
+                self.db.store_image_rich(
+                    url, subject=_norm_subject, description=desc,
+                    phash=img_hash, quality_score=conf,
+                )
+            )
+            return blocks
+
+        confirmed_results = await _asyncio.gather(
+            *[
+                _maybe_confirm(
+                    res if not isinstance(res, Exception) else None,
+                    _unwrap_thumb(cand["url"]),
+                    _url_to_hash.get(_unwrap_thumb(cand["url"]), ""),
+                )
+                for cand, res in zip(fetch_pool, fetch_results)
+            ],
+            return_exceptions=True,
+        )
+
         output_blocks:  list[dict] = []
         returned_urls:  list[str]  = []
-        for cand, res in zip(fetch_pool, fetch_results):
+        for cand, res in zip(fetch_pool, confirmed_results):
             if isinstance(res, Exception) or res is None:
                 continue
             output_blocks.extend(res)
