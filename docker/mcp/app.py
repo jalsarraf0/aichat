@@ -53,6 +53,7 @@ try:
         ImageFilter as _ImageFilter,
         ImageChops as _ImageChops,
         ImageDraw as _ImageDraw,
+        ImageOps as _ImageOps,
     )
     import io as _io
     _HAS_PIL = True
@@ -2531,16 +2532,25 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 scale   = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
                 sharpen = bool(args.get("sharpen", True))
                 with _PilImage.open(local) as src:
-                    img = src.convert("RGB").copy()
+                    img = _ImageOps.exif_transpose(src).convert("RGB")
                 ow, oh = img.size
+                # Safety cap: clamp scale so no output dimension exceeds 8192 px
+                max_dim = max(ow, oh)
+                if max_dim * scale > 8192:
+                    scale = 8192 / max_dim
+                    capped = True
+                else:
+                    capped = False
                 nw, nh = int(ow * scale), int(oh * scale)
                 upscaled = img.resize((nw, nh), _PilImage.LANCZOS)
                 if sharpen:
                     upscaled = _ImageEnhance.Sharpness(upscaled).enhance(1.4)
                     upscaled = upscaled.filter(_ImageFilter.UnsharpMask(radius=0.5, percent=80, threshold=2))
                 summary = (
-                    f"Upscaled {scale:.1f}×  {ow}×{oh} → {nw}×{nh}"
-                    + (" + sharpen" if sharpen else "") + f"\nSource: {os.path.basename(path)}"
+                    f"Upscaled {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
+                    + (" + sharpen" if sharpen else "")
+                    + (" [scale capped to 8192px]" if capped else "")
+                    + f"\nSource: {os.path.basename(path)}"
                 )
                 return _pil_to_blocks(upscaled, summary, quality=92, save_prefix="upscaled")
 
