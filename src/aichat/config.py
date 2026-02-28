@@ -31,6 +31,12 @@ class AppConfig:
     # History is trimmed to fit within context_length - max_response_tokens tokens.
     context_length: int = 35063        # mistralai/magistral-small-2509 default
     max_response_tokens: int = 4096    # tokens reserved for the assistant's response
+    # Contextual compaction settings
+    compact_threshold_pct: int = 95    # trigger auto-compact when CTX >= this %
+    compact_min_msgs: int = 8          # min visible messages before auto-compact fires
+    compact_keep_ratio: float = 0.5    # compact oldest N fraction of visible messages
+    compact_tool_turns: bool = True    # include tool-result messages in compaction input
+    compaction_enabled: bool = True    # persisted default for new sessions
     config_version: int = 6
 
 
@@ -78,6 +84,15 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
     merged["context_length"] = int(raw_ctx) if isinstance(raw_ctx, (int, float)) and int(raw_ctx) > 0 else defaults["context_length"]
     raw_mrt = merged.get("max_response_tokens", defaults["max_response_tokens"])
     merged["max_response_tokens"] = int(raw_mrt) if isinstance(raw_mrt, (int, float)) and int(raw_mrt) > 0 else defaults["max_response_tokens"]
+    # Compaction settings (added in config_version 7)
+    raw_ctp = merged.get("compact_threshold_pct", defaults["compact_threshold_pct"])
+    merged["compact_threshold_pct"] = int(raw_ctp) if isinstance(raw_ctp, (int, float)) and 1 <= int(raw_ctp) <= 100 else defaults["compact_threshold_pct"]
+    raw_cmm = merged.get("compact_min_msgs", defaults["compact_min_msgs"])
+    merged["compact_min_msgs"] = int(raw_cmm) if isinstance(raw_cmm, (int, float)) and int(raw_cmm) >= 2 else defaults["compact_min_msgs"]
+    raw_ckr = merged.get("compact_keep_ratio", defaults["compact_keep_ratio"])
+    merged["compact_keep_ratio"] = float(raw_ckr) if isinstance(raw_ckr, (int, float)) and 0.0 < float(raw_ckr) < 1.0 else defaults["compact_keep_ratio"]
+    merged["compact_tool_turns"] = bool(merged.get("compact_tool_turns", defaults["compact_tool_turns"]))
+    merged["compaction_enabled"] = bool(merged.get("compaction_enabled", defaults["compaction_enabled"]))
     merged["config_version"] = defaults["config_version"]
     return merged
 

@@ -113,12 +113,14 @@ def _create_tables(c: psycopg.Connection) -> None:
     # Conversation sessions + turns (for persistent context / RAG)
     c.execute("""
         CREATE TABLE IF NOT EXISTS conversation_sessions (
-            id          SERIAL PRIMARY KEY,
-            session_id  TEXT UNIQUE NOT NULL,
-            title       TEXT NOT NULL DEFAULT '',
-            model       TEXT NOT NULL DEFAULT '',
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            id               SERIAL PRIMARY KEY,
+            session_id       TEXT UNIQUE NOT NULL,
+            title            TEXT NOT NULL DEFAULT '',
+            model            TEXT NOT NULL DEFAULT '',
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            compact_summary  TEXT NOT NULL DEFAULT '',
+            compact_from_idx INTEGER NOT NULL DEFAULT 0
         )
     """)
     c.execute("""
@@ -135,6 +137,9 @@ def _create_tables(c: psycopg.Connection) -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_conv_sessions_updated ON conversation_sessions(updated_at DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_conv_turns_session    ON conversation_turns(session_id, turn_index)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_conv_turns_timestamp  ON conversation_turns(timestamp DESC)")
+    # Idempotent migrations for compact state columns (safe on existing DBs)
+    c.execute("ALTER TABLE conversation_sessions ADD COLUMN IF NOT EXISTS compact_summary  TEXT NOT NULL DEFAULT ''")
+    c.execute("ALTER TABLE conversation_sessions ADD COLUMN IF NOT EXISTS compact_from_idx INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +675,11 @@ class ConvTitleIn(BaseModel):
     title: str
 
 
+class ConvCompactStateIn(BaseModel):
+    compact_summary: str
+    compact_from_idx: int
+
+
 @app.post("/conversations/sessions")
 def conv_create_session(req: ConvSessionIn) -> dict:
     try:
@@ -822,7 +832,7 @@ def conv_get_session(session_id: str, limit: int = 200) -> dict:
     try:
         with conn() as c:
             sess = c.execute(
-                "SELECT session_id, title, model, created_at FROM conversation_sessions WHERE session_id = %s",
+                "SELECT session_id, title, model, created_at, compact_summary, compact_from_idx FROM conversation_sessions WHERE session_id = %s",
                 (session_id,),
             ).fetchone()
             if not sess:
@@ -838,10 +848,12 @@ def conv_get_session(session_id: str, limit: int = 200) -> dict:
                 (session_id, limit),
             ).fetchall()
         return {
-            "session_id": sess[0],
-            "title":      sess[1],
-            "model":      sess[2],
-            "created_at": sess[3].isoformat() if sess[3] else "",
+            "session_id":       sess[0],
+            "title":            sess[1],
+            "model":            sess[2],
+            "created_at":       sess[3].isoformat() if sess[3] else "",
+            "compact_summary":  sess[4] or "",
+            "compact_from_idx": sess[5] or 0,
             "turns": [
                 {
                     "role":       t[0],
@@ -887,6 +899,22 @@ def conv_fulltext_search(q: str = "", limit: int = 10) -> dict:
         }
     except Exception as exc:
         log.error("conv_fulltext_search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.patch("/conversations/sessions/{session_id}/compact")
+def conv_update_compact_state(session_id: str, req: ConvCompactStateIn) -> dict:
+    try:
+        with conn() as c:
+            c.execute(
+                "UPDATE conversation_sessions "
+                "SET compact_summary = %s, compact_from_idx = %s, updated_at = %s "
+                "WHERE session_id = %s",
+                (req.compact_summary, req.compact_from_idx, datetime.now(timezone.utc), session_id),
+            )
+        return {"status": "updated"}
+    except Exception as exc:
+        log.error("conv_update_compact_state failed for %s: %s", session_id, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

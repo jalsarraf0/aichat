@@ -192,23 +192,36 @@ class TestRunCompact:
             msgs.append(Message(role, f"Message {i}"))
         return msgs
 
-    @pytest.mark.asyncio
-    async def test_run_compact_updates_summary_and_idx(self):
-        """_run_compact sets _compact_summary and advances _compact_from_idx."""
-        from unittest.mock import AsyncMock
+    def _base_compact_app(self):
+        """Return a minimal app with all attributes _run_compact requires."""
         import aichat.app as appmod
 
         app = object.__new__(appmod.AIChatApp)
         app._compact_summary = ""
         app._compact_from_idx = 0
         app._compact_pending = False
+        app._compact_tool_turns = True  # include tool turns
+        app._tool_log = lambda msg: None
+
+        class FakeState:
+            session_id = ""  # no DB persist in unit tests
+
+        app.state = FakeState()
+        return app
+
+    @pytest.mark.asyncio
+    async def test_run_compact_updates_summary_and_idx(self):
+        """_run_compact sets _compact_summary and advances _compact_from_idx."""
+        from unittest.mock import AsyncMock
+        import aichat.app as appmod
+
+        app = self._base_compact_app()
 
         class FakeTools:
             class lm:
                 chat = AsyncMock(return_value="• key decision made\n• feature X approved")
 
         app.tools = FakeTools()
-        app._tool_log = lambda msg: None
 
         msgs = self._make_messages(4)
         await appmod.AIChatApp._run_compact(app, msgs, 4)
@@ -219,28 +232,25 @@ class TestRunCompact:
 
     @pytest.mark.asyncio
     async def test_run_compact_appends_to_existing_summary(self):
-        """_run_compact appends to existing summary with double newline."""
+        """_run_compact uses meta-compaction (replaces summary) when one exists."""
         from unittest.mock import AsyncMock
         import aichat.app as appmod
 
-        app = object.__new__(appmod.AIChatApp)
+        app = self._base_compact_app()
         app._compact_summary = "old summary"
         app._compact_from_idx = 2
-        app._compact_pending = False
 
         class FakeTools:
             class lm:
-                chat = AsyncMock(return_value="new summary point")
+                chat = AsyncMock(return_value="merged: old and new summary point")
 
         app.tools = FakeTools()
-        app._tool_log = lambda msg: None
 
         msgs = self._make_messages(4)
         await appmod.AIChatApp._run_compact(app, msgs, 4)
 
-        assert "old summary" in app._compact_summary
-        assert "new summary point" in app._compact_summary
-        assert "\n\n" in app._compact_summary
+        # Meta-compaction: summary is replaced with LM output (contains merged content)
+        assert app._compact_summary == "merged: old and new summary point"
         assert app._compact_from_idx == 6
 
     @pytest.mark.asyncio
@@ -249,17 +259,13 @@ class TestRunCompact:
         from unittest.mock import AsyncMock
         import aichat.app as appmod
 
-        app = object.__new__(appmod.AIChatApp)
-        app._compact_summary = ""
-        app._compact_from_idx = 0
-        app._compact_pending = False
+        app = self._base_compact_app()
 
         class FakeTools:
             class lm:
                 chat = AsyncMock(side_effect=Exception("LM Studio offline"))
 
         app.tools = FakeTools()
-        app._tool_log = lambda msg: None
 
         msgs = self._make_messages(4)
         # Should not raise
@@ -275,17 +281,13 @@ class TestRunCompact:
         from unittest.mock import AsyncMock
         import aichat.app as appmod
 
-        app = object.__new__(appmod.AIChatApp)
-        app._compact_summary = ""
-        app._compact_from_idx = 0
-        app._compact_pending = False
+        app = self._base_compact_app()
 
         class FakeTools:
             class lm:
                 chat = AsyncMock(return_value="")
 
         app.tools = FakeTools()
-        app._tool_log = lambda msg: None
 
         msgs = self._make_messages(4)
         await appmod.AIChatApp._run_compact(app, msgs, 4)
@@ -360,7 +362,7 @@ class TestMaybeCompact:
 
     @pytest.mark.asyncio
     async def test_maybe_compact_skips_when_too_few_messages(self):
-        """_maybe_compact returns immediately when fewer than _COMPACT_MIN_MSGS messages."""
+        """_maybe_compact returns immediately when fewer than _compact_min_msgs messages."""
         from unittest.mock import AsyncMock
         import aichat.app as appmod
 
@@ -368,6 +370,8 @@ class TestMaybeCompact:
         app._compact_pending = False
         app._compact_from_idx = 0
         app._compact_summary = ""
+        app._compact_min_msgs = 8       # instance var (config-driven)
+        app._compact_keep_ratio = 0.5
 
         class FakeState:
             compaction_enabled = True
@@ -378,7 +382,7 @@ class TestMaybeCompact:
 
         app.state = FakeState()
         app.tools = FakeTools()
-        app.messages = self._make_messages(4)  # fewer than _COMPACT_MIN_MSGS (8)
+        app.messages = self._make_messages(4)  # fewer than _compact_min_msgs (8)
 
         await appmod.AIChatApp._maybe_compact(app)
 
