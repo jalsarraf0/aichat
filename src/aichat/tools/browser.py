@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "16"
+_REQUIRED_SERVER_VERSION = "17"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "16"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v16"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v17"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "16"
+_VERSION = "17"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -290,6 +290,13 @@ try { Object.defineProperty(navigator, \'deviceMemory\', {get: () => 8, configur
         }
     } catch(_) {}
 })();
+
+// 15. Remaining navigator properties and window.name
+try { Object.defineProperty(navigator,\'vendor\',        {get:()=>\'Google Inc.\',configurable:true}); } catch(_) {}
+try { Object.defineProperty(navigator,\'maxTouchPoints\',{get:()=>0,           configurable:true}); } catch(_) {}
+try { Object.defineProperty(navigator,\'cookieEnabled\', {get:()=>true,         configurable:true}); } catch(_) {}
+try { Object.defineProperty(navigator,\'onLine\',        {get:()=>true,         configurable:true}); } catch(_) {}
+try { if (!window.name) window.name = \'\'; } catch(_) {}
 """
 
 # Pool of common desktop viewport sizes — picked randomly each new context
@@ -583,6 +590,25 @@ async def _new_page():
     return _page
 
 
+async def _human_move(page):
+    """Simulate brief human-like mouse movement — required by PerimeterX / DataDome
+    which check that at least one mousemove event fires before interaction."""
+    try:
+        vp = page.viewport_size or {"width": 1280, "height": 720}
+        w, h = vp["width"], vp["height"]
+        x = w // 2 + _random.randint(-180, 180)
+        y = h // 3 + _random.randint(-60, 60)
+        await page.mouse.move(x, y)
+        for _ in range(_random.randint(2, 5)):
+            await asyncio.sleep(_random.uniform(0.04, 0.14))
+            x = max(40, min(w - 40, x + _random.randint(-120, 120)))
+            y = max(40, min(h - 40, y + _random.randint(-80, 160)))
+            await page.mouse.move(x, y)
+        await asyncio.sleep(_random.uniform(0.05, 0.15))
+    except Exception:
+        pass
+
+
 def _is_blocked(text: str) -> bool:
     low = text.lower()
     return any(sig in low for sig in _BLOCK_SIGNALS)
@@ -630,6 +656,7 @@ async def navigate(req: NavReq):
     try:
         page = await _ensure_page()
         await _safe_goto(page, req.url)
+        await _human_move(page)
         content = await _extract_text(page)
         # Auto-rotate context and retry once if bot-detection is triggered
         if _is_blocked(content):
@@ -730,12 +757,14 @@ async def screenshot(req: ScreenshotReq):
     if req.url:
         try:
             await _safe_goto(page, req.url)
+            await _human_move(page)
         except Exception as exc:
             nav_error = str(exc)
             # Page may have crashed — get a fresh one and retry
             try:
                 page = await _ensure_page()
                 await _safe_goto(page, req.url)
+                await _human_move(page)
                 nav_error = None
             except Exception as exc2:
                 nav_error = str(exc2)
@@ -858,6 +887,14 @@ async def screenshot(req: ScreenshotReq):
             except Exception:
                 pass
             await page.screenshot(path=req.path, full_page=False)
+            # If page is a bot-check/block page, rotate context and retry once
+            page_text = await _extract_text(page)
+            if _is_blocked(page_text):
+                page = await _rotate_context_and_page()
+                if req.url:
+                    await _safe_goto(page, req.url)
+                    await _human_move(page)
+                await page.screenshot(path=req.path, full_page=False)
 
         result = {"path": req.path, "title": await page.title(), "url": page.url,
                   "clipped": clipped}
@@ -1112,7 +1149,7 @@ async def _scroll_full_page(page, max_scrolls: int, wait_ms_s: float) -> dict:
     for i in range(max_scrolls):
         try:
             await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-            await asyncio.sleep(wait_ms_s)
+            await asyncio.sleep(wait_ms_s * _random.uniform(0.6, 1.5))
             cur_h = int(await page.evaluate("document.documentElement.scrollHeight") or 0)
         except Exception:
             break

@@ -1436,12 +1436,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_16(self):
+    def test_browser_server_version_is_17(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "16", \
-            f"Expected _REQUIRED_SERVER_VERSION='16', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "16"' in _SERVER_SRC, \
-            "_VERSION = '16' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "17", \
+            f"Expected _REQUIRED_SERVER_VERSION='17', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "17"' in _SERVER_SRC, \
+            "_VERSION = '17' not found in _SERVER_SRC"
 
     def test_browser_server_v14_has_crash_recovery(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1525,10 +1525,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v16_has_scrape_endpoint(self):
+    def test_browser_server_v17_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "16", \
-            f"Expected v16, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "17", \
+            f"Expected v17, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
@@ -1787,3 +1787,45 @@ class TestBrowserV16Stealth:
         from aichat.tools.browser import _SERVER_SRC
         assert "--no-first-run" in _SERVER_SRC, "--no-first-run flag missing"
         assert "--lang=en-US" in _SERVER_SRC, "--lang=en-US flag missing"
+
+
+# ===========================================================================
+# Browser v17 — _human_move, navigator spoofs, scroll jitter, block-retry
+# ===========================================================================
+
+class TestBrowserV17:
+    """Verify v17 improvements are present in _SERVER_SRC and dependent files."""
+
+    def test_human_move_in_server_src(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_human_move" in _SERVER_SRC, "_human_move function missing from _SERVER_SRC"
+        assert "page.mouse.move" in _SERVER_SRC, "page.mouse.move call missing"
+
+    def test_navigator_vendor_spoof(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "Google Inc." in _SERVER_SRC, "navigator.vendor spoof missing"
+        assert "maxTouchPoints" in _SERVER_SRC, "maxTouchPoints spoof missing"
+
+    def test_navigator_cookie_online_spoof(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "cookieEnabled" in _SERVER_SRC, "cookieEnabled spoof missing"
+        assert "onLine" in _SERVER_SRC, "onLine spoof missing"
+
+    def test_scroll_jitter(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "uniform(0.6, 1.5)" in _SERVER_SRC, "Scroll jitter uniform(0.6, 1.5) missing"
+
+    def test_screenshot_block_retry(self):
+        from aichat.tools.browser import _SERVER_SRC
+        assert "_is_blocked(page_text)" in _SERVER_SRC, "Screenshot block-retry missing"
+
+    def test_bing_tier3_in_manager(self):
+        import inspect
+        from aichat.tools.manager import ToolManager
+        src = inspect.getsource(ToolManager.run_image_search)
+        assert "bing.com/images" in src, "Bing Images Tier 3 missing from manager"
+
+    def test_bing_tier3_in_docker_mcp(self):
+        with open("docker/mcp/app.py") as f:
+            src = f.read()
+        assert "bing.com/images" in src, "Bing Images Tier 3 missing from docker/mcp/app.py"

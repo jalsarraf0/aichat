@@ -2817,7 +2817,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             try:
                                 pi_r = await asyncio.wait_for(
                                     c.post(f"{BROWSER_URL}/page_images",
-                                           json={"url": page_url, "scroll": True, "max_scrolls": 2}),
+                                           json={"url": page_url, "scroll": True, "max_scrolls": 1}),
                                     timeout=35.0,
                                 )
                                 page_imgs = pi_r.json().get("images", [])
@@ -2849,6 +2849,23 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             except Exception:
                                 pass
                         all_candidates.append(img2)
+                except Exception:
+                    pass
+
+                # Tier 3: Bing Images — different corpus from DDG, different CDNs
+                try:
+                    bing_url = f"https://www.bing.com/images/search?q={_qp(query)}&form=HDRSC2&first=1"
+                    pi3_r = await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/page_images",
+                               json={"url": bing_url, "scroll": True, "max_scrolls": 2}),
+                        timeout=45.0,
+                    )
+                    for img3 in pi3_r.json().get("images", []):
+                        u3 = img3.get("url", "")
+                        # Bing wraps images in /th?id=... proxy URLs — skip thumbnails
+                        if "bing.com/th" in u3 or "tse1.mm.bing" in u3:
+                            continue
+                        all_candidates.append(img3)
                 except Exception:
                     pass
 
