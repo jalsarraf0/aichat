@@ -9,7 +9,6 @@ value (empty string, empty list, empty dict) so callers never crash.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import math
@@ -193,10 +192,7 @@ class LMStudioTool:
                 "max_tokens": 300 if detail_level == "detailed" else 80,
                 "temperature": 0.3,
             })
-            r = await asyncio.wait_for(
-                self._post("/v1/chat/completions", payload, timeout=9.0),
-                timeout=8.0,
-            )
+            r = await self._post("/v1/chat/completions", payload, timeout=10.0)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"].strip()
         except Exception:

@@ -321,7 +321,22 @@ class AIChatApp(App):
                     if _live_msg is not None:
                         _live_msg.update_content(text)
 
-                content, tool_calls = await self._stream_with_tools(tools, on_chunk=_on_chunk)
+                try:
+                    async with asyncio.timeout(300.0):
+                        content, tool_calls = await self._stream_with_tools(tools, on_chunk=_on_chunk)
+                except asyncio.TimeoutError:
+                    if _live_msg is not None:
+                        try:
+                            _live_msg.remove()
+                        except Exception:
+                            pass
+                        _live_msg = None
+                    if content:
+                        self._tool_log("[stream] 5-minute watchdog fired — using partial response")
+                        self._finalize_assistant_response(content)
+                    else:
+                        self._write_transcript("Assistant", "Request timed out — no response received.")
+                    return
                 if _live_msg is not None:
                     _live_msg.remove()
                     _live_msg = None

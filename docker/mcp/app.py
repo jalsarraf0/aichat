@@ -157,6 +157,9 @@ BROWSER_WORKSPACE = os.environ.get("BROWSER_WORKSPACE", "/browser-workspace")
 IMAGE_GEN_BASE_URL = os.environ.get("IMAGE_GEN_BASE_URL", "http://host.docker.internal:1234")
 IMAGE_GEN_MODEL    = os.environ.get("IMAGE_GEN_MODEL", "")
 
+# Max seconds a single tool call may run before it is cancelled.
+_TOOL_TIMEOUT = 180.0
+
 # Active SSE sessions: session_id -> asyncio.Queue
 _sessions: dict[str, asyncio.Queue] = {}
 
@@ -3705,10 +3708,30 @@ async def mcp_post(request: Request) -> Response:
         # Non-blocking: stream keepalives while the tool runs, yield result when done.
         async def _stream_result(rpc: dict):
             task = asyncio.create_task(_handle_rpc(rpc))
+            elapsed = 0.0
             while not task.done():
                 yield ": keepalive\n\n"
                 await asyncio.sleep(5.0)
-            result = task.result()
+                elapsed += 5.0
+                if elapsed >= _TOOL_TIMEOUT:
+                    task.cancel()
+                    req_id = rpc.get("id")
+                    error_resp = {
+                        "jsonrpc": "2.0", "id": req_id,
+                        "error": {"code": -32000, "message": "Tool execution timed out"},
+                    }
+                    yield f"event: message\ndata: {json.dumps(error_resp)}\n\n"
+                    return
+            try:
+                result = task.result()
+            except Exception as exc:
+                req_id = rpc.get("id")
+                error_resp = {
+                    "jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": str(exc)},
+                }
+                yield f"event: message\ndata: {json.dumps(error_resp)}\n\n"
+                return
             if result is not None:
                 yield f"event: message\ndata: {json.dumps(result)}\n\n"
         return StreamingResponse(_stream_result(rpc), media_type="text/event-stream",
@@ -3770,31 +3793,48 @@ async def messages(request: Request, sessionId: str = "") -> Response:
         )
 
     async def _deliver(rpc: dict, sid: str) -> None:
-        try:
-            task = asyncio.create_task(_handle_rpc(rpc))
-            req_id = rpc.get("id")
-            # Send MCP progress notifications every 5 s while the tool runs.
-            # These are real data: events on the SSE stream — keeps LM Studio's
-            # internal tool-call timer alive even for slow tools (screenshot, etc.).
-            while not task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-                except asyncio.TimeoutError:
+        task = asyncio.create_task(_handle_rpc(rpc))
+        req_id = rpc.get("id")
+        elapsed = 0.0
+        # Send MCP progress notifications every 5 s while the tool runs.
+        # These are real data: events on the SSE stream — keeps LM Studio's
+        # internal tool-call timer alive even for slow tools (screenshot, etc.).
+        while not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+            except asyncio.TimeoutError:
+                elapsed += 5.0
+                if elapsed >= _TOOL_TIMEOUT:
+                    task.cancel()
                     if sid in _sessions and req_id is not None:
                         await _sessions[sid].put({
-                            "jsonrpc": "2.0",
-                            "method": "notifications/progress",
-                            "params": {
-                                "progressToken": str(req_id),
-                                "progress": 0,
-                                "total": 1,
-                            },
+                            "jsonrpc": "2.0", "id": req_id,
+                            "error": {"code": -32000, "message": "Tool execution timed out"},
                         })
+                    return
+                if sid in _sessions and req_id is not None:
+                    await _sessions[sid].put({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": str(req_id),
+                            "progress": 0,
+                            "total": 1,
+                        },
+                    })
+            except Exception:
+                break
+        try:
             response = task.result()
-            if response is not None and sid in _sessions:
-                await _sessions[sid].put(response)
-        except Exception:
-            pass
+        except Exception as exc:
+            if sid in _sessions and req_id is not None:
+                await _sessions[sid].put({
+                    "jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": str(exc)},
+                })
+            return
+        if response is not None and sid in _sessions:
+            await _sessions[sid].put(response)
 
     asyncio.create_task(_deliver(rpc, sessionId))
     return Response(content="", status_code=202)
