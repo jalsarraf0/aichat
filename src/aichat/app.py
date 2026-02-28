@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import uuid as _uuid
 from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import as_file, files
@@ -106,6 +107,8 @@ class AIChatApp(App):
         self.system_prompt = self._build_system_prompt()
         self._session_notes: list[str] = []
         self._pending_tools: int = 0
+        self._last_status_ts: float = 0.0
+        self._last_refresh_ts: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -161,12 +164,24 @@ class AIChatApp(App):
             self.apply_theme("cyberpunk")
             self.notify(f"Theme '{requested_theme}' failed; reverted to cyberpunk ({exc})", severity="warning")
 
+    _STATUS_CACHE_TTL = 4.0  # seconds between network health-check polls
+
     async def update_status(self) -> None:
+        now = time.monotonic()
+        if now - self._last_status_ts < self._STATUS_CACHE_TTL:
+            return
+        self._last_status_ts = now
         up = await self.client.health()
         model_line = self._safe_query_one("#model-line", Static)
         status_line = self._safe_query_one("#status", Static)
         if model_line is None or status_line is None:
             return
+        # Rough context-window usage estimate (1 token ≈ 4 chars)
+        used_tokens = sum(len(m.content) // 4 for m in self.messages)
+        ctx_tokens = self._context_length or 35063
+        ctx_pct = min(100, int(used_tokens * 100 // ctx_tokens))
+        ctx_str = f" | CTX:{ctx_pct}%" if ctx_pct > 20 else ""
+        rag_str = " | RAG:ON" if self.state.rag_context_enabled else " | RAG:OFF"
         model_line.update(
             f"model={self.state.model} | base={self.state.base_url} | server={'UP' if up else 'DOWN'}"
         )
@@ -178,6 +193,8 @@ class AIChatApp(App):
             + f" | shell={'ON' if self.state.shell_enabled else 'OFF'}"
             + f" | persona={self.state.personality_id}"
             + f" | cmd={self.state.cwd}"
+            + ctx_str
+            + rag_str
         )
 
     async def action_send(self) -> None:
@@ -204,6 +221,7 @@ class AIChatApp(App):
         self.messages.append(user)
         self.transcript_store.append(user)
         self._write_transcript("You", text)
+        asyncio.create_task(self._auto_save_turn(user, len(self.messages) - 1))
         self.active_task = asyncio.create_task(self.run_llm_turn())
         await self.active_task
 
@@ -231,7 +249,7 @@ class AIChatApp(App):
             else:
                 response = await self.client.chat_once_with_tools(
                     self.state.model,
-                    self._llm_messages(),
+                    await self._llm_messages(),
                     tools=tools,
                     max_tokens=self._max_response_tokens or None,
                 )
@@ -421,6 +439,15 @@ class AIChatApp(App):
                 return
             if text.startswith("/screenshots"):
                 await self._handle_screenshots_command()
+                return
+            if text.startswith("/history"):
+                await self._handle_history_command(text[8:].strip())
+                return
+            if text.startswith("/sessions"):
+                await self._handle_sessions_command()
+                return
+            if text.startswith("/context"):
+                await self._handle_context_toggle(text[8:].strip())
                 return
             self._write_transcript("Assistant", "Unknown command.")
         except ToolDeniedError as exc:
@@ -638,7 +665,7 @@ class AIChatApp(App):
         tool_call_state: dict[int, dict[str, object]] = {}
         async for event in self.client.chat_stream_events(
             self.state.model,
-            self._llm_messages(),
+            await self._llm_messages(),
             tools=tools,
             max_tokens=self._max_response_tokens or None,
         ):
@@ -885,45 +912,75 @@ class AIChatApp(App):
     async def _run_followup_response(self) -> None:
         content = ""
         if self.state.streaming:
-            async for chunk in self.client.chat_stream(self.state.model, self._llm_messages(),
+            async for chunk in self.client.chat_stream(self.state.model, await self._llm_messages(),
                                                         max_tokens=self._max_response_tokens or None):
                 content += chunk
         else:
-            content = await self.client.chat_once(self.state.model, self._llm_messages(),
+            content = await self.client.chat_once(self.state.model, await self._llm_messages(),
                                                    max_tokens=self._max_response_tokens or None)
         self._finalize_assistant_response(content)
 
-    def _llm_messages(self) -> list[dict[str, object]]:
+    async def _llm_messages(self) -> list[dict[str, object]]:
         system_msg: dict[str, object] = {"role": "system", "content": self.system_prompt}
         history = [m.as_chat_dict() for m in self.messages]
 
         ctx = self._context_length
         reserve = self._max_response_tokens
         if not ctx or not reserve or ctx <= reserve:
-            return [system_msg, *history]
+            trimmed = history
+        else:
+            # Token budget for conversation history (rough: 1 token ≈ 4 chars)
+            def _est(text: str) -> int:
+                return max(1, len(text) // 4) + 4  # chars/4 + per-message overhead
 
-        # Token budget for conversation history (rough: 1 token ≈ 4 chars)
-        def _est(text: str) -> int:
-            return max(1, len(text) // 4) + 4  # chars/4 + per-message overhead
+            budget = ctx - reserve - _est(self.system_prompt)
 
-        budget = ctx - reserve - _est(self.system_prompt)
+            trimmed = []
+            used = 0
+            for msg in reversed(history):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    tokens = _est(content)
+                elif isinstance(content, list):
+                    tokens = sum(_est(str(b.get("text", b) if isinstance(b, dict) else b)) for b in content) + 4
+                else:
+                    tokens = 50
+                if used + tokens > budget and trimmed:
+                    break  # oldest messages dropped to stay within context budget
+                trimmed.insert(0, msg)
+                used += tokens
 
-        trimmed: list[dict[str, object]] = []
-        used = 0
-        for msg in reversed(history):
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                tokens = _est(content)
-            elif isinstance(content, list):
-                tokens = sum(_est(str(b.get("text", b) if isinstance(b, dict) else b)) for b in content) + 4
-            else:
-                tokens = 50
-            if used + tokens > budget and trimmed:
-                break  # oldest messages dropped to stay within context budget
-            trimmed.insert(0, msg)
-            used += tokens
+        # RAG: inject semantically relevant past turns into the system prompt
+        if self.state.rag_context_enabled and self.state.session_id:
+            last_user = next((m for m in reversed(self.messages) if m.role == "user"), None)
+            if last_user:
+                rag = await self._fetch_rag_context(last_user.content)
+                if rag:
+                    system_msg = {"role": "system", "content": self.system_prompt + rag}
 
         return [system_msg, *trimmed]
+
+    async def _fetch_rag_context(self, query: str) -> str:
+        """Embed *query*, search past turns by cosine similarity, return formatted snippet block."""
+        try:
+            vecs = await self.tools.lm.embed([query[:2000]])
+            if not vecs:
+                return ""
+            results = await self.tools.conv.search_turns(
+                vecs[0], limit=4, exclude_session=self.state.session_id
+            )
+            if not results:
+                return ""
+            lines = ["\n\n---\n**Past context (from earlier sessions):**"]
+            for r in results:
+                ts = r.get("timestamp", "")[:10]
+                role = r.get("role", "")
+                snippet = r.get("content", "")[:200].replace("\n", " ")
+                lines.append(f"> [{ts}] {role}: {snippet}")
+            lines.append("---")
+            return "\n".join(lines)
+        except Exception:
+            return ""
 
     def _build_system_prompt(self) -> str:
         base = "You are a helpful assistant."
@@ -975,6 +1032,11 @@ class AIChatApp(App):
         assistant = Message("assistant", display, full_content=content)
         self.messages.append(assistant)
         self.transcript_store.append(assistant)
+        asyncio.create_task(self._auto_save_turn(assistant, len(self.messages) - 1))
+        # Generate a session title after ≥3 user turns if title is still blank
+        user_count = sum(1 for m in self.messages if m.role == "user")
+        if user_count >= 3:
+            asyncio.create_task(self._auto_generate_title())
 
     def _tool_log(self, message: str) -> None:
         log = self._safe_query_one("#toolpane", Log)
@@ -1047,12 +1109,19 @@ class AIChatApp(App):
         return await self._execute_tool_call(call.name, call.args)
 
     def _refresh_sessions(self) -> None:
+        now = time.monotonic()
+        if now - self._last_refresh_ts < 0.5:
+            return
+        self._last_refresh_ts = now
         log = self._safe_query_one("#sessionpane", Log)
         if log is None:
             return
         log.clear()
         log.write_line(f"LLM busy: {'yes' if self.state.busy else 'no'}")
-        log.write_line(f"Tool queue: {self._pending_tools}")
+        if self._pending_tools > 0:
+            log.write_line(f"⟳ {self._pending_tools} tools running in parallel")
+        else:
+            log.write_line(f"Tool queue: {self._pending_tools}")
         sessions = self.tools.active_sessions()
         log.write_line("Shell sessions: " + (", ".join(sessions) if sessions else "none"))
         for note in self._session_notes[-5:]:
@@ -1079,6 +1148,10 @@ class AIChatApp(App):
         scroll = self._safe_query_one("#transcript", VerticalScroll)
         if scroll is not None:
             scroll.remove_children()
+        self.state.session_id = str(_uuid.uuid4())
+        asyncio.create_task(
+            self.tools.conv.create_session(self.state.session_id, model=self.state.model)
+        )
         if not initial:
             self._write_transcript("Assistant", "New chat started.")
 
@@ -1088,6 +1161,106 @@ class AIChatApp(App):
         scroll = self._safe_query_one("#transcript", VerticalScroll)
         if scroll is not None:
             scroll.remove_children()
+
+    # ------------------------------------------------------------------
+    # Conversation persistence helpers
+    # ------------------------------------------------------------------
+
+    async def _auto_save_turn(self, msg: "Message", turn_index: int) -> None:
+        """Fire-and-forget: persist a conversation turn (with optional embedding)."""
+        content = msg.full_content or msg.content
+        if not content.strip() or not self.state.session_id:
+            return
+        embedding: list[float] | None = None
+        if self.state.rag_context_enabled and msg.role in ("user", "assistant"):
+            try:
+                vecs = await self.tools.lm.embed([content[:2000]])
+                embedding = vecs[0] if vecs else None
+            except Exception:
+                pass
+        await self.tools.conv.store_turn(
+            self.state.session_id,
+            msg.role,
+            content,
+            turn_index=turn_index,
+            embedding=embedding,
+        )
+
+    async def _auto_generate_title(self) -> None:
+        """Generate a 5-word session title from the last 3 user messages (fire-and-forget)."""
+        if not self.state.session_id:
+            return
+        try:
+            user_msgs = [m.content for m in self.messages if m.role == "user"][-3:]
+            prompt = (
+                "In 5 words or fewer, give a short title for this conversation. "
+                "Reply with only the title, no punctuation:\n\n"
+                + "\n".join(user_msgs)
+            )
+            title = await self.tools.lm.chat(
+                [{"role": "user", "content": prompt}], max_tokens=20
+            )
+            if title and title.strip():
+                await self.tools.conv.update_title(self.state.session_id, title.strip()[:80])
+        except Exception:
+            pass
+
+    async def _handle_history_command(self, query: str) -> None:
+        """Search past conversation turns semantically: /history <query>"""
+        if not query:
+            self._write_transcript("Assistant", "Usage: /history <query>  — search past conversations semantically.")
+            return
+        try:
+            vecs = await self.tools.lm.embed([query])
+            if not vecs:
+                self._write_transcript("Assistant", "Embedding unavailable — LM Studio may be offline.")
+                return
+            results = await self.tools.conv.search_turns(vecs[0], limit=8)
+            if not results:
+                self._write_transcript("Assistant", "No matching past conversation turns found.")
+                return
+            lines = [f"**Past turns matching** `{query}`:", ""]
+            for r in results:
+                ts = r.get("timestamp", "")[:10]
+                role = r.get("role", "")
+                snippet = r.get("content", "")[:200].replace("\n", " ")
+                sim = round(r.get("similarity", 0), 3)
+                lines.append(f"- [{ts}] **{role}** (sim={sim}): {snippet}")
+            self._write_transcript("Assistant", "\n".join(lines))
+        except Exception as exc:
+            self._write_transcript("Assistant", f"History search error: {exc}")
+
+    async def _handle_sessions_command(self) -> None:
+        """List recent conversation sessions: /sessions"""
+        try:
+            sessions = await self.tools.conv.list_sessions(20)
+            if not sessions:
+                self._write_transcript("Assistant", "No conversation sessions found in the database.")
+                return
+            lines = ["**Recent conversation sessions:**", ""]
+            for s in sessions:
+                ts = s.get("updated_at", "")[:10]
+                title = s.get("title") or "(untitled)"
+                turns = s.get("turn_count", 0)
+                model = s.get("model", "")
+                sid = s.get("session_id", "")[:8]
+                lines.append(f"- [{ts}] **{title}** — {turns} turns, model={model}, id={sid}…")
+            self._write_transcript("Assistant", "\n".join(lines))
+        except Exception as exc:
+            self._write_transcript("Assistant", f"Sessions list error: {exc}")
+
+    async def _handle_context_toggle(self, arg: str) -> None:
+        """/context [on|off] — toggle or set RAG context injection."""
+        if arg.lower() in ("on", "1", "true", "yes"):
+            self.state.rag_context_enabled = True
+        elif arg.lower() in ("off", "0", "false", "no"):
+            self.state.rag_context_enabled = False
+        else:
+            self.state.rag_context_enabled = not self.state.rag_context_enabled
+        state_str = "ON" if self.state.rag_context_enabled else "OFF"
+        self._write_transcript("Assistant", f"RAG context injection: **{state_str}**")
+        self._last_status_ts = 0.0  # force status bar refresh
+        await self.update_status()
 
     async def _rss_store_topic(self, topic: str) -> None:
         """Discover feeds for a topic and store their articles in PostgreSQL."""

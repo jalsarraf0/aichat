@@ -110,6 +110,31 @@ def _create_tables(c: psycopg.Connection) -> None:
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_topic ON embeddings (topic)")
+    # Conversation sessions + turns (for persistent context / RAG)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_sessions (
+            id          SERIAL PRIMARY KEY,
+            session_id  TEXT UNIQUE NOT NULL,
+            title       TEXT NOT NULL DEFAULT '',
+            model       TEXT NOT NULL DEFAULT '',
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_turns (
+            id          SERIAL PRIMARY KEY,
+            session_id  TEXT NOT NULL REFERENCES conversation_sessions(session_id) ON DELETE CASCADE,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            turn_index  INTEGER NOT NULL DEFAULT 0,
+            embedding   TEXT,
+            timestamp   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conv_sessions_updated ON conversation_sessions(updated_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conv_turns_session    ON conversation_turns(session_id, turn_index)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conv_turns_timestamp  ON conversation_turns(timestamp DESC)")
 
 
 # ---------------------------------------------------------------------------
@@ -614,4 +639,235 @@ def embeddings_list(limit: int = 20, topic: Optional[str] = None) -> dict:
         }
     except Exception as exc:
         log.error("embeddings_list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Conversations  (persistent sessions + turns with optional embeddings)
+# ---------------------------------------------------------------------------
+
+class ConvSessionIn(BaseModel):
+    session_id: str
+    title: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ConvTurnIn(BaseModel):
+    session_id: str
+    role: str
+    content: str
+    turn_index: Optional[int] = 0
+    embedding: Optional[list] = None
+
+
+class ConvSearchIn(BaseModel):
+    embedding: list
+    limit: int = 5
+    exclude_session: Optional[str] = None
+
+
+class ConvTitleIn(BaseModel):
+    title: str
+
+
+@app.post("/conversations/sessions")
+def conv_create_session(req: ConvSessionIn) -> dict:
+    try:
+        with conn() as c:
+            existing = c.execute(
+                "SELECT session_id FROM conversation_sessions WHERE session_id = %s",
+                (req.session_id,),
+            ).fetchone()
+            if existing:
+                return {"status": "exists", "session_id": req.session_id}
+            c.execute(
+                """
+                INSERT INTO conversation_sessions (session_id, title, model, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    req.session_id,
+                    req.title or "",
+                    req.model or "",
+                    datetime.now(timezone.utc),
+                    datetime.now(timezone.utc),
+                ),
+            )
+        return {"status": "created", "session_id": req.session_id}
+    except Exception as exc:
+        log.error("conv_create_session failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/conversations/turns")
+def conv_store_turn(req: ConvTurnIn) -> dict:
+    try:
+        emb_json = json.dumps(req.embedding) if req.embedding is not None else None
+        with conn() as c:
+            row = c.execute(
+                """
+                INSERT INTO conversation_turns
+                    (session_id, role, content, turn_index, embedding, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    req.session_id,
+                    req.role,
+                    req.content,
+                    req.turn_index or 0,
+                    emb_json,
+                    datetime.now(timezone.utc),
+                ),
+            ).fetchone()
+            turn_id = row[0] if row else None
+            # Update session's updated_at
+            c.execute(
+                "UPDATE conversation_sessions SET updated_at = %s WHERE session_id = %s",
+                (datetime.now(timezone.utc), req.session_id),
+            )
+        return {"status": "stored", "turn_id": turn_id}
+    except Exception as exc:
+        log.error("conv_store_turn failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/conversations/search")
+def conv_search_turns(req: ConvSearchIn) -> dict:
+    """Return the top-N conversation turns most similar to the given embedding."""
+    try:
+        limit = max(1, min(req.limit, 50))
+        with conn() as c:
+            if req.exclude_session:
+                rows = c.execute(
+                    """
+                    SELECT t.id, t.session_id, t.role, t.content, t.embedding, t.timestamp
+                    FROM conversation_turns t
+                    WHERE t.role IN ('user', 'assistant')
+                      AND t.embedding IS NOT NULL
+                      AND t.session_id != %s
+                    """,
+                    (req.exclude_session,),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """
+                    SELECT t.id, t.session_id, t.role, t.content, t.embedding, t.timestamp
+                    FROM conversation_turns t
+                    WHERE t.role IN ('user', 'assistant')
+                      AND t.embedding IS NOT NULL
+                    """
+                ).fetchall()
+
+        query_vec = req.embedding
+        scored: list[dict] = []
+        for row in rows:
+            try:
+                vec = json.loads(row[4])
+                sim = _cosine_sim(query_vec, vec)
+                scored.append({
+                    "turn_id":    row[0],
+                    "session_id": row[1],
+                    "role":       row[2],
+                    "content":    row[3],
+                    "similarity": round(sim, 6),
+                    "timestamp":  row[5].isoformat() if row[5] else "",
+                })
+            except Exception:
+                continue
+
+        scored.sort(key=lambda d: d["similarity"], reverse=True)
+        return {"results": scored[:limit]}
+    except Exception as exc:
+        log.error("conv_search_turns failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/conversations/sessions")
+def conv_list_sessions(limit: int = 20, offset: int = 0) -> dict:
+    try:
+        with conn() as c:
+            rows = c.execute(
+                """
+                SELECT s.session_id, s.title, s.model, s.created_at, s.updated_at,
+                       COUNT(t.id) as turn_count
+                FROM conversation_sessions s
+                LEFT JOIN conversation_turns t ON t.session_id = s.session_id
+                GROUP BY s.session_id, s.title, s.model, s.created_at, s.updated_at
+                ORDER BY s.updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            ).fetchall()
+        return {
+            "sessions": [
+                {
+                    "session_id":  r[0],
+                    "title":       r[1],
+                    "model":       r[2],
+                    "created_at":  r[3].isoformat() if r[3] else "",
+                    "updated_at":  r[4].isoformat() if r[4] else "",
+                    "turn_count":  r[5],
+                }
+                for r in rows
+            ]
+        }
+    except Exception as exc:
+        log.error("conv_list_sessions failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/conversations/sessions/{session_id}")
+def conv_get_session(session_id: str, limit: int = 200) -> dict:
+    try:
+        with conn() as c:
+            sess = c.execute(
+                "SELECT session_id, title, model, created_at FROM conversation_sessions WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
+            if not sess:
+                raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+            turns = c.execute(
+                """
+                SELECT role, content, turn_index, timestamp
+                FROM conversation_turns
+                WHERE session_id = %s
+                ORDER BY turn_index ASC, timestamp ASC
+                LIMIT %s
+                """,
+                (session_id, limit),
+            ).fetchall()
+        return {
+            "session_id": sess[0],
+            "title":      sess[1],
+            "model":      sess[2],
+            "created_at": sess[3].isoformat() if sess[3] else "",
+            "turns": [
+                {
+                    "role":       t[0],
+                    "content":    t[1],
+                    "turn_index": t[2],
+                    "timestamp":  t[3].isoformat() if t[3] else "",
+                }
+                for t in turns
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("conv_get_session failed for %s: %s", session_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.patch("/conversations/sessions/{session_id}/title")
+def conv_update_title(session_id: str, req: ConvTitleIn) -> dict:
+    try:
+        with conn() as c:
+            c.execute(
+                "UPDATE conversation_sessions SET title = %s, updated_at = %s WHERE session_id = %s",
+                (req.title, datetime.now(timezone.utc), session_id),
+            )
+        return {"status": "updated"}
+    except Exception as exc:
+        log.error("conv_update_title failed for %s: %s", session_id, exc)
         raise HTTPException(status_code=500, detail=str(exc))

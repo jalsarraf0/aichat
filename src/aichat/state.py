@@ -45,6 +45,8 @@ class AppState:
     personality_id: str = "linux-shell-programming"
     busy: bool = False
     cwd: str = "."
-    max_tool_calls_per_turn: int = 4
+    max_tool_calls_per_turn: int = 6
     tool_concurrency: int = 6
     tool_calls_this_turn: int = 0
+    session_id: str = ""
+    rag_context_enabled: bool = True
