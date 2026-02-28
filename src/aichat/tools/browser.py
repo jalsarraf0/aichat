@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "15"
+_REQUIRED_SERVER_VERSION = "16"
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,7 +40,7 @@ _REQUIRED_SERVER_VERSION = "15"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v14"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v16"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "15"
+_VERSION = "16"
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -201,6 +201,95 @@ try {
             {get: () => \'4g\', configurable: true});
     }
 } catch(_) {}
+
+// 9. Canvas — per-session pixel noise defeats exact-hash fingerprinting.
+// Seed is fixed per page-load so repeated toDataURL() calls return same value.
+(function() {
+    const _seed = (Math.floor(Math.random() * 254) + 1) & 0xff;
+    const _oTDU  = HTMLCanvasElement.prototype.toDataURL;
+    const _oBlob = HTMLCanvasElement.prototype.toBlob;
+    const _oGID  = CanvasRenderingContext2D.prototype.getImageData;
+    function _addNoise(canvas) {
+        const ctx2d = canvas.getContext(\'2d\');
+        if (!ctx2d || canvas.width < 2 || canvas.height < 2) return;
+        const d = _oGID.call(ctx2d, 0, 0, 1, 1);
+        d.data[0] = (d.data[0] ^ _seed) & 0xff;
+        ctx2d.putImageData(d, 0, 0);
+    }
+    HTMLCanvasElement.prototype.toDataURL = _markNative(function(t, q) {
+        _addNoise(this); return _oTDU.call(this, t, q);
+    }, \'toDataURL\');
+    HTMLCanvasElement.prototype.toBlob = _markNative(function(cb, t, q) {
+        _addNoise(this); return _oBlob.call(this, cb, t, q);
+    }, \'toBlob\');
+    CanvasRenderingContext2D.prototype.getImageData = _markNative(function(x, y, w, h) {
+        const d = _oGID.call(this, x, y, w, h);
+        if (d.data.length > 0) d.data[0] = (d.data[0] ^ _seed) & 0xff;
+        return d;
+    }, \'getImageData\');
+})();
+
+// 10. WebGL — hide SwiftShader/Mesa (headless) with realistic NVIDIA GPU strings.
+// SwiftShader RENDERER is the single most reliable headless signal bot detectors use.
+(function() {
+    function _patchGL(GL) {
+        const _orig = GL.prototype.getParameter;
+        GL.prototype.getParameter = _markNative(function(p) {
+            if (p === 37445) return \'Google Inc. (NVIDIA)\';
+            if (p === 37446) return \'ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)\';
+            return _orig.call(this, p);
+        }, \'getParameter\');
+    }
+    try { if (window.WebGLRenderingContext)  _patchGL(WebGLRenderingContext);  } catch(_) {}
+    try { if (window.WebGL2RenderingContext) _patchGL(WebGL2RenderingContext); } catch(_) {}
+})();
+
+// 11. AudioContext — add imperceptible per-call noise to prevent sample-hash fingerprinting.
+(function() {
+    try {
+        const _origGCD = AudioBuffer.prototype.getChannelData;
+        AudioBuffer.prototype.getChannelData = _markNative(function(ch) {
+            const d = _origGCD.call(this, ch);
+            if (d.length > 0) d[0] += 1e-8 * (Math.random() - 0.5);
+            return d;
+        }, \'getChannelData\');
+    } catch(_) {}
+})();
+
+// 12. Screen & window geometry — match configured viewport, avoid 0×0 headless defaults.
+(function() {
+    const _sw = window.screen.width  || 1920;
+    const _sh = window.screen.height || 1080;
+    const _defs = [
+        [screen,  \'colorDepth\',      24],
+        [screen,  \'pixelDepth\',      24],
+        [screen,  \'availWidth\',      _sw],
+        [screen,  \'availHeight\',     _sh - 40],
+        [window,  \'devicePixelRatio\', 1],
+        [window,  \'outerWidth\',      _sw],
+        [window,  \'outerHeight\',     _sh],
+    ];
+    for (const [obj, prop, val] of _defs) {
+        try { Object.defineProperty(obj, prop, {get: () => val, configurable: true}); } catch(_) {}
+    }
+})();
+
+// 13. deviceMemory — 8 GB desktop default (absence or 1 GB is a headless signal).
+try { Object.defineProperty(navigator, \'deviceMemory\', {get: () => 8, configurable: true}); } catch(_) {}
+
+// 14. Media devices — realistic audio-only stub (empty list is a headless signal).
+(function() {
+    try {
+        if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+            navigator.mediaDevices.enumerateDevices = _markNative(async function() {
+                return [
+                    {deviceId: \'default\', kind: \'audioinput\',  label: \'\', groupId: \'default\'},
+                    {deviceId: \'default\', kind: \'audiooutput\', label: \'\', groupId: \'default\'},
+                ];
+            }, \'enumerateDevices\');
+        }
+    } catch(_) {}
+})();
 """
 
 # Pool of common desktop viewport sizes — picked randomly each new context
@@ -248,6 +337,12 @@ _LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
     "--window-size=1920,1080",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--use-mock-keychain",
+    "--disable-features=TranslateUI",
+    "--lang=en-US",
 ]
 
 
@@ -274,7 +369,7 @@ async def _restart_browser():
     if _browser is None:
         raise RuntimeError(f"Browser restart failed: {last_exc}")
     await _new_context()
-    _page = await _context.new_page()
+    await _new_page()
 
 
 @asynccontextmanager
@@ -295,7 +390,7 @@ async def lifespan(app):
         await _pw.stop()
         raise RuntimeError(f"Could not launch Chromium: {last_exc}")
     await _new_context()
-    _page = await _context.new_page()
+    await _new_page()
     yield
     await _browser.close()
     await _pw.stop()
@@ -328,7 +423,7 @@ async def _ensure_page():
         try:
             if _context is None or _context.is_closed():
                 await _new_context()
-            _page = await _context.new_page()
+            _page = await _new_page()
             return _page
         except Exception:
             pass
@@ -445,6 +540,48 @@ _ALWAYS_ROTATE_DOMAINS = (
     "instagram.com",
 )
 
+# Ad networks and trackers to block via route interception.
+# Requests to URLs containing any of these strings are aborted before they load,
+# removing ad iframes, banners, and tracking pixels from screenshots.
+_AD_DOMAINS = {
+    "doubleclick.net", "googlesyndication.com", "googletagmanager.com",
+    "google-analytics.com", "googleadservices.com", "googleoptimize.com",
+    "adnxs.com", "adsafeprotected.com", "criteo.com", "rubiconproject.com",
+    "pubmatic.com", "openx.net", "casalemedia.com", "advertising.com",
+    "adtech.de", "scorecardresearch.com", "quantserve.com",
+    "facebook.net", "connect.facebook.net",
+    "ads.twitter.com", "static.ads-twitter.com",
+    "amazon-adsystem.com", "moatads.com", "outbrain.com", "taboola.com",
+    "yieldmo.com", "sharethrough.com", "33across.com", "appnexus.com",
+    "bidswitch.net", "turn.com", "rlcdn.com", "smaato.net",
+    "bat.bing.com", "hotjar.com", "mouseflow.com", "fullstory.com",
+    "logrocket.com", "chartbeat.com", "newrelic.com", "nr-data.net",
+    "amazon-adsystem.com", "media.net", "revcontent.com", "mgid.com",
+    "disqusads.com", "cdn.jsdelivr.net/npm/adsbygoogle",
+}
+
+
+async def _route_handler(route):
+    """Abort ad/tracker requests; pass everything else through."""
+    try:
+        if any(d in route.request.url for d in _AD_DOMAINS):
+            await route.abort()
+        else:
+            await route.continue_()
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
+
+
+async def _new_page():
+    """Create a new page with ad-blocking routes pre-installed."""
+    global _page
+    _page = await _context.new_page()
+    await _page.route("**/*", _route_handler)
+    return _page
+
 
 def _is_blocked(text: str) -> bool:
     low = text.lower()
@@ -461,7 +598,7 @@ async def _rotate_context_and_page() -> object:
         pass
     try:
         await _new_context()
-        _page = await _context.new_page()
+        await _new_page()
     except Exception:
         # Browser may have crashed — restart it entirely
         await _restart_browser()
