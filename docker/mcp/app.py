@@ -2897,19 +2897,34 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     search_params["topic"] = str(args["topic"])
                 if args.get("q"):
                     search_params["q"] = str(args["q"])
-                search_params["limit"] = int(args.get("limit", 20))
-                search_params["offset"] = int(args.get("offset", 0))
+                try:
+                    search_params["limit"] = max(1, min(200, int(args.get("limit", 20))))
+                    search_params["offset"] = max(0, int(args.get("offset", 0)))
+                except (ValueError, TypeError) as exc:
+                    return _text(f"db_search: 'limit' and 'offset' must be integers — {exc}")
                 if args.get("summary_only"):
                     search_params["summary_only"] = "true"
                 r = await c.get(f"{DATABASE_URL}/articles/search", params=search_params)
                 return _text(json.dumps(r.json()))
 
             if name == "db_cache_store":
-                r = await c.post(f"{DATABASE_URL}/cache/store", json=args)
+                cache_url_cs = str(args.get("url", "")).strip()
+                cache_content_cs = str(args.get("content", "")).strip()
+                if not cache_url_cs:
+                    return _text("db_cache_store: 'url' is required")
+                if not cache_content_cs:
+                    return _text("db_cache_store: 'content' is required")
+                cache_payload_cs: dict = {"url": cache_url_cs, "content": cache_content_cs}
+                if args.get("title"):
+                    cache_payload_cs["title"] = str(args["title"])
+                r = await c.post(f"{DATABASE_URL}/cache/store", json=cache_payload_cs)
                 return _text(json.dumps(r.json()))
 
             if name == "db_cache_get":
-                r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": args.get("url", "")})
+                cache_url_cg = str(args.get("url", "")).strip()
+                if not cache_url_cg:
+                    return _text("db_cache_get: 'url' is required")
+                r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": cache_url_cg})
                 return _text(json.dumps(r.json()))
 
             # ----------------------------------------------------------------
@@ -2941,9 +2956,18 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
             # ----------------------------------------------------------------
             if name == "memory_store":
-                payload: dict = {"key": args["key"], "value": args["value"]}
+                key_ms = str(args.get("key", "")).strip()
+                val_ms = str(args.get("value", "")).strip()
+                if not key_ms:
+                    return _text("memory_store: 'key' is required")
+                if not val_ms:
+                    return _text("memory_store: 'value' is required")
+                payload: dict = {"key": key_ms, "value": val_ms}
                 if args.get("ttl_seconds"):
-                    payload["ttl_seconds"] = int(args["ttl_seconds"])
+                    try:
+                        payload["ttl_seconds"] = int(args["ttl_seconds"])
+                    except (ValueError, TypeError):
+                        return _text("memory_store: 'ttl_seconds' must be an integer")
                 r = await c.post(f"{MEMORY_URL}/store", json=payload)
                 return _text(json.dumps(r.json()))
 
@@ -4534,7 +4558,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=emb_payload
                         )
                         r_emb.raise_for_status()
-                        embedding = r_emb.json()["data"][0]["embedding"]
+                        emb_data = r_emb.json().get("data", [])
+                        if not emb_data:
+                            return _text("embed_store: LM Studio returned empty embedding data — is an embedding model loaded?")
+                        embedding = emb_data[0].get("embedding", [])
+                        if not embedding:
+                            return _text("embed_store: LM Studio returned empty embedding vector")
                     except Exception as exc:
                         return _text(f"embed_store: LM Studio embedding failed — {exc}")
                     # Store in DB
@@ -4559,7 +4588,10 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             if name == "embed_search":
                 import json as _js_es
                 query_es  = str(args.get("query", "")).strip()
-                limit_es  = max(1, min(20, int(args.get("limit", 5))))
+                try:
+                    limit_es = max(1, min(20, int(args.get("limit", 5))))
+                except (ValueError, TypeError):
+                    return _text("embed_search: 'limit' must be an integer")
                 topic_es  = str(args.get("topic", "")).strip()
                 if not query_es: return _text("embed_search: 'query' is required")
                 emb_payload_s = {"input": [query_es]}
@@ -4571,7 +4603,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=emb_payload_s
                         )
                         r_es.raise_for_status()
-                        q_vec = r_es.json()["data"][0]["embedding"]
+                        es_data = r_es.json().get("data", [])
+                        if not es_data:
+                            return _text("embed_search: LM Studio returned empty embedding data — is an embedding model loaded?")
+                        q_vec = es_data[0].get("embedding", [])
+                        if not q_vec:
+                            return _text("embed_search: LM Studio returned empty embedding vector")
                     except Exception as exc:
                         return _text(f"embed_search: LM Studio embedding failed — {exc}")
                     body_es: dict = {"embedding": q_vec, "limit": limit_es}

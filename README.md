@@ -831,7 +831,33 @@ pytest -m smoke -v
 
 ## Recent Changes
 
-### Code review fixes (latest)
+### Database storage reliability (latest)
+
+**Root cause:** The LLM had trouble storing items because MCP tool handlers had several input-validation gaps that produced confusing errors or silent failures.
+
+**Fixes:**
+- **`memory_store`** — `args["key"]`/`args["value"]` bare dict access replaced with `.get()` + explicit validation; missing or empty fields now return a clear error message instead of a raw `KeyError`
+- **`db_cache_store`** — validates `url` and `content` before POSTing; previously passing `args` directly to the DB service caused 422 Unprocessable Entity if `content` was omitted
+- **`db_cache_get`** — validates URL is not empty; empty string silently queried the DB and returned `{"found": false}` with no indication the URL was missing
+- **`db_search`** — `int()` conversions on `limit`/`offset` now wrapped in `try/except`; non-integer strings (e.g. `"twenty"`) now return a clear error instead of a `ValueError` propagating to the global handler
+- **`embed_store` / `embed_search`** — safe `.get("data", [])` access with an explicit empty-list check; empty LM Studio embedding response now reports `"is an embedding model loaded?"` instead of `IndexError`
+- **`embed_search` limit** — guarded `int()` conversion consistent with other tools
+- **`manager.py run_db_store_article`** — signature changed from `title: str, content: str, topic: str` (non-optional) to `title: str | None = None, ...` matching the MCP schema and database client
+- **`EmbeddingIn` / `EmbeddingSearchIn` / `ConvTurnIn` / `ConvSearchIn`** — `embedding: list` changed to `embedding: list[float]` for proper Pydantic type coercion and validation
+- **`docker-compose.yml`** — fixed duplicate `environment:` key in `aichat-mcp` service that prevented `docker compose` from parsing the file
+
+**New tests (`tests/test_database_tools.py` — 27 unit/E2E + 15 smoke):**
+- `TestDbToolInputValidation` — 12 unit tests verifying every required-field guard
+- `TestDbCacheStoreE2E` / `TestDbCacheGetE2E` / `TestMemoryStoreE2E` / `TestDbSearchE2E` — mocked HTTP E2E covering the full handler path
+- `TestEmbedE2E` — verifies safe embedding extraction: empty LM Studio response → friendly error, not `IndexError`
+- `TestDbToolsSmoke` — 9 smoke tests: memory round-trip, cache store+get, article store, db_search, error guard validation
+- `TestImageOCR` — 6 smoke tests: generic image search + OCR pipeline (`_image_ocr_pipeline()` reusable helper), Klukai character art E2E, screenshot via orchestrate, memory store+recall
+
+**Test totals: 940 pass, 0 fail, 3 skipped**
+
+---
+
+### Code review fixes
 - **VisionCache LRU** — `_order` now uses `collections.deque` (O(1) `popleft`) and correctly re-inserts existing keys at the back of the queue so frequently-updated hashes are never spuriously evicted (was: re-insert did not update position)
 - **`_handle_rpc` `isError` propagation** — `tools/call` responses that contain only text blocks starting with `"Error"` or `"Unknown tool"` now set `"isError": true` so MCP clients can distinguish tool failures from empty successes
 - **`ConversationSearcher`** — replaced positional `_COL_*` magic integers with a `ConvRow` namedtuple for type-safe, reorder-proof column access; corrupt rows now emit `log.warning` with a count instead of silently disappearing
