@@ -939,6 +939,71 @@ def _image_content_blocks(host_path: str, text: str) -> list[dict[str, Any]]:
     return blocks
 
 
+_IMAGE_TOOLS: frozenset[str] = frozenset(
+    {
+        "screenshot",
+        "fetch_image",
+        "screenshot_search",
+        "browser_save_images",
+        "browser_download_page_images",
+        "db_list_images",
+        "image_search",
+        "bulk_screenshot",
+        "scroll_screenshot",
+        "image_generate",
+        "image_edit",
+        "image_crop",
+        "image_zoom",
+        "image_scan",
+        "image_enhance",
+        "image_stitch",
+        "image_diff",
+        "image_annotate",
+        "image_upscale",
+    }
+)
+
+# 1x1 transparent PNG used as a last-resort inline placeholder.
+_PLACEHOLDER_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yL0YAAAAASUVORK5CYII="
+)
+
+
+def _is_image_tool_call(name: str, arguments: dict[str, Any]) -> bool:
+    if name in _IMAGE_TOOLS:
+        return True
+    if name == "browser":
+        action = str(arguments.get("action", "")).strip().lower()
+        return action in {"screenshot", "screenshot_element"}
+    return False
+
+
+def _ensure_image_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Guarantee an image block exists for image-producing tools."""
+    if any(b.get("type") == "image" for b in blocks):
+        return blocks
+    return blocks + [{"type": "image", "data": _PLACEHOLDER_PNG_B64, "mimeType": "image/png"}]
+
+
+def _content_is_error(blocks: list[dict[str, Any]]) -> bool:
+    """Best-effort classification for MCP tool errors."""
+    texts = [
+        str(block.get("text", "")).strip()
+        for block in blocks
+        if block.get("type") == "text" and str(block.get("text", "")).strip()
+    ]
+    if not texts:
+        return False
+    lowered = [t.lower() for t in texts]
+    if any(
+        t.startswith(("error", "unknown tool", "tool denied", "parse error"))
+        for t in lowered
+    ):
+        return True
+    markers = (" failed", " failed:", " error:", " is required", "not found")
+    return any(any(marker in text for marker in markers) for text in lowered)
+
+
 async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
     """Dispatch a tool call and return a list of MCP content blocks."""
     mgr = _get_manager()
@@ -2113,15 +2178,9 @@ async def _handle(line: str) -> None:
         tool_name = params.get("name", "")
         arguments = params.get("arguments") or {}
         content_blocks = await _call_tool(tool_name, arguments)
-        is_error = (
-            bool(content_blocks)
-            and not any(b.get("type") == "image" for b in content_blocks)
-            and all(b.get("type") == "text" for b in content_blocks)
-            and any(
-                b.get("text", "").startswith(("Error", "Unknown tool", "Tool denied"))
-                for b in content_blocks
-            )
-        )
+        is_error = _content_is_error(content_blocks)
+        if _is_image_tool_call(tool_name, arguments):
+            content_blocks = _ensure_image_blocks(content_blocks)
         _write(_ok(req_id, {
             "content": content_blocks,
             "isError": is_error,
