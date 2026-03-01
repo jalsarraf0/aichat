@@ -109,6 +109,39 @@ class TestImagePathResolution:
         resolved = _mcp._resolve_image_path("definitely-missing-file.png")
         assert resolved is None
 
+    def test_resolve_missing_workspace_path_to_latest_image(self, tmp_path, monkeypatch):
+        older = tmp_path / "old_capture.png"
+        newer = tmp_path / "new_capture.png"
+        older.write_bytes(b"\x89PNG\r\n\x1a\n")
+        newer.write_bytes(b"\x89PNG\r\n\x1a\n")
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_300, 1_700_000_300))
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("/workspace/test_comp_e2e.png")
+        assert resolved == str(newer)
+
+
+@skip_load
+class TestSearchSafetyAndErrors:
+    def test_normalize_search_query_fixes_kluki_typo(self):
+        fixed, note = _mcp._normalize_search_query("Kluki Girls Frontline2")
+        assert "Klukai" in fixed
+        assert "Girls Frontline 2" in fixed
+        assert "normalized" in note.lower()
+
+    def test_url_has_explicit_content_blocks_explicit_bing(self):
+        assert _mcp._url_has_explicit_content(
+            "https://tse3.explicit.bing.net/th/id/OIP.abc?pid=Api"
+        )
+
+    def test_blocks_indicate_error_for_image_upscale_not_found(self):
+        blocks = [{"type": "text", "text": "image_upscale: image not found — 'ghost.jpg' in /browser-workspace"}]
+        assert _mcp._blocks_indicate_error("image_upscale", blocks) is True
+
+    def test_blocks_indicate_no_error_for_success_search_text(self):
+        blocks = [{"type": "text", "text": "[Search results] Query: python"}]
+        assert _mcp._blocks_indicate_error("web_search", blocks) is False
+
 
 @pytest.fixture
 def test_face_image_path() -> str:
