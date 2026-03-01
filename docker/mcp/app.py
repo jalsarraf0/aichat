@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import html as _html
 import json
 import os
 import random
@@ -53,6 +54,7 @@ try:
         Image as _PilImage,
         ImageEnhance as _ImageEnhance,
         ImageFilter as _ImageFilter,
+        ImageStat as _ImageStat,
         ImageChops as _ImageChops,
         ImageDraw as _ImageDraw,
         ImageOps as _ImageOps,
@@ -60,6 +62,13 @@ try:
     import io as _io
     _HAS_PIL = True
 except ImportError:
+    _PilImage = None  # type: ignore[assignment]
+    _ImageEnhance = None  # type: ignore[assignment]
+    _ImageFilter = None  # type: ignore[assignment]
+    _ImageStat = None  # type: ignore[assignment]
+    _ImageChops = None  # type: ignore[assignment]
+    _ImageDraw = None  # type: ignore[assignment]
+    _ImageOps = None  # type: ignore[assignment]
     _HAS_PIL = False
 
 try:
@@ -149,6 +158,253 @@ def _hamming(h1: str, h2: str) -> int:
     if not h1 or not h2 or len(h1) != 16 or len(h2) != 16:
         return 64
     return bin(int(h1, 16) ^ int(h2, 16)).count("1")
+
+
+_EXPLICIT_HOST_MARKERS: tuple[str, ...] = (
+    "explicit.bing.net",
+    "pornhub.",
+    "xvideos.",
+    "xnxx.",
+    "xhamster.",
+    "redtube.",
+    "youporn.",
+    "rule34.",
+    "rule34",
+    "gelbooru",
+    "e621.",
+    "e926.",
+    "nhentai.",
+    "hentai",
+)
+_EXPLICIT_TEXT_RE = re.compile(
+    r"\b(nsfw|explicit|porn|xxx|hentai|rule34|nude|naked|fetish|booru)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _domain_from_url(url: str) -> str:
+    """Lowercased hostname without leading www., or empty on parse failure."""
+    from urllib.parse import urlparse as _urlparse
+
+    try:
+        host = (_urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+    return host.removeprefix("www.")
+
+
+def _url_has_explicit_content(url: str, text: str = "") -> bool:
+    """Best-effort NSFW / explicit URL-and-text filter for image search tools."""
+    host = _domain_from_url(url)
+    host_l = host.lower()
+    if any(tok in host_l for tok in _EXPLICIT_HOST_MARKERS):
+        return True
+    combined = f"{url} {text}".lower()
+    return bool(_EXPLICIT_TEXT_RE.search(combined))
+
+
+def _normalize_search_query(query: str) -> tuple[str, str]:
+    """Normalize common query typos; return (normalized_query, note_or_empty)."""
+    original = re.sub(r"\s+", " ", (query or "")).strip()
+    if not original:
+        return "", ""
+    fixed = original
+    fixes: tuple[tuple[str, str], ...] = (
+        (r"\bkluki\b", "Klukai"),
+        (r"\bgirls?\s*frontline\s*2\b", "Girls Frontline 2"),
+        (r"\bgirls?\s+frontline2\b", "Girls Frontline 2"),
+    )
+    for pat, rep in fixes:
+        fixed = re.sub(pat, rep, fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"\s+", " ", fixed).strip()
+    if fixed.lower() == original.lower():
+        return original, ""
+    return fixed, f"Query normalized: '{original}' -> '{fixed}'"
+
+
+def _search_terms(query: str) -> list[str]:
+    """Tokenize query into lowercased word terms useful for URL relevance scoring."""
+    return [w.lower() for w in re.findall(r"[a-z0-9]{3,}", (query or "").lower())]
+
+
+def _query_preferred_domains(query: str) -> tuple[str, ...]:
+    """Domain preferences for known entities to improve relevance ordering."""
+    q = (query or "").lower()
+    if any(k in q for k in ("girls frontline 2", "gfl2", "klukai")):
+        return ("iopwiki.com", "gf2exilium.com", "fandom.com", "prydwen.gg")
+    return tuple()
+
+
+def _score_url_relevance(url: str, query_terms: list[str], preferred_domains: tuple[str, ...] = ()) -> int:
+    """Simple URL relevance score used for ranking candidate pages/images."""
+    url_l = (url or "").lower()
+    host = _domain_from_url(url_l)
+    score = 0
+    for w in query_terms:
+        if w in url_l:
+            score += 3
+        if re.search(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])", url_l):
+            score += 2
+    for dom in preferred_domains:
+        if host == dom or host.endswith(f".{dom}"):
+            score += 8
+    return score
+
+
+def _unwrap_ddg_redirect(url: str) -> str:
+    """Return target URL when the input is a DuckDuckGo redirect URL."""
+    from urllib.parse import parse_qs as _parse_qs, urlparse as _urlparse
+
+    u = (url or "").strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    if not u:
+        return ""
+    try:
+        parsed = _urlparse(u)
+        host = (parsed.hostname or "").lower()
+        if "duckduckgo.com" in host and parsed.path == "/l/":
+            cand = _url_unquote((_parse_qs(parsed.query).get("uddg") or [""])[0])
+            if cand.startswith("http"):
+                return cand
+        m = re.search(r"uddg=(https?%3A[^&\s\"'>]+)", u)
+        if m:
+            cand2 = _url_unquote(m.group(1))
+            if cand2.startswith("http"):
+                return cand2
+    except Exception:
+        return u
+    return u
+
+
+def _extract_ddg_links(html: str, max_results: int = 12) -> list[tuple[str, str]]:
+    """Parse DDG HTML search results into [(url, title)] with deduped URLs."""
+    links: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    # Primary: result anchors with class="result__a"
+    for m in re.finditer(
+        r"<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        href = _html.unescape(m.group(1))
+        title = re.sub(r"<[^>]+>", " ", m.group(2))
+        title = _html.unescape(re.sub(r"\s+", " ", title).strip())
+        url = _unwrap_ddg_redirect(href)
+        if not url.startswith("http") or url in seen:
+            continue
+        links.append((url, title or url))
+        seen.add(url)
+        if len(links) >= max_results:
+            return links
+
+    # Fallback: uddg redirect parameters
+    for enc in re.findall(r"uddg=(https?%3A[^&\"'>\s]+)", html):
+        url = _url_unquote(enc)
+        if not url.startswith("http") or url in seen:
+            continue
+        links.append((url, url))
+        seen.add(url)
+        if len(links) >= max_results:
+            break
+    return links
+
+
+def _extract_bing_links(html: str, max_results: int = 12) -> list[tuple[str, str]]:
+    """Parse Bing HTML web search results into [(url, title)]."""
+    links: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _unwrap_bing_redirect(url: str) -> str:
+        from urllib.parse import parse_qs as _parse_qs, urlparse as _urlparse
+
+        u = (url or "").strip()
+        try:
+            p = _urlparse(u)
+            host = (p.hostname or "").lower()
+            if "bing.com" in host and p.path.startswith("/ck/a"):
+                raw_u = (_parse_qs(p.query).get("u") or [""])[0]
+                if raw_u.startswith("a1"):
+                    b64 = raw_u[2:]
+                    b64 += "=" * ((4 - (len(b64) % 4)) % 4)
+                    dec = base64.urlsafe_b64decode(b64.encode("ascii")).decode("utf-8", errors="ignore")
+                    if dec.startswith("http"):
+                        return dec
+        except Exception:
+            return u
+        return u
+
+    for m in re.finditer(
+        r"<li[^>]+class=[\"'][^\"']*b_algo[^\"']*[\"'][^>]*>.*?<h2[^>]*>.*?<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        url = _unwrap_bing_redirect(_html.unescape(m.group(1)))
+        title = re.sub(r"<[^>]+>", " ", m.group(2))
+        title = _html.unescape(re.sub(r"\s+", " ", title).strip())
+        if not url.startswith("http") or url in seen:
+            continue
+        links.append((url, title or url))
+        seen.add(url)
+        if len(links) >= max_results:
+            break
+    return links
+
+
+def _is_low_information_image(img: "_PilImage.Image") -> bool:
+    """Detect near-solid placeholder images (e.g., pure black/white blocks)."""
+    if not _HAS_PIL:
+        return False
+    try:
+        sample = img.convert("RGB").copy()
+        sample.thumbnail((96, 96), _PilImage.BILINEAR)
+        stats = _ImageStat.Stat(sample)
+        if not stats.mean or not stats.stddev:
+            return False
+        mean_luma = sum(float(v) for v in stats.mean) / 3.0
+        max_std = max(float(v) for v in stats.stddev)
+        return max_std < 6.0 and (mean_luma < 20.0 or mean_luma > 245.0)
+    except Exception:
+        return False
+
+
+def _blocks_indicate_error(tool_name: str, blocks: list[dict[str, Any]]) -> bool:
+    """Heuristic: detect text-only tool responses that represent errors."""
+    if not blocks:
+        return False
+    if any(b.get("type") == "image" for b in blocks):
+        return False
+    texts = [
+        str(b.get("text", "")).strip()
+        for b in blocks
+        if b.get("type") == "text" and str(b.get("text", "")).strip()
+    ]
+    if not texts:
+        return False
+    lowered = [t.lower() for t in texts]
+    if any(t.startswith("error") or t.startswith("unknown tool") for t in lowered):
+        return True
+    prefix = (tool_name or "").lower().strip()
+    if prefix:
+        tool_prefix = f"{prefix}:"
+        if any(t.startswith(tool_prefix) for t in lowered):
+            joined = "\n".join(lowered)
+            error_hints = (
+                " failed",
+                " not found",
+                " is required",
+                " unreachable",
+                " timeout",
+                " timed out",
+                " no image found",
+                " no urls found",
+                " invalid",
+                " unsupported",
+            )
+            if any(h in joined for h in error_hints):
+                return True
+    return False
 
 
 async def _vision_confirm(
@@ -1190,6 +1446,14 @@ _TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Skip first N ranked candidates for pagination (default 0).",
                 },
+                "domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional hostname allow-list for safer/more-specific retrieval "
+                        "(e.g. ['iopwiki.com','fandom.com'])."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -2214,6 +2478,25 @@ def _resolve_image_path(path: str) -> str | None:
     if not path:
         return None
     name = os.path.basename(path)
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
+    def _workspace_images() -> list[tuple[float, str]]:
+        if not os.path.isdir(BROWSER_WORKSPACE):
+            return []
+        picks: list[tuple[float, str]] = []
+        for fn in os.listdir(BROWSER_WORKSPACE):
+            full = os.path.join(BROWSER_WORKSPACE, fn)
+            if not os.path.isfile(full):
+                continue
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in image_exts:
+                continue
+            try:
+                picks.append((os.path.getmtime(full), full))
+            except OSError:
+                continue
+        picks.sort(key=lambda p: p[0], reverse=True)
+        return picks
 
     def _resolve_client_alias() -> str | None:
         # Some chat clients send synthetic attachment names (for example,
@@ -2221,31 +2504,42 @@ def _resolve_image_path(path: str) -> str | None:
         # In that case, use the most recent real image in the workspace.
         if not re.fullmatch(r"image-\d{8,}\.(?:png|jpe?g|webp|gif|bmp|tiff?)", name, flags=re.IGNORECASE):
             return None
-        if not os.path.isdir(BROWSER_WORKSPACE):
-            return None
-        picks: list[tuple[float, str]] = []
-        for fn in os.listdir(BROWSER_WORKSPACE):
-            full = os.path.join(BROWSER_WORKSPACE, fn)
-            if not os.path.isfile(full):
-                continue
-            ext = os.path.splitext(fn)[1].lower()
-            if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
-                continue
-            try:
-                picks.append((os.path.getmtime(full), full))
-            except OSError:
-                continue
+        picks = _workspace_images()
+        return picks[0][1] if picks else None
+
+    def _resolve_workspace_best_effort(prefer_latest: bool = False) -> str | None:
+        """Resolve missing workspace path to a likely file without masking true missing bare names."""
+        picks = _workspace_images()
         if not picks:
             return None
-        picks.sort(key=lambda p: p[0], reverse=True)
-        return picks[0][1]
+        by_name = {os.path.basename(p).lower(): p for _, p in picks}
+        lname = name.lower()
+        exact = by_name.get(lname)
+        if exact:
+            return exact
+        stem = os.path.splitext(lname)[0]
+        if stem:
+            stem_matches = [
+                p for _, p in picks
+                if os.path.splitext(os.path.basename(p).lower())[0].startswith(stem)
+            ]
+            if stem_matches:
+                return stem_matches[0]
+        if prefer_latest:
+            return picks[0][1]
+        return None
 
     # Bare filename or known prefix → remap to our bind-mount
     if "/" not in path or path.startswith("/workspace/") or path.startswith("/docker/human_browser/workspace/"):
         candidate = os.path.join(BROWSER_WORKSPACE, name)
         if os.path.isfile(candidate):
             return candidate
-        return _resolve_client_alias()
+        # Prefix paths often point to browser-container filenames that may differ
+        # from what was actually persisted; pick the closest workspace match.
+        if path.startswith("/workspace/") or path.startswith("/docker/human_browser/workspace/"):
+            return _resolve_workspace_best_effort(prefer_latest=True) or _resolve_client_alias()
+        # Bare names keep strict behavior so obvious missing files still error.
+        return _resolve_workspace_best_effort(prefer_latest=False) or _resolve_client_alias()
     if os.path.isfile(path):
         return path
     return _resolve_client_alias()
@@ -2597,14 +2891,19 @@ class ImageRenderingPolicy:
 
     @staticmethod
     def _placeholder() -> dict[str, str] | None:
-        """Generate a minimal dark-grey JPEG indicating image was unavailable.
+        """Generate a minimal neutral JPEG indicating image was unavailable.
 
         Returns None if PIL is not available (caller handles gracefully).
         """
         if not _HAS_PIL:
             return None
         buf = _io.BytesIO()
-        img = _PilImage.new("RGB", (400, 100), color=(28, 28, 28))
+        img = _PilImage.new("RGB", (460, 110), color=(236, 236, 236))
+        try:
+            draw = _ImageDraw.Draw(img)
+            draw.text((14, 44), "Image preview unavailable", fill=(48, 48, 48))
+        except Exception:
+            pass
         img.save(buf, "JPEG", quality=60)
         return {
             "type":     "image",
@@ -3324,15 +3623,17 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
             # ----------------------------------------------------------------
             if name == "screenshot_search":
-                query = str(args.get("query", "")).strip()
+                raw_query = str(args.get("query", "")).strip()
+                query, normalize_note = _normalize_search_query(raw_query)
                 if not query:
                     return _text("screenshot_search: 'query' is required")
                 max_results = max(1, min(int(args.get("max_results", 3)), 5))
+                from urllib.parse import quote_plus as _qp
 
                 # Search DuckDuckGo HTML for result URLs (realistic headers)
                 try:
                     r = await c.get(
-                        f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                        f"https://html.duckduckgo.com/html/?q={_qp(query)}",
                         headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
@@ -3340,20 +3641,19 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception as exc:
                     return _text(f"Search failed: {exc}")
 
-                # Tier 1: DDG uddg= redirect params (stable HTML endpoint format)
+                # Tier 1: parse DDG result links.
                 _DDG_HOSTS = ('duckduckgo.com', 'ddg.gg', 'duck.co')
-                raw = re.findall(r'uddg=(https?%3A[^&"\'>\s]+)', html)
                 seen_u: set[str] = set()
                 urls: list[str] = []
-                for encoded in raw:
-                    decoded = _url_unquote(encoded)
-                    # Skip DDG-internal URLs that get double-encoded into uddg=
-                    if any(d in decoded for d in _DDG_HOSTS):
+                for url, _title in _extract_ddg_links(html, max_results=20):
+                    if any(d in url for d in _DDG_HOSTS):
                         continue
-                    if decoded not in seen_u:
-                        seen_u.add(decoded)
-                        urls.append(decoded)
-                urls = urls[:max_results]
+                    if _url_has_explicit_content(url):
+                        continue
+                    if url in seen_u:
+                        continue
+                    seen_u.add(url)
+                    urls.append(url)
 
                 # Tier 2: direct href links (fallback if DDG changed format or rate-limited)
                 if not urls:
@@ -3361,7 +3661,23 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     urls = list(dict.fromkeys(
                         u for u in href_raw
                         if not any(d in u for d in _DDG_HOSTS)
-                    ))[:max_results]
+                        and not _url_has_explicit_content(u)
+                    ))
+
+                # Tier 2b: Bing fallback when DDG yields challenge/empty results.
+                if not urls:
+                    try:
+                        rb = await c.get(
+                            f"https://www.bing.com/search?q={_qp(query)}&setlang=en-US",
+                            headers=_BROWSER_HEADERS,
+                            follow_redirects=True,
+                        )
+                        urls = [
+                            u for u, _t in _extract_bing_links(rb.text, max_results=20)
+                            if not _url_has_explicit_content(u)
+                        ]
+                    except Exception:
+                        pass
 
                 # Tier 3: browser search + DOM eval (Chromium w/ anti-detection, most reliable)
                 if not urls:
@@ -3389,15 +3705,32 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             )
                         """}, timeout=10)
                         extracted = json.loads(ev.json().get("result", "[]"))
-                        urls = [u for u in extracted if u][:max_results]
+                        urls = [u for u in extracted if u and not _url_has_explicit_content(u)]
                     except Exception:
                         pass
 
                 if not urls:
                     return _text(f"No URLs found in search results for: {query}")
 
+                # Rank URLs for relevance and safer domains.
+                _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+                            "twitch.tv", "pinterest.com", "instagram.com", "facebook.com")
+                q_terms = _search_terms(query)
+                preferred_domains = _query_preferred_domains(query)
+                urls = sorted(
+                    list(dict.fromkeys(u for u in urls if u.startswith("http"))),
+                    key=lambda u: (
+                        _score_url_relevance(u, q_terms, preferred_domains)
+                        - (30 if any(s in u.lower() for s in _SKIP_T1) else 0)
+                    ),
+                    reverse=True,
+                )[:max_results]
+
                 blocks: list[dict[str, Any]] = [
-                    {"type": "text", "text": f"Visual search: '{query}' — screenshotting {len(urls)} result(s)...\n"}
+                    {"type": "text", "text": (
+                        f"Visual search: '{query}' — screenshotting {len(urls)} result(s)...\n"
+                        + (normalize_note + "\n" if normalize_note else "")
+                    )}
                 ]
                 img_hdrs = {
                     "User-Agent": _BROWSER_HEADERS["User-Agent"],
@@ -3463,31 +3796,152 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
             # ----------------------------------------------------------------
             if name == "web_search":
-                query = str(args.get("query", "")).strip()
+                raw_query = str(args.get("query", "")).strip()
+                query, normalize_note = _normalize_search_query(raw_query)
+                if not query:
+                    return _text("web_search: 'query' is required")
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
+                from urllib.parse import quote_plus as _qp
                 # Tier 1: DuckDuckGo HTML via httpx (fast, reliable, bot-resilient with brotlicffi)
                 try:
                     r = await c.get(
-                        f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
+                        f"https://html.duckduckgo.com/html/?q={_qp(query)}",
                         headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
+                    links = _extract_ddg_links(r.text, max_results=10)
+                    if links:
+                        q_terms = _search_terms(query)
+                        pref = _query_preferred_domains(query)
+                        ranked: list[tuple[str, str]] = []
+                        for url, title in links:
+                            if _url_has_explicit_content(url, title):
+                                continue
+                            ranked.append((url, title))
+                        ranked.sort(
+                            key=lambda it: _score_url_relevance(
+                                f"{it[0]} {it[1]}",
+                                q_terms,
+                                pref,
+                            ),
+                            reverse=True,
+                        )
+                        if ranked:
+                            lines = [f"[Search results] Query: {query}"]
+                            if normalize_note:
+                                lines.append(normalize_note)
+                            for idx, (url, title) in enumerate(ranked[:8], start=1):
+                                lines.append(f"{idx}. {title or url}")
+                                lines.append(f"URL: {url}")
+                            return _text("\n".join(lines)[:max_chars])
+                    challenge_markers = (
+                        "bots use duckduckgo too",
+                        "select all squares",
+                        "error-lite@duckduckgo.com",
+                    )
+                    if any(m in r.text.lower() for m in challenge_markers):
+                        raise RuntimeError("duckduckgo challenge page")
                     text = re.sub(r"<[^>]+>", " ", r.text)
-                    text = re.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return _text(f"[Search results]\n\n{text}")
+                    text = re.sub(r"\s+", " ", text).strip()
+                    if len(text) > 120:
+                        header = f"[Search results] Query: {query}\n"
+                        if normalize_note:
+                            header += normalize_note + "\n"
+                        return _text((header + "\n" + text)[:max_chars])
                 except Exception:
                     pass
-                # Tier 3: DDG lite (realistic browser headers)
+                # Tier 2: Bing HTML fallback (more stable when DDG blocks bots)
+                try:
+                    rb = await c.get(
+                        f"https://www.bing.com/search?q={_qp(query)}&setlang=en-US",
+                        headers=_BROWSER_HEADERS,
+                        follow_redirects=True,
+                    )
+                    blinks = _extract_bing_links(rb.text, max_results=10)
+                    if blinks:
+                        q_terms = _search_terms(query)
+                        pref = _query_preferred_domains(query)
+                        ranked = [
+                            (u, t) for (u, t) in blinks
+                            if not _url_has_explicit_content(u, t)
+                        ]
+                        ranked.sort(
+                            key=lambda it: _score_url_relevance(
+                                f"{it[0]} {it[1]}",
+                                q_terms,
+                                pref,
+                            ),
+                            reverse=True,
+                        )
+                        if ranked:
+                            lines = [f"[Search results] Query: {query}"]
+                            if normalize_note:
+                                lines.append(normalize_note)
+                            for idx, (url, title) in enumerate(ranked[:8], start=1):
+                                lines.append(f"{idx}. {title or url}")
+                                lines.append(f"URL: {url}")
+                            return _text("\n".join(lines)[:max_chars])
+                except Exception:
+                    pass
+                # Tier 3: real-browser search + DOM link extraction.
+                try:
+                    await asyncio.wait_for(
+                        c.post(f"{BROWSER_URL}/search", json={"query": query}),
+                        timeout=35.0,
+                    )
+                    ev = await c.post(f"{BROWSER_URL}/eval", json={"code": r"""
+                        JSON.stringify(
+                            Array.from(document.links)
+                                .map(a => {
+                                    try {
+                                        const u = new URL(a.href);
+                                        if (u.hostname === 'duckduckgo.com' && u.pathname === '/l/')
+                                            return u.searchParams.get('uddg') || null;
+                                        if (u.hostname !== 'duckduckgo.com' && u.hostname !== 'duck.co')
+                                            return a.href;
+                                        return null;
+                                    } catch(e) { return null; }
+                                })
+                                .filter(u => u && u.startsWith('http'))
+                                .filter((u, i, arr) => arr.indexOf(u) === i)
+                                .slice(0, 20)
+                        )
+                    """}, timeout=10)
+                    extracted = json.loads(ev.json().get("result", "[]"))
+                    ranked = [
+                        (u, u) for u in extracted
+                        if u and not _url_has_explicit_content(u)
+                    ]
+                    if ranked:
+                        q_terms = _search_terms(query)
+                        pref = _query_preferred_domains(query)
+                        ranked.sort(
+                            key=lambda it: _score_url_relevance(it[0], q_terms, pref),
+                            reverse=True,
+                        )
+                        lines = [f"[Search results] Query: {query}"]
+                        if normalize_note:
+                            lines.append(normalize_note)
+                        for idx, (url, _title) in enumerate(ranked[:8], start=1):
+                            lines.append(f"{idx}. {url}")
+                            lines.append(f"URL: {url}")
+                        return _text("\n".join(lines)[:max_chars])
+                except Exception:
+                    pass
+                # Tier 4: DDG lite (last resort text scrape)
                 try:
                     r = await c.get(
-                        f"https://lite.duckduckgo.com/lite/?q={query.replace(' ', '+')}",
+                        f"https://lite.duckduckgo.com/lite/?q={_qp(query)}",
                         headers=_BROWSER_HEADERS,
                         follow_redirects=True,
                     )
                     text = re.sub(r"<[^>]+>", " ", r.text)
                     text = re.sub(r"\s+", " ", text).strip()[:max_chars]
-                    return _text(f"[Search results (lite)]\n\n{text}")
+                    header = f"[Search results (lite)] Query: {query}\n"
+                    if normalize_note:
+                        header += normalize_note + "\n"
+                    return _text(header + "\n" + text)
                 except Exception as exc:
                     return _text(f"web_search failed: {exc}")
 
@@ -5054,7 +5508,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # image_search — find images by query; return multiple inline
             # ----------------------------------------------------------------
             if name == "image_search":
-                query      = str(args.get("query", "")).strip()
+                raw_query  = str(args.get("query", "")).strip()
+                query, normalize_note = _normalize_search_query(raw_query)
                 img_count  = max(1, min(int(args.get("count", 4)), 20))
                 img_offset = max(0, int(args.get("offset", 0)))
                 if not query:
@@ -5064,13 +5519,22 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 import json as _js2
                 from urllib.parse import quote_plus as _qp, urlparse as _up2, \
                     parse_qs as _pqs2, unquote as _uq2
-                qwords = {w for w in query.lower().split() if len(w) > 2}
+                qwords = set(_search_terms(query))
+                _preferred_domains = _query_preferred_domains(query)
+                _domain_allow_raw = args.get("domains", [])
+                if isinstance(_domain_allow_raw, str):
+                    _domain_allow_raw = [d.strip() for d in _domain_allow_raw.split(",") if d.strip()]
+                _domain_allow = {
+                    str(d).strip().lower().removeprefix("www.")
+                    for d in (_domain_allow_raw if isinstance(_domain_allow_raw, list) else [])
+                    if str(d).strip()
+                }
 
                 _GOOD_D  = ("wikia.nocookie.net", "imgur.com", "redd.it",
                             "prydwen.gg", "fandom.com", "iopwiki.com", "cdn.")
                 _SKIP_P  = ("/16px-", "/25px-", "/32px-", "/48px-", "favicon",
                             "logo", "icon", "avatar", "pixel.gif", "button",
-                            "ytimg.com", "yt3.ggpht")
+                            "ytimg.com", "yt3.ggpht", "explicit.bing.net")
                 _SKIP_T1 = ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
                             "twitch.tv", "pinterest.com", "instagram.com",
                             "deviantart.com", "artstation.com")
@@ -5136,7 +5600,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 def _score(img: dict) -> int:
                     url_l = img.get("url", "").lower()
                     alt_l = img.get("alt", "").lower()
+                    if _url_has_explicit_content(url_l, alt_l):
+                        return -999
                     if any(p in url_l for p in _SKIP_P):
+                        return -999
+                    host_l = _domain_from_url(url_l)
+                    if _domain_allow and not any(
+                        host_l == d or host_l.endswith(f".{d}") for d in _domain_allow
+                    ):
                         return -999
                     s  = sum(2 for w in qwords if w in url_l)
                     s += sum(5 for w in qwords if w in alt_l)
@@ -5144,6 +5615,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         s += 10
                     else:
                         s += sum(6 for d in _GOOD_D if d in url_l)
+                    s += sum(8 for d in _preferred_domains if host_l == d or host_l.endswith(f".{d}"))
                     if img.get("type") in ("srcset", "picture"):
                         s += 2
                     nw = img.get("natural_w", 0)
@@ -5175,6 +5647,11 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     if not url or not url.startswith("http"):
                         return None
                     url  = _unwrap_thumb(url)
+                    if _url_has_explicit_content(url):
+                        return None
+                    host = _domain_from_url(url)
+                    if _domain_allow and not any(host == d or host.endswith(f".{d}") for d in _domain_allow):
+                        return None
                     hdrs = {
                         "User-Agent":      _BROWSER_HEADERS["User-Agent"],
                         "Accept":          "image/webp,image/apng,image/*,*/*;q=0.8",
@@ -5200,6 +5677,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                     if pil.width < 150 or pil.height < 150:
                                         return None
                                     pil = pil.convert("RGB")
+                                    if _is_low_information_image(pil):
+                                        return None
                                     # dHash intra-call dedup: skip visually identical images
                                     img_hash = _dhash(pil)
                                     if img_hash and any(
@@ -5281,7 +5760,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                 page_imgs = pi_r.json().get("images", [])
                                 if len(page_imgs) < 3:
                                     continue
-                                all_candidates.extend(page_imgs)
+                                for pi in page_imgs:
+                                    pu = _unwrap_thumb(pi.get("url", ""))
+                                    if _url_has_explicit_content(pu, pi.get("alt", "")):
+                                        continue
+                                    if _domain_allow:
+                                        phost = _domain_from_url(pu)
+                                        if not any(phost == d or phost.endswith(f".{d}") for d in _domain_allow):
+                                            continue
+                                    all_candidates.append(pi)
                             except Exception:
                                 continue
                     except Exception:
@@ -5302,10 +5789,22 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                 params2 = _pqs2(_up2(u2).query)
                                 orig2   = _uq2(params2.get("u", [""])[0])
                                 if orig2.startswith("http"):
-                                    all_candidates.append({**img2, "url": orig2})
+                                    if not _url_has_explicit_content(orig2, img2.get("alt", "")):
+                                        if not _domain_allow:
+                                            all_candidates.append({**img2, "url": orig2})
+                                        else:
+                                            h2 = _domain_from_url(orig2)
+                                            if any(h2 == d or h2.endswith(f".{d}") for d in _domain_allow):
+                                                all_candidates.append({**img2, "url": orig2})
                                     continue
                             except Exception:
                                 pass
+                        if _url_has_explicit_content(u2, img2.get("alt", "")):
+                            continue
+                        if _domain_allow:
+                            h2 = _domain_from_url(u2)
+                            if not any(h2 == d or h2.endswith(f".{d}") for d in _domain_allow):
+                                continue
                         all_candidates.append(img2)
                 except Exception:
                     pass
@@ -5321,8 +5820,18 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     for img3 in pi3_r.json().get("images", []):
                         u3 = img3.get("url", "")
                         # Bing wraps images in /th?id=... proxy URLs — skip thumbnails
-                        if "bing.com/th" in u3 or "tse1.mm.bing" in u3:
+                        if (
+                            "bing.com/th" in u3
+                            or ".mm.bing.net" in u3
+                            or "explicit.bing.net" in u3
+                        ):
                             continue
+                        if _url_has_explicit_content(u3, img3.get("alt", "")):
+                            continue
+                        if _domain_allow:
+                            h3 = _domain_from_url(u3)
+                            if not any(h3 == d or h3.endswith(f".{d}") for d in _domain_allow):
+                                continue
                         all_candidates.append(img3)
                 except Exception:
                     pass
@@ -5341,10 +5850,70 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 sorted_cands = sorted_cands[img_offset:]
                 fetch_pool   = sorted_cands[:img_count * 3]
 
+                # Domain-restricted fallback: search site pages directly via Bing,
+                # then extract page images from those URLs.
+                if not fetch_pool and _domain_allow:
+                    site_pages: list[str] = []
+                    for dom in sorted(_domain_allow):
+                        for variant_q in _expand_queries(query):
+                            site_q = f"site:{dom} {variant_q}"
+                            try:
+                                rb = await asyncio.wait_for(
+                                    c.get(
+                                        f"https://www.bing.com/search?q={_qp(site_q)}&setlang=en-US",
+                                        headers=_BROWSER_HEADERS,
+                                        follow_redirects=True,
+                                    ),
+                                    timeout=12.0,
+                                )
+                                for su, _st in _extract_bing_links(rb.text, max_results=6):
+                                    shost = _domain_from_url(su)
+                                    if shost == dom or shost.endswith(f".{dom}"):
+                                        site_pages.append(su)
+                            except Exception:
+                                continue
+                    for page_url in list(dict.fromkeys(site_pages))[:10]:
+                        try:
+                            pi_r = await asyncio.wait_for(
+                                c.post(
+                                    f"{BROWSER_URL}/page_images",
+                                    json={"url": page_url, "scroll": True, "max_scrolls": 1},
+                                ),
+                                timeout=35.0,
+                            )
+                            page_imgs = pi_r.json().get("images", [])
+                            for pi in page_imgs:
+                                pu = _unwrap_thumb(pi.get("url", ""))
+                                if _url_has_explicit_content(pu, pi.get("alt", "")):
+                                    continue
+                                phost = _domain_from_url(pu)
+                                if not any(phost == d or phost.endswith(f".{d}") for d in _domain_allow):
+                                    continue
+                                all_candidates.append(pi)
+                        except Exception:
+                            continue
+                    # Re-score with newly harvested domain-specific candidates.
+                    _intra_seen = set()
+                    fresh = []
+                    for cand in all_candidates:
+                        u = _unwrap_thumb(cand.get("url", ""))
+                        if _score(cand) >= 0 and u not in _seen_urls and u not in _intra_seen:
+                            fresh.append(cand)
+                            _intra_seen.add(u)
+                    sorted_cands = _apply_domain_cap(
+                        sorted(fresh, key=_score, reverse=True), max_per_domain=2
+                    )
+                    sorted_cands = sorted_cands[img_offset:]
+                    fetch_pool = sorted_cands[:img_count * 3]
+
                 if not fetch_pool:
+                    extra = f"\n{normalize_note}" if normalize_note else ""
+                    if _domain_allow:
+                        extra += f"\nDomain filter: {', '.join(sorted(_domain_allow))}"
                     return _text(
                         f"image_search: no image found for '{query}'.\n"
                         "Try: page_images on a specific URL, or refine the query."
+                        + extra
                     )
 
                 fetch_results = await asyncio.gather(
@@ -5426,10 +5995,16 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         pass
 
                 if output_blocks:
+                    if normalize_note:
+                        output_blocks.insert(0, {"type": "text", "text": normalize_note})
                     return output_blocks
+                extra = f"\n{normalize_note}" if normalize_note else ""
+                if _domain_allow:
+                    extra += f"\nDomain filter: {', '.join(sorted(_domain_allow))}"
                 return _text(
                     f"image_search: no image found for '{query}'.\n"
                     "Try: page_images on a specific URL, or refine the query."
+                    + extra
                 )
 
             # ----------------------------------------------------------------
@@ -6370,20 +6945,12 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
         tool_name  = params.get("name", "")
         arguments  = params.get("arguments") or {}
         content_blocks = await _call_tool(tool_name, arguments)
-        if ImageRenderingPolicy.is_image_tool(tool_name):
+        tool_error = _blocks_indicate_error(tool_name, content_blocks)
+        if ImageRenderingPolicy.is_image_tool(tool_name) and not tool_error:
             content_blocks = ImageRenderingPolicy.enforce(content_blocks)
-        # Propagate isError so MCP clients can distinguish tool errors from
-        # successful empty results.  A block is considered an error if it is
-        # text-only AND its text starts with "Error" or "Unknown tool".
-        is_error = (
-            bool(content_blocks)
-            and not any(b.get("type") == "image" for b in content_blocks)
-            and all(b.get("type") == "text" for b in content_blocks)
-            and any(
-                b.get("text", "").startswith(("Error", "Unknown tool"))
-                for b in content_blocks
-            )
-        )
+        # Propagate errors so MCP clients can distinguish failures from
+        # successful text/image content.
+        is_error = _blocks_indicate_error(tool_name, content_blocks)
         return ok({
             "content": content_blocks,
             "isError": is_error,
