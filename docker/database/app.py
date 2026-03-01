@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import time
+from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -652,6 +653,12 @@ def embeddings_list(limit: int = 20, topic: Optional[str] = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Named tuple matching the SELECT column order in conv_search_turns.
+# Using a namedtuple instead of positional indices makes column access
+# self-documenting and immune to accidental reordering of SELECT columns.
+ConvRow = namedtuple("ConvRow", ["id", "session_id", "role", "content", "embedding", "timestamp"])
+
+
 class ConversationSearcher:
     """Encapsulates cosine-similarity ranking of conversation turns.
 
@@ -668,14 +675,6 @@ class ConversationSearcher:
     searcher = ConversationSearcher(rows, query_vec)
     results  = searcher.exclude(bad_session_id).top(50)
     """
-
-    # DB row column indices for the SELECT used in conv_search_turns
-    _COL_ID         = 0
-    _COL_SESSION_ID = 1
-    _COL_ROLE       = 2
-    _COL_CONTENT    = 3
-    _COL_EMBEDDING  = 4
-    _COL_TIMESTAMP  = 5
 
     def __init__(self, rows: list, query_vec: list[float]) -> None:
         self._query_vec = query_vec
@@ -701,21 +700,26 @@ class ConversationSearcher:
 
     def _score_rows(self, rows: list) -> list[dict]:
         scored: list[dict] = []
-        for row in rows:
+        skipped = 0
+        for raw in rows:
             try:
-                vec = json.loads(row[self._COL_EMBEDDING])
+                # Accept both raw tuples and ConvRow namedtuples.
+                row = raw if isinstance(raw, ConvRow) else ConvRow(*raw)
+                vec = json.loads(row.embedding)
                 sim = _cosine_sim(self._query_vec, vec)
-                ts  = row[self._COL_TIMESTAMP]
                 scored.append({
-                    "turn_id":    row[self._COL_ID],
-                    "session_id": row[self._COL_SESSION_ID],
-                    "role":       row[self._COL_ROLE],
-                    "content":    row[self._COL_CONTENT],
+                    "turn_id":    row.id,
+                    "session_id": row.session_id,
+                    "role":       row.role,
+                    "content":    row.content,
                     "similarity": round(sim, 6),
-                    "timestamp":  ts.isoformat() if ts else "",
+                    "timestamp":  row.timestamp.isoformat() if row.timestamp else "",
                 })
-            except Exception:
-                continue  # corrupt row — skip silently
+            except Exception as exc:
+                skipped += 1
+                log.warning("ConversationSearcher: skipping corrupt row — %s", exc)
+        if skipped:
+            log.warning("ConversationSearcher: skipped %d corrupt row(s) out of %d", skipped, len(rows))
         return scored
 
 
@@ -841,6 +845,8 @@ def conv_search_turns(req: ConvSearchIn) -> dict:
 @app.get("/conversations/sessions")
 def conv_list_sessions(limit: int = 20, offset: int = 0) -> dict:
     try:
+        limit  = max(1, min(limit, 500))
+        offset = max(0, min(offset, 100_000))   # prevent DoS via huge offset
         with conn() as c:
             rows = c.execute(
                 """
