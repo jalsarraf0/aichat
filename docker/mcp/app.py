@@ -1716,11 +1716,11 @@ def _resolve_image_path(path: str) -> str | None:
 def _pil_to_blocks(
     img: "_PilImage.Image",
     summary: str,
-    quality: int = 90,
+    quality: int = 85,
     save_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Encode a PIL Image as an inline JPEG MCP block (delegates to ImageRenderer)."""
-    return _renderer.encode(img, summary, save_prefix=save_prefix)
+    return _renderer.encode(img, summary, save_prefix=save_prefix, quality=quality)
 
 
 # ---------------------------------------------------------------------------
@@ -1752,15 +1752,22 @@ class ImageRenderer:
 
     # ── private helpers ──────────────────────────────────────────────────────
 
-    def _compress_to_limit(self, img: "_PilImage.Image") -> bytes:
-        """JPEG-compress img, reducing quality until payload < MAX_BYTES."""
-        for q in self._QUALITY_LADDER:
+    def _compress_to_limit(self, img: "_PilImage.Image", min_quality: int = 85) -> bytes:
+        """JPEG-compress img, reducing quality until payload < MAX_BYTES.
+
+        Starts from min_quality (caller's preference) and steps down through
+        standard rungs until the payload fits within MAX_BYTES.
+        """
+        # Build a descending ladder starting at the caller's quality preference
+        _RUNGS = (75, 65, 50)
+        ladder = [min_quality] + [q for q in _RUNGS if q < min_quality]
+        for q in ladder:
             buf = _io.BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=q)
             raw = buf.getvalue()
             if len(raw) <= self.MAX_BYTES:
                 return raw
-        # Absolute last resort: quality=40 thumbnail
+        # Absolute last resort: quality=40
         buf = _io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=40)
         return buf.getvalue()
@@ -1784,13 +1791,16 @@ class ImageRenderer:
         img: "_PilImage.Image",
         summary: str,
         save_prefix: str | None = None,
+        quality: int = 85,
     ) -> list[dict[str, Any]]:
         """
         Encode a PIL Image → [text_block, image_block], guaranteed to fit
         within MAX_BYTES.  Optionally saves the compressed JPEG to BROWSER_WORKSPACE.
+        quality is the preferred JPEG quality (85–95 recommended); the encoder
+        steps down automatically if the payload would exceed MAX_BYTES.
         """
         img = self._fit(img.convert("RGB"))
-        raw = self._compress_to_limit(img)
+        raw = self._compress_to_limit(img, min_quality=max(40, min(quality, 95)))
         if save_prefix and os.path.isdir(BROWSER_WORKSPACE):
             try:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2231,8 +2241,7 @@ class GpuImageProcessor:
         """Sharpness enhancement.  cv2 Laplacian kernel, PIL ImageEnhance fallback."""
         if cls._CV2_OK:
             arr = cls._to_np(img)
-            kernel = _np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=_np.float32)  # type: ignore[union-attr]
-            # Scale kernel weight by factor
+            # Scale kernel weight by sharpness factor
             k = max(0.0, factor - 1.0)
             kernel = _np.array([[0, -k, 0], [-k, 1 + 4 * k, -k], [0, -k, 0]], dtype=_np.float32)  # type: ignore[union-attr]
             sharpened = _cv2.filter2D(arr, -1, kernel)  # type: ignore[union-attr]
@@ -3201,13 +3210,16 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"{name}: image not found — tried '{path}' in {BROWSER_WORKSPACE}")
 
                 with _PilImage.open(local) as _src:
-                    img = _src.copy()
+                    img = _ImageOps.exif_transpose(_src.copy())
 
                 w, h = img.size
-                left   = int(args.get("left",   0))
-                top    = int(args.get("top",    0))
-                right  = int(args.get("right",  w))
-                bottom = int(args.get("bottom", h))
+                try:
+                    left   = int(args.get("left",   0))
+                    top    = int(args.get("top",    0))
+                    right  = int(args.get("right",  w))
+                    bottom = int(args.get("bottom", h))
+                except (ValueError, TypeError) as _e:
+                    return _text(f"{name}: invalid coordinate — {_e}")
                 # Clamp to image bounds and make positive
                 if right  <= 0: right  = w
                 if bottom <= 0: bottom = h
