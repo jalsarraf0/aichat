@@ -22,7 +22,7 @@ class DatabaseTool:
                 response = await client.request(method, f"{self.base_url}{path}", **kwargs)
                 response.raise_for_status()
                 return response.json()
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             status = None
             retryable = False
             if isinstance(exc, httpx.HTTPStatusError):

@@ -271,6 +271,8 @@ class AIChatApp(App):
         )
 
     async def action_send(self) -> None:
+        if self.state.busy or (self.active_task and not self.active_task.done()):
+            return  # prevent double-submit race condition
         prompt = self.query_one("#prompt", TextArea)
         text = prompt.text
         if not text.strip():
@@ -1043,31 +1045,52 @@ class AIChatApp(App):
     async def _run_followup_response(self) -> None:
         content = ""
         _live_msg: ChatMessage | None = None
-        if self.state.streaming:
-            _live_msg = ChatMessage("Assistant", "_…_", classes="chat-msg chat-assistant")
-            scroll = self._safe_query_one("#transcript", VerticalScroll)
-            if scroll is not None:
-                scroll.mount(_live_msg)
-                self.call_after_refresh(scroll.scroll_end, animate=False)
+        try:
+            if self.state.streaming:
+                _live_msg = ChatMessage("Assistant", "_…_", classes="chat-msg chat-assistant")
+                scroll = self._safe_query_one("#transcript", VerticalScroll)
+                if scroll is not None:
+                    scroll.mount(_live_msg)
+                    self.call_after_refresh(scroll.scroll_end, animate=False)
 
-            def _on_chunk(text: str) -> None:
+                def _on_chunk(text: str) -> None:
+                    if _live_msg is not None:
+                        _live_msg.update_content(text)
+
+                try:
+                    async with asyncio.timeout(300.0):
+                        async for chunk in self.client.chat_stream(
+                            self.state.model, await self._llm_messages(),
+                            max_tokens=self._max_response_tokens or None,
+                        ):
+                            content += chunk
+                            _on_chunk(content)
+                except asyncio.TimeoutError:
+                    if content:
+                        self._tool_log("[followup] 5-minute watchdog fired — using partial response")
+                    else:
+                        self._write_transcript("Assistant", "Follow-up timed out — no response received.")
+                        return
                 if _live_msg is not None:
-                    _live_msg.update_content(text)
-
-            async for chunk in self.client.chat_stream(self.state.model, await self._llm_messages(),
-                                                        max_tokens=self._max_response_tokens or None):
-                content += chunk
-                _on_chunk(content)
+                    try:
+                        _live_msg.remove()
+                    except Exception:
+                        pass
+                    _live_msg = None
+            else:
+                content = await self.client.chat_once(self.state.model, await self._llm_messages(),
+                                                       max_tokens=self._max_response_tokens or None)
+            self._finalize_assistant_response(content)
+        except asyncio.CancelledError:
+            raise
+        except LLMClientError as exc:
+            self._write_transcript("Assistant", f"Follow-up error: {exc}")
+        finally:
             if _live_msg is not None:
                 try:
                     _live_msg.remove()
                 except Exception:
                     pass
-                _live_msg = None
-        else:
-            content = await self.client.chat_once(self.state.model, await self._llm_messages(),
-                                                   max_tokens=self._max_response_tokens or None)
-        self._finalize_assistant_response(content)
 
     async def _llm_messages(self) -> list[dict[str, object]]:
         def _est(text: str) -> int:
@@ -1538,7 +1561,7 @@ class AIChatApp(App):
             if not turns:
                 self._write_transcript("Assistant", "Session has no turns.")
                 return
-            self._start_new_chat(initial=False)
+            self._start_new_chat(initial=True)  # suppress "New chat started" — resume has its own message
             for t in turns:
                 msg = Message(t["role"], t["content"])
                 self.messages.append(msg)

@@ -891,6 +891,28 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "server_time",
+        "description": (
+            "Returns the current server date and time with timezone information. "
+            "Use this tool whenever you need to know the current time, date, day of week, "
+            "or need to reason about time-sensitive information. "
+            "Always call this tool before answering questions about 'today', 'now', 'current date', etc."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA timezone name (e.g. 'America/New_York', 'Europe/London', 'Asia/Tokyo'). "
+                        "Defaults to the server's local timezone if omitted."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -899,13 +921,19 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 def _image_content_blocks(host_path: str, text: str) -> list[dict[str, Any]]:
-    """Build MCP content list with a text summary and inline base64 PNG image."""
+    """Build MCP content list with a text summary and inline base64 image."""
     blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if host_path and os.path.isfile(host_path):
         try:
+            ext = os.path.splitext(host_path)[1].lower()
+            mime = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".webp": "image/webp",
+                ".gif": "image/gif",
+            }.get(ext, "image/png")
             with open(host_path, "rb") as fh:
                 b64 = base64.standard_b64encode(fh.read()).decode("ascii")
-            blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
+            blocks.append({"type": "image", "data": b64, "mimeType": mime})
         except Exception:
             pass
     return blocks
@@ -998,7 +1026,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "screenshot":
-            url = str(arguments.get("url", "")).strip()
+            url = str(arguments.get("url") or "").strip()
             if not url:
                 return _text("screenshot: 'url' is required")
             find_text  = str(arguments["find_text"]).strip()  if arguments.get("find_text")  else None
@@ -1036,7 +1064,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _image_content_blocks(host_path, summary)
 
         if name == "fetch_image":
-            url = str(arguments.get("url", "")).strip()
+            url = str(arguments.get("url") or "").strip()
             if not url:
                 return _text("fetch_image: 'url' is required")
             result = await mgr.run_fetch_image(url, _APPROVAL, None)
@@ -1055,7 +1083,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _image_content_blocks(host_path, summary)
 
         if name == "screenshot_search":
-            query = str(arguments.get("query", "")).strip()
+            query = str(arguments.get("query") or "").strip()
             if not query:
                 return _text("screenshot_search: 'query' is required")
             max_results = min(int(arguments.get("max_results", 3)), 5)
@@ -1078,7 +1106,9 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return blocks
 
         if name == "web_fetch":
-            url = str(arguments.get("url", "")).strip()
+            url = str(arguments.get("url") or "").strip()
+            if not url:
+                return _text("web_fetch: 'url' is required")
             max_chars = int(arguments.get("max_chars", 4000))
             max_chars = max(500, min(max_chars, 16000))
             result = await mgr.run_web_fetch(url, max_chars, _APPROVAL, None)
@@ -1183,7 +1213,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "web_search":
-            query = str(arguments.get("query", "")).strip()
+            query = str(arguments.get("query") or "").strip()
             max_chars = int(arguments.get("max_chars", 4000))
             max_chars = max(500, min(max_chars, 16000))
             result = await mgr.run_web_search(query, max_chars, _APPROVAL, None)
@@ -1497,10 +1527,10 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             return _text("\n".join(lines_out) or "No data extracted.")
 
         if name == "extract_article":
-            url = str(arguments.get("url", "")).strip()
+            url = str(arguments.get("url") or "").strip()
             if not url:
                 return _text("extract_article: 'url' is required")
-            max_chars = max(500, int(arguments.get("max_chars", 8000)))
+            max_chars = max(500, min(int(arguments.get("max_chars", 8000)), 64000))
             result = await mgr.run_web_fetch(url, max_chars, _APPROVAL, None)
             text_out = result.get("text", "")
             clean_lines = [ln.strip() for ln in text_out.splitlines() if ln.strip()]
@@ -1512,7 +1542,7 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
 
         if name == "page_scrape":
             result = await mgr.run_page_scrape(
-                url=str(arguments.get("url", "")),
+                url=str(arguments.get("url") or ""),
                 mode=_APPROVAL, confirmer=None,
                 max_scrolls=max(1, min(int(arguments.get("max_scrolls", 10)), 30)),
                 wait_ms=max(100, min(int(arguments.get("wait_ms", 500)), 3000)),
@@ -2000,6 +2030,28 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 sim = round(r.get("similarity", 0), 3)
                 lines.append(f"  [{ts}] {role} (sim={sim}): {snippet}")
             return _text("\n".join(lines))
+
+        if name == "server_time":
+            from datetime import datetime, timezone
+            import zoneinfo
+            tz_name = str(arguments.get("timezone", "")).strip()
+            try:
+                if tz_name:
+                    tz = zoneinfo.ZoneInfo(tz_name)
+                else:
+                    tz = None  # use local timezone
+            except (zoneinfo.ZoneInfoNotFoundError, KeyError):
+                return _text(f"server_time: unknown timezone '{tz_name}'")
+            now = datetime.now(tz=tz or None)
+            utc_now = datetime.now(timezone.utc)
+            offset = now.strftime("%z") or "local"
+            return _text(
+                f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} ({offset})\n"
+                f"UTC time:     {utc_now.strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n"
+                f"Day of week:  {now.strftime('%A')}\n"
+                f"Timezone:     {tz_name or 'server local'}\n"
+                f"Unix epoch:   {int(utc_now.timestamp())}"
+            )
 
         return _text(f"Unknown tool: {name}")
 
