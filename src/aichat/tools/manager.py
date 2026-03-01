@@ -1380,6 +1380,11 @@ class ToolManager:
         filter_query: str | None = None,
         image_prefix: str = "image",
         max_images: int = 20,
+        button: str = "left",
+        click_count: int = 1,
+        direction: str = "down",
+        amount: int = 800,
+        behavior: str = "instant",
     ) -> dict:
         await self._check_approval(mode, ToolName.BROWSER.value, confirmer)
         try:
@@ -1404,14 +1409,27 @@ class ToolManager:
                     except Exception:
                         pass  # Never fail the screenshot because DB is down
                 return result
-            if action == "click":
+            if action in {"click", "left_click", "right_click"}:
                 if not selector:
                     return {"error": "selector is required for click"}
-                return await self.browser.click(selector)
+                click_button = "right" if action == "right_click" else (
+                    "left" if action == "left_click" else button
+                )
+                return await self.browser.click(
+                    selector=selector,
+                    button=click_button,
+                    click_count=click_count,
+                )
             if action == "fill":
                 if not selector or value is None:
                     return {"error": "selector and value are required for fill"}
                 return await self.browser.fill(selector, value)
+            if action == "scroll":
+                return await self.browser.scroll(
+                    direction=direction,
+                    amount=amount,
+                    behavior=behavior,
+                )
             if action == "read":
                 return await self.browser.read()
             if action == "eval":
@@ -1431,14 +1449,19 @@ class ToolManager:
                     image_urls, prefix=image_prefix, max_images=max_images
                 )
             if action == "download_page_images":
+                if url:
+                    nav_result = await self.browser.navigate(url)
+                    if nav_result.get("error"):
+                        return {"error": f"navigate failed before download_page_images: {nav_result['error']}"}
                 return await self.browser.download_page_images(
                     filter_query=filter_query, max_images=max_images, prefix=image_prefix
                 )
             return {
                 "error": (
                     f"Unknown action '{action}'. "
-                    "Valid: navigate, read, screenshot, click, fill, eval, "
-                    "screenshot_element, list_images_detail, save_images, download_page_images"
+                    "Valid: navigate, read, screenshot, click, left_click, right_click, "
+                    "scroll, fill, eval, screenshot_element, list_images_detail, "
+                    "save_images, download_page_images"
                 )
             }
         except Exception as exc:
@@ -1866,25 +1889,44 @@ class ToolManager:
                         "navigate — go to a URL and return page title + text; "
                         "read — return the current page title + text without navigating; "
                         "screenshot — capture the page as a PNG saved to /workspace (returns file path); "
-                        "click — click a CSS selector; "
+                        "click/left_click/right_click — click a CSS selector with a specific mouse button; "
+                        "scroll — scroll up/down/left/right by pixels; "
                         "fill — type a value into a CSS selector input; "
-                        "eval — run a JavaScript expression and return its result."
+                        "eval — run a JavaScript expression and return its result; "
+                        "screenshot_element — capture a CSS selector element with optional padding; "
+                        "list_images_detail — list all page images with metadata; "
+                        "save_images — download a provided list of image URLs through the browser session; "
+                        "download_page_images — detect images on current page and download them."
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["navigate", "read", "screenshot", "click", "fill", "eval"],
+                                "enum": [
+                                    "navigate",
+                                    "read",
+                                    "screenshot",
+                                    "click",
+                                    "left_click",
+                                    "right_click",
+                                    "scroll",
+                                    "fill",
+                                    "eval",
+                                    "screenshot_element",
+                                    "list_images_detail",
+                                    "save_images",
+                                    "download_page_images",
+                                ],
                                 "description": "Which browser action to perform.",
                             },
                             "url": {
                                 "type": "string",
-                                "description": "URL to navigate to (navigate / screenshot).",
+                                "description": "URL to navigate to (navigate/screenshot/download_page_images).",
                             },
                             "selector": {
                                 "type": "string",
-                                "description": "CSS selector for click / fill.",
+                                "description": "CSS selector for click/fill/screenshot_element.",
                             },
                             "value": {
                                 "type": "string",
@@ -1894,6 +1936,32 @@ class ToolManager:
                                 "type": "string",
                                 "description": "JavaScript expression to evaluate (eval only).",
                             },
+                            "button": {
+                                "type": "string",
+                                "enum": ["left", "right", "middle"],
+                                "description": (
+                                    "Mouse button for click action only (default left). "
+                                    "Ignored by left_click/right_click actions."
+                                ),
+                            },
+                            "click_count": {
+                                "type": "integer",
+                                "description": "Number of clicks for click action (default 1).",
+                            },
+                            "direction": {
+                                "type": "string",
+                                "enum": ["up", "down", "left", "right"],
+                                "description": "Scroll direction (scroll action only).",
+                            },
+                            "amount": {
+                                "type": "integer",
+                                "description": "Pixels to scroll (scroll action only, default 800).",
+                            },
+                            "behavior": {
+                                "type": "string",
+                                "enum": ["instant", "smooth"],
+                                "description": "Scroll behavior for scroll action (default instant).",
+                            },
                             "find_text": {
                                 "type": "string",
                                 "description": (
@@ -1901,6 +1969,34 @@ class ToolManager:
                                     "on the page — the screenshot will be zoomed/clipped to show "
                                     "just the region containing this text."
                                 ),
+                            },
+                            "find_image": {
+                                "type": "string",
+                                "description": (
+                                    "Optional, screenshot only. Part of an image src URL to zoom "
+                                    "to the first matching image on the page."
+                                ),
+                            },
+                            "pad": {
+                                "type": "integer",
+                                "description": "Padding around selector for screenshot_element (default 20).",
+                            },
+                            "image_urls": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Image URLs for save_images.",
+                            },
+                            "filter_query": {
+                                "type": "string",
+                                "description": "Optional src/alt filter for download_page_images.",
+                            },
+                            "image_prefix": {
+                                "type": "string",
+                                "description": "Filename prefix for save_images/download_page_images (default image).",
+                            },
+                            "max_images": {
+                                "type": "integer",
+                                "description": "Max images for save_images/download_page_images (default 20).",
                             },
                         },
                         "required": ["action"],

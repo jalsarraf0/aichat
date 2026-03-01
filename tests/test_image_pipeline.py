@@ -1073,7 +1073,7 @@ class TestNewToolsAdvertised:
 # 23. Image generation tools
 # ===========================================================================
 
-_IMAGE_GEN_URL = "http://192.168.50.2:1234"  # LM Studio
+_IMAGE_GEN_URL = os.environ.get("IMAGE_GEN_BASE_URL", os.environ.get("LM_STUDIO_URL", "http://192.168.50.2:1234"))  # LM Studio
 
 
 def _lm_studio_has_image_model() -> bool:
@@ -1338,6 +1338,20 @@ class TestBrowserV6Schemas:
         assert "list_images_detail" in enum_vals, \
             f"list_images_detail missing from browser action enum: {enum_vals}"
 
+    def test_browser_tool_has_scroll_and_click_variants_in_stdio_schema(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        by_name = {t["name"]: t for t in _TOOL_SCHEMAS}
+        enum_vals = by_name["browser"]["inputSchema"]["properties"]["action"]["enum"]
+        for action in ("scroll", "left_click", "right_click"):
+            assert action in enum_vals, f"{action} missing from stdio browser action enum: {enum_vals}"
+
+    def test_browser_tool_has_save_image_actions_in_stdio_schema(self):
+        from aichat.mcp_server import _TOOL_SCHEMAS
+        by_name = {t["name"]: t for t in _TOOL_SCHEMAS}
+        enum_vals = by_name["browser"]["inputSchema"]["properties"]["action"]["enum"]
+        for action in ("save_images", "download_page_images"):
+            assert action in enum_vals, f"{action} missing from stdio browser action enum: {enum_vals}"
+
     def test_browser_tool_has_find_image_param_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
         by_name = {t["name"]: t for t in _TOOL_SCHEMAS}
@@ -1372,6 +1386,30 @@ class TestBrowserV6Schemas:
         tools = {t["name"]: t for t in r.json()["result"]["tools"]}
         enum_vals = tools["browser"]["inputSchema"]["properties"]["action"]["enum"]
         assert "screenshot_element" in enum_vals
+
+    @skip_mcp
+    def test_browser_tool_has_scroll_and_click_variants_in_mcp_http_schema(self):
+        r = httpx.post(
+            f"{MCP_URL}/mcp",
+            json={"jsonrpc": "2.0", "id": 302, "method": "tools/list", "params": {}},
+            timeout=10,
+        )
+        tools = {t["name"]: t for t in r.json()["result"]["tools"]}
+        enum_vals = tools["browser"]["inputSchema"]["properties"]["action"]["enum"]
+        for action in ("scroll", "left_click", "right_click"):
+            assert action in enum_vals, f"{action} missing from HTTP browser action enum: {enum_vals}"
+
+    @skip_mcp
+    def test_browser_tool_has_save_image_actions_in_mcp_http_schema(self):
+        r = httpx.post(
+            f"{MCP_URL}/mcp",
+            json={"jsonrpc": "2.0", "id": 303, "method": "tools/list", "params": {}},
+            timeout=10,
+        )
+        tools = {t["name"]: t for t in r.json()["result"]["tools"]}
+        enum_vals = tools["browser"]["inputSchema"]["properties"]["action"]["enum"]
+        for action in ("save_images", "download_page_images"):
+            assert action in enum_vals, f"{action} missing from HTTP browser action enum: {enum_vals}"
 
 
 class TestBrowserV6ManagerRouting:
@@ -1465,12 +1503,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_18(self):
+    def test_browser_server_version_is_19(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "18", \
-            f"Expected _REQUIRED_SERVER_VERSION='18', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "18"' in _SERVER_SRC, \
-            "_VERSION = '18' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "19", \
+            f"Expected _REQUIRED_SERVER_VERSION='19', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "19"' in _SERVER_SRC, \
+            "_VERSION = '19' not found in _SERVER_SRC"
 
     def test_browser_server_v14_has_crash_recovery(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1554,11 +1592,12 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v18_has_scrape_endpoint(self):
+    def test_browser_server_v19_has_scrape_and_scroll_endpoints(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "18", \
-            f"Expected v18, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "19", \
+            f"Expected v19, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
+        assert "/scroll" in _SERVER_SRC, "/scroll endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
         assert "ScrapeReq" in _SERVER_SRC, "ScrapeReq missing"
