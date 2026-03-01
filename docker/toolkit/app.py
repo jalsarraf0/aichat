@@ -305,7 +305,10 @@ async def register_tool(req: RegisterRequest) -> dict:
         raise HTTPException(status_code=422, detail=f"Syntax error in code: {exc}") from exc
 
     path = TOOLS_DIR / f"{name}.py"
-    path.write_text(module_src, encoding="utf-8")
+    try:
+        path.write_text(module_src, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write tool file: {exc}") from exc
     _invalidate_cache()
     # Eagerly re-load to catch runtime import errors early
     tools = _load_tools()

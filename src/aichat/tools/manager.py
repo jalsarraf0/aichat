@@ -511,8 +511,9 @@ class ToolManager:
         _norm_subject = query.lower().strip()
         try:
             mem_r = await self.memory.recall(key=_mem_key)
-            if mem_r.get("found"):
-                _seen_urls = set(_js.loads(mem_r["entries"][0]["value"]))
+            entries = mem_r.get("entries") or []
+            if mem_r.get("found") and entries:
+                _seen_urls = set(_js.loads(entries[0]["value"]))
         except Exception:
             pass
 
