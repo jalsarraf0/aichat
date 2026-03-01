@@ -188,8 +188,8 @@ async def global_exc_handler(request: Request, exc: Exception) -> JSONResponse:
 def health() -> dict:
     try:
         with conn() as c:
-            n_articles = c.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-            n_cache    = c.execute("SELECT COUNT(*) FROM web_cache").fetchone()[0]
+            n_articles = (c.execute("SELECT COUNT(*) FROM articles").fetchone() or [0])[0]
+            n_cache    = (c.execute("SELECT COUNT(*) FROM web_cache").fetchone() or [0])[0]
         return {"ok": True, "articles": n_articles, "cached_pages": n_cache}
     except Exception as exc:
         log.error("Health check failed: %s", exc)

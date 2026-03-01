@@ -1602,8 +1602,8 @@ class BrowserTool:
         self._start_server_daemon()
 
         # Wait for the server to become healthy
-        deadline = asyncio.get_event_loop().time() + _STARTUP_TIMEOUT
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + _STARTUP_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(1.0)
             try:
                 async with httpx.AsyncClient(timeout=2.0) as c:

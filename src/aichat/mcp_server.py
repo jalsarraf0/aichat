@@ -2082,7 +2082,7 @@ async def _handle(line: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def _run() -> None:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
