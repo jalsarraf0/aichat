@@ -30,35 +30,62 @@ logging.basicConfig(
 log = logging.getLogger("aichat-memory")
 
 # ---------------------------------------------------------------------------
-# Error reporting
+# Error reporting — OOP wrapper so callers are decoupled from HTTP details
 # ---------------------------------------------------------------------------
 
 _DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 _SERVICE_NAME = "aichat-memory"
 
 
+class ErrorReporter:
+    """Fire-and-forget error reporter for aichat microservices.
+
+    Sends structured error records to the central aichat-database service.
+    All exceptions are swallowed so a reporting failure can never crash the
+    calling service (fire-and-forget semantics).
+
+    Usage
+    -----
+    reporter = ErrorReporter(database_url, service_name)
+    asyncio.create_task(reporter.report("Something failed", detail=str(exc)))
+    """
+
+    def __init__(self, database_url: str, service_name: str) -> None:
+        self._url          = database_url.rstrip("/")
+        self._service_name = service_name
+
+    async def report(self, message: str, detail: str | None = None) -> None:
+        """Send an ERROR entry to the database service; never raises."""
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(
+                    f"{self._url}/errors/log",
+                    json={"service": self._service_name, "level": "ERROR",
+                          "message": message, "detail": detail},
+                )
+        except Exception:
+            pass  # never let error reporting crash the service
+
+
+_error_reporter = ErrorReporter(_DATABASE_URL, _SERVICE_NAME)
+
+
 async def _report_error(message: str, detail: str | None = None) -> None:
-    """Fire-and-forget: send an error entry to aichat-database."""
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            await client.post(
-                f"{_DATABASE_URL}/errors/log",
-                json={"service": _SERVICE_NAME, "level": "ERROR",
-                      "message": message, "detail": detail},
-            )
-    except Exception:
-        pass  # never let error reporting crash the service
+    """Module-level shim kept for backwards compatibility."""
+    await _error_reporter.report(message, detail)
+
 
 # ---------------------------------------------------------------------------
 # SQLite database helpers
 # ---------------------------------------------------------------------------
 
 DB_PATH = Path("/data/memory.db")
+_SQLITE_TIMEOUT = 5.0   # seconds to wait for a locked DB before raising
 
 
 @contextmanager
 def _db() -> Generator[sqlite3.Connection, None, None]:
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=_SQLITE_TIMEOUT)
     con.row_factory = sqlite3.Row
     try:
         yield con

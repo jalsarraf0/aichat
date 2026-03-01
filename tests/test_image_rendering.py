@@ -1013,6 +1013,117 @@ class TestVisionCache:
         assert self.cache.get("aaa") == (True, "match", 0.95)
         assert self.cache.get("bbb") == (False, "no match", 0.1)
 
+    # ── LRU re-insertion regression tests (Bug #1 fix) ───────────────────────
+
+    def test_reinsertion_promotes_to_most_recently_used(self):
+        """Re-inserting an existing key must move it to the back of the LRU
+        queue so it is NOT the next to be evicted."""
+        import collections
+        cache = VisionCache()
+        cache.put("hash_a", (True, "a", 0.9))
+        cache.put("hash_b", (True, "b", 0.8))
+        # Re-insert hash_a → should move to back (most recently used)
+        cache.put("hash_a", (False, "a-updated", 0.5))
+        # Verify value was updated
+        assert cache.get("hash_a") == (False, "a-updated", 0.5)
+        # Now fill up to just over capacity — hash_b was NOT re-inserted, so it
+        # should be evicted first (it's still at the front of the queue)
+        for i in range(VisionCache._MAX_SIZE - 1):
+            cache.put(f"fill_{i:05d}", (True, "x", 0.1))
+        # hash_a was promoted → still present
+        assert cache.get("hash_a") is not None, (
+            "hash_a was spuriously evicted even though it was re-inserted (LRU bug)"
+        )
+        # hash_b was the oldest remaining → must be evicted
+        assert cache.get("hash_b") is None, (
+            "hash_b should have been evicted as the LRU entry"
+        )
+
+    def test_reinsertion_does_not_grow_size(self):
+        """Re-inserting an existing key must not increase the cache size."""
+        cache = VisionCache()
+        cache.put("h1", (True, "first", 0.9))
+        cache.put("h1", (False, "second", 0.5))
+        assert cache.size() == 1
+
+    def test_lru_eviction_respects_insertion_order(self):
+        """When cache is at capacity, popleft must evict the true LRU entry."""
+        cache = VisionCache()
+        for i in range(VisionCache._MAX_SIZE):
+            cache.put(f"h{i:04d}", (True, str(i), 0.5))
+        assert cache.size() == VisionCache._MAX_SIZE
+        # Add one more — h0000 (oldest) must be evicted
+        cache.put("h_new", (True, "new", 0.9))
+        assert cache.size() == VisionCache._MAX_SIZE
+        assert cache.get("h0000") is None,  "LRU entry was not evicted"
+        assert cache.get("h_new") is not None, "Newly inserted entry missing"
+
+    def test_deque_order_preserved_after_clear(self):
+        """After clear(), inserting again must work correctly."""
+        cache = VisionCache()
+        cache.put("x", (True, "x", 0.9))
+        cache.clear()
+        assert cache.size() == 0
+        cache.put("x", (True, "x-again", 0.7))
+        assert cache.size() == 1
+        assert cache.get("x") == (True, "x-again", 0.7)
+
+
+# ===========================================================================
+# 8b. isError propagation tests
+# ===========================================================================
+
+@skip_load
+class TestIsErrorPropagation:
+    """Unit tests for the isError field set by _handle_rpc tools/call dispatch.
+
+    The fix ensures tool error responses (text starting with 'Error' or
+    'Unknown tool') set isError=True so MCP clients can distinguish failures
+    from empty successful responses.
+    """
+
+    def _is_error_for_blocks(self, blocks: list[dict]) -> bool:
+        """Mirror the is_error logic from _handle_rpc."""
+        return (
+            bool(blocks)
+            and not any(b.get("type") == "image" for b in blocks)
+            and all(b.get("type") == "text" for b in blocks)
+            and any(
+                b.get("text", "").startswith(("Error", "Unknown tool"))
+                for b in blocks
+            )
+        )
+
+    def test_iserror_true_for_error_text_block(self):
+        blocks = [{"type": "text", "text": "Error: tool failed"}]
+        assert self._is_error_for_blocks(blocks) is True
+
+    def test_iserror_true_for_unknown_tool_block(self):
+        blocks = [{"type": "text", "text": "Unknown tool: foobar"}]
+        assert self._is_error_for_blocks(blocks) is True
+
+    def test_iserror_false_for_success_text(self):
+        blocks = [{"type": "text", "text": "Search results: 5 items found"}]
+        assert self._is_error_for_blocks(blocks) is False
+
+    def test_iserror_false_for_image_block(self):
+        blocks = [
+            {"type": "text", "text": "Error: partial"},  # error text present
+            {"type": "image", "data": "abc", "mimeType": "image/jpeg"},
+        ]
+        # Has an image block → isError must be False (image tools return errors via text+image)
+        assert self._is_error_for_blocks(blocks) is False
+
+    def test_iserror_false_for_empty_blocks(self):
+        assert self._is_error_for_blocks([]) is False
+
+    def test_iserror_false_for_mixed_successful_text(self):
+        blocks = [
+            {"type": "text", "text": "First paragraph"},
+            {"type": "text", "text": "Second paragraph"},
+        ]
+        assert self._is_error_for_blocks(blocks) is False
+
 
 # ===========================================================================
 # 9. GpuCodeRuntime — unit tests

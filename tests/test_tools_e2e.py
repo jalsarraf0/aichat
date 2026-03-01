@@ -1830,3 +1830,61 @@ class TestManagerDefaults:
         assert fn, "run_web_fetch not found in manager.py"
         assert '"cached"' in fn.group(0) or "'cached'" in fn.group(0), \
             "'cached' key not returned by run_web_fetch"
+
+
+# ===========================================================================
+# TestErrorReporter — unit tests for ErrorReporter OOP class in memory service
+# ===========================================================================
+
+class TestErrorReporter:
+    """Unit tests for the ErrorReporter OOP class in docker/memory/app.py."""
+
+    def _load_memory_app(self):
+        import importlib.util, pathlib, sys
+        spec = importlib.util.spec_from_file_location(
+            "docker_memory_app_errortest",
+            pathlib.Path(__file__).parent.parent / "docker" / "memory" / "app.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["docker_memory_app_errortest"] = mod
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+    def test_error_reporter_class_exists(self):
+        mod = self._load_memory_app()
+        assert hasattr(mod, "ErrorReporter"), "ErrorReporter class not found in docker/memory/app.py"
+
+    def test_error_reporter_has_report_method(self):
+        import inspect
+        mod = self._load_memory_app()
+        reporter = mod.ErrorReporter("http://localhost:8091", "test-service")
+        assert hasattr(reporter, "report"), "ErrorReporter.report() method missing"
+        assert inspect.iscoroutinefunction(reporter.report), "ErrorReporter.report must be async"
+
+    @pytest.mark.asyncio
+    async def test_error_reporter_swallows_exceptions(self):
+        """ErrorReporter.report() must never raise even if the DB is unreachable."""
+        mod = self._load_memory_app()
+        reporter = mod.ErrorReporter("http://127.0.0.1:1", "test-service")
+        # Should not raise — connection refused is swallowed
+        try:
+            await reporter.report("test error", detail="no detail")
+        except Exception as exc:
+            pytest.fail(f"ErrorReporter.report() raised unexpectedly: {exc}")
+
+    @pytest.mark.asyncio
+    async def test_error_reporter_module_shim_callable(self):
+        """The module-level _report_error shim must delegate to ErrorReporter."""
+        mod = self._load_memory_app()
+        assert callable(mod._report_error), "_report_error shim must be callable"
+        # Should not raise
+        try:
+            await mod._report_error("shim test", detail="ok")
+        except Exception as exc:
+            pytest.fail(f"_report_error raised unexpectedly: {exc}")
+
+    def test_sqlite_timeout_constant_defined(self):
+        """_SQLITE_TIMEOUT must be defined and > 0."""
+        mod = self._load_memory_app()
+        assert hasattr(mod, "_SQLITE_TIMEOUT"), "_SQLITE_TIMEOUT not defined in docker/memory/app.py"
+        assert mod._SQLITE_TIMEOUT > 0, "_SQLITE_TIMEOUT must be positive"

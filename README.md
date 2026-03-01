@@ -755,20 +755,51 @@ Cycle with **F4** or set permanently in config (`approval: AUTO`).
 
 ---
 
+## OOP Class Reference
+
+Every major subsystem is encapsulated as an OOP class. Key classes:
+
+| Class | File | Purpose |
+|-------|------|---------|
+| `ImageRenderer` | `docker/mcp/app.py` | Compress & inline-encode images to base64; enforces 3 MB LM Studio limit |
+| `ImageRenderingPolicy` | `docker/mcp/app.py` | Guarantees every image tool call returns an inline image block — 3-step escalation (passthrough → fallback bytes → placeholder JPEG) |
+| `VisionCache` | `docker/mcp/app.py` | LRU cache (deque, O(1) eviction) for perceptual hash → vision confirmation results; capacity 500 |
+| `WorkflowStep` | `docker/mcp/app.py` | Dataclass: `id`, `tool`, `args`, `depends_on`, `label` for `orchestrate` |
+| `WorkflowResult` | `docker/mcp/app.py` | Dataclass: `step_id`, `label`, `tool`, `result`, `ok`, `duration_ms` |
+| `WorkflowExecutor` | `docker/mcp/app.py` | Topological wave execution; Kahn's algorithm; `asyncio.gather` parallelism; `{id.result}` interpolation |
+| `ModelRegistry` | `docker/mcp/app.py` | Singleton; TTL-cached LM Studio model list; detects vision/image-gen/chat models |
+| `GpuDetector` | `docker/mcp/app.py` | Cached GPU probe (NVIDIA/Intel/none) via nvidia-smi, vainfo, /dev/dri |
+| `GpuUpscaler` | `docker/mcp/app.py` | LM Studio image upscaling with CPU LANCZOS fallback |
+| `GpuImageProcessor` | `docker/mcp/app.py` | Static methods: resize, sharpen, enhance, diff, grayscale, annotate (OpenCV CUDA → OpenCV CPU → PIL) |
+| `GpuCodeRuntime` | `docker/mcp/app.py` | Prepends DEVICE detection preamble to `code_run` payloads targeting torch/TF/CUDA |
+| `BrowserGpuConfig` | `src/aichat/tools/browser.py` | Intel Arc GPU config for Chromium (DRI passthrough, VAAPI) |
+| `LMStudioTool` | `src/aichat/tools/lm_studio.py` | TTS, embeddings, chat, caption, summarize, structured extract |
+| `CodeInterpreterTool` | `src/aichat/tools/code_interpreter.py` | Async code execution with pip install, timeout, cleanup |
+| `ThinkingTool` | `src/aichat/tools/thinking.py` | N parallel reasoning chains via `asyncio.gather`; heuristic scoring; synthesis |
+| `ConversationStoreTool` | `src/aichat/tools/conversation_store.py` | Fail-open HTTP client for conversation sessions/turns/search |
+| `ConversationSearcher` | `docker/database/app.py` | Cosine-similarity ranking with `ConvRow` namedtuple, `.exclude()` chaining, `.top(n)` |
+| `ConvRow` | `docker/database/app.py` | `namedtuple("ConvRow", [id, session_id, role, content, embedding, timestamp])` — type-safe DB row access |
+| `ErrorReporter` | `docker/memory/app.py` | Fire-and-forget OOP error reporter; swallows all exceptions; module-level shim for backwards compat |
+
+---
+
 ## Running Tests
 
 ```bash
 # Activate the venv first
 source ~/.local/share/aichat/venv/bin/activate
 
-# All tests (827+ pass, 3 skipped)
-pytest
-
-# Fast unit tests only (no Docker required)
+# All tests (912+ pass, 3 skipped, 0 fail)
 pytest -k "not smoke" -q
 
 # Orchestration tool tests
 pytest tests/test_orchestrate.py -v -k "not smoke"
+
+# Image rendering guarantee + OOP tests
+pytest tests/test_image_rendering.py -v -k "not smoke"
+
+# Conversation DB + ConversationSearcher OOP tests
+pytest tests/test_conversation_db.py -v -k "not smoke"
 
 # GPU acceleration tests
 pytest tests/test_browser_gpu.py -v -k "not smoke"
@@ -795,6 +826,27 @@ pytest -m smoke -v
 | `INTEL_GPU` | mcp, toolkit | Set `1` to force GPU mode even without `/dev/dri` detection |
 | `TOOL_TIMEOUT` | mcp, toolkit | Max seconds per tool call (default: `30`) |
 | `LM_STUDIO_URL` | tui | Override LM Studio URL from shell |
+
+---
+
+## Recent Changes
+
+### Code review fixes (latest)
+- **VisionCache LRU** — `_order` now uses `collections.deque` (O(1) `popleft`) and correctly re-inserts existing keys at the back of the queue so frequently-updated hashes are never spuriously evicted (was: re-insert did not update position)
+- **`_handle_rpc` `isError` propagation** — `tools/call` responses that contain only text blocks starting with `"Error"` or `"Unknown tool"` now set `"isError": true` so MCP clients can distinguish tool failures from empty successes
+- **`ConversationSearcher`** — replaced positional `_COL_*` magic integers with a `ConvRow` namedtuple for type-safe, reorder-proof column access; corrupt rows now emit `log.warning` with a count instead of silently disappearing
+- **`conv_list_sessions` offset bounds** — `limit` and `offset` are now clamped (`limit ≤ 500`, `offset ≤ 100,000`) to prevent DoS via unbounded pagination queries
+- **`ErrorReporter` OOP class** — extracted from inline `_report_error()` function in `docker/memory/app.py`; encapsulates fire-and-forget HTTP reporting with timeout; module-level shim preserved for backwards compatibility
+- **sqlite3 timeout** — `sqlite3.connect()` in the memory service now uses `timeout=5.0` to prevent indefinite hangs on locked databases
+- **`test_report_error_helper_does_not_raise`** — fixed `from docker.memory import app` (no `__init__.py`) with importlib load, consistent with all other test files
+- **`test_search_excludes_current_session`** — uses orthogonal embedding `[0,…,0,1]` so new test entries always rank first regardless of accumulated historical data and service limit caps
+
+### Image rendering guarantee
+- **`ImageRenderingPolicy`** — all 20 image-returning MCP tools pass through a 3-step enforcement layer in `_handle_rpc`: (1) passthrough if image present, (2) compress fallback bytes via `_renderer`, (3) append dark-grey JPEG placeholder — LM Studio never shows "external image"
+- **Screenshot fallback** — blocked-page image fetch now routes through `_renderer.encode_url_bytes()` for proper 3 MB compression instead of raw `base64.b64encode`
+
+### Orchestration tool
+- **`orchestrate`** (49th MCP tool) — declare a multi-step workflow; parallel steps use `asyncio.gather`; sequential steps respect `depends_on`; earlier results injectable via `{step_id.result}`; returns structured timing report
 
 ---
 

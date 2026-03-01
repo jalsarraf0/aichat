@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import random
@@ -2407,30 +2408,44 @@ class VisionCache:
     confirmation results.  Eliminates redundant LM Studio /v1/chat/completions
     calls for images that have already been confirmed or rejected.
 
-    Capacity: 500 entries; oldest evicted on overflow.
+    Capacity: 500 entries; least-recently-used entry evicted on overflow.
+
+    LRU semantics
+    -------------
+    * ``get()`` — cache hit does NOT promote the entry (read-only).
+    * ``put()`` — on re-insert, the entry is moved to the *back* of the
+      eviction queue so frequently-updated hashes are never spuriously evicted.
+    * Uses ``collections.deque`` for O(1) popleft on every eviction.
     """
 
     _MAX_SIZE: int = 500
 
     def __init__(self) -> None:
         self._cache: dict[str, tuple[bool, str, float]] = {}
-        self._order: list[str] = []    # FIFO for eviction
+        self._order: collections.deque[str] = collections.deque()  # LRU order
 
-    def get(self, phash: str) -> "tuple[bool, str, float] | None":
+    def get(self, phash: str) -> tuple[bool, str, float] | None:
         """Return cached (is_match, desc, conf) for phash, or None if absent."""
         if not phash:
             return None
         return self._cache.get(phash)
 
     def put(self, phash: str, result: tuple[bool, str, float]) -> None:
-        """Store result; evict the oldest entry when over capacity."""
+        """Store result; on re-insert move to back (LRU); evict LRU on overflow."""
         if not phash:
             return
-        if phash not in self._cache:
+        if phash in self._cache:
+            # Re-insert: promote to most-recently-used position.
+            try:
+                self._order.remove(phash)
+            except ValueError:
+                pass  # defensive: deque and cache can't be out of sync, but be safe
+        else:
+            # New entry: evict LRU if at capacity.
             if len(self._cache) >= self._MAX_SIZE:
-                oldest = self._order.pop(0)
+                oldest = self._order.popleft()   # O(1) via deque
                 self._cache.pop(oldest, None)
-            self._order.append(phash)
+        self._order.append(phash)
         self._cache[phash] = result
 
     def size(self) -> int:
@@ -4859,9 +4874,21 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
         content_blocks = await _call_tool(tool_name, arguments)
         if ImageRenderingPolicy.is_image_tool(tool_name):
             content_blocks = ImageRenderingPolicy.enforce(content_blocks)
+        # Propagate isError so MCP clients can distinguish tool errors from
+        # successful empty results.  A block is considered an error if it is
+        # text-only AND its text starts with "Error" or "Unknown tool".
+        is_error = (
+            bool(content_blocks)
+            and not any(b.get("type") == "image" for b in content_blocks)
+            and all(b.get("type") == "text" for b in content_blocks)
+            and any(
+                b.get("text", "").startswith(("Error", "Unknown tool"))
+                for b in content_blocks
+            )
+        )
         return ok({
             "content": content_blocks,
-            "isError": False,
+            "isError": is_error,
         })
 
     if method == "ping":
