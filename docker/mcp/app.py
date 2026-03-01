@@ -1778,7 +1778,9 @@ class ImageRenderer:
         max_w: int = 1280,
         max_h: int = 1024,
     ) -> "_PilImage.Image":
-        """Downscale img to fit within max_w × max_h, preserving aspect ratio."""
+        """Downscale img to fit within max_w × max_h, preserving aspect ratio.
+        When max_w/max_h are raised (e.g. for upscale output), the image passes
+        through unchanged unless it exceeds those larger bounds."""
         if img.width > max_w or img.height > max_h:
             img = img.copy()
             img.thumbnail((max_w, max_h), _PilImage.LANCZOS)
@@ -1792,14 +1794,18 @@ class ImageRenderer:
         summary: str,
         save_prefix: str | None = None,
         quality: int = 85,
+        max_w: int = 1280,
+        max_h: int = 1024,
     ) -> list[dict[str, Any]]:
         """
         Encode a PIL Image → [text_block, image_block], guaranteed to fit
         within MAX_BYTES.  Optionally saves the compressed JPEG to BROWSER_WORKSPACE.
         quality is the preferred JPEG quality (85–95 recommended); the encoder
         steps down automatically if the payload would exceed MAX_BYTES.
+        max_w / max_h control the pixel-dimension cap before compression
+        (default 1280×1024 for chat; raise to 4096×4096 for upscale output).
         """
-        img = self._fit(img.convert("RGB"))
+        img = self._fit(img.convert("RGB"), max_w=max_w, max_h=max_h)
         raw = self._compress_to_limit(img, min_quality=max(40, min(quality, 95)))
         if save_prefix and os.path.isdir(BROWSER_WORKSPACE):
             try:
@@ -4014,8 +4020,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 local = _resolve_image_path(path)
                 if not local:
                     return _text(f"image_upscale: image not found — '{path}' in {BROWSER_WORKSPACE}")
-                scale   = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
-                sharpen = bool(args.get("sharpen", True))
+                try:
+                    scale = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
+                except (ValueError, TypeError):
+                    scale = 2.0
+                # sharpen: accept bool or string "false"/"true"
+                _sharpen_raw = args.get("sharpen", True)
+                sharpen = not (str(_sharpen_raw).lower() in ("false", "0", "no"))
                 # gpu param: None/unset → auto (GPU primary), False → force CPU only
                 gpu_arg = args.get("gpu", None)
                 force_cpu = (gpu_arg is False or str(gpu_arg).lower() == "false")
@@ -4036,7 +4047,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"  {ow}×{oh} → {ai_w}×{ai_h}\n"
                             f"Source: {os.path.basename(path)}"
                         )
-                        return _renderer.encode(ai_result, summary, save_prefix="upscaled")
+                        return _renderer.encode(ai_result, summary, save_prefix="upscaled",
+                                                max_w=4096, max_h=4096)
                     # GPU call failed — warn and fall through to CPU LANCZOS
                     cpu_note = (
                         f"⚠ GPU AI upscale failed (no model loaded or LM Studio unreachable). "
@@ -4065,7 +4077,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     + (" [scale capped to 8192px]" if capped else "")
                     + f"\nSource: {os.path.basename(path)}"
                 )
-                return _renderer.encode(upscaled, summary, save_prefix="upscaled")
+                return _renderer.encode(upscaled, summary, save_prefix="upscaled",
+                                        max_w=4096, max_h=4096)
 
             # ----------------------------------------------------------------
             if name == "browser_save_images":
