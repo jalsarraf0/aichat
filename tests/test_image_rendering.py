@@ -124,21 +124,23 @@ def _load_mcp_classes():
 # Module-level import (cached)
 try:
     _mcp = _load_mcp_classes()
-    ImageRenderer    = _mcp.ImageRenderer
-    GpuDetector      = _mcp.GpuDetector
-    GpuUpscaler      = _mcp.GpuUpscaler
-    GpuImageProcessor = _mcp.GpuImageProcessor
-    ModelRegistry    = _mcp.ModelRegistry
-    VisionCache      = _mcp.VisionCache
-    GpuCodeRuntime   = _mcp.GpuCodeRuntime
-    _MAX_INLINE_BYTES = _mcp._MAX_INLINE_BYTES
-    _HAS_PIL         = _mcp._HAS_PIL
-    _HAS_CV2         = _mcp._HAS_CV2
-    _LOAD_OK         = True
+    ImageRenderer         = _mcp.ImageRenderer
+    ImageRenderingPolicy  = _mcp.ImageRenderingPolicy
+    GpuDetector           = _mcp.GpuDetector
+    GpuUpscaler           = _mcp.GpuUpscaler
+    GpuImageProcessor     = _mcp.GpuImageProcessor
+    ModelRegistry         = _mcp.ModelRegistry
+    VisionCache           = _mcp.VisionCache
+    GpuCodeRuntime        = _mcp.GpuCodeRuntime
+    _MAX_INLINE_BYTES     = _mcp._MAX_INLINE_BYTES
+    _HAS_PIL              = _mcp._HAS_PIL
+    _HAS_CV2              = _mcp._HAS_CV2
+    _LOAD_OK              = True
 except Exception as _e:
-    _LOAD_OK          = False
-    _LOAD_ERR         = str(_e)
-    _MAX_INLINE_BYTES = 3_000_000
+    _LOAD_OK              = False
+    _LOAD_ERR             = str(_e)
+    _MAX_INLINE_BYTES     = 3_000_000
+    ImageRenderingPolicy  = None  # type: ignore[assignment]
 
 skip_load = pytest.mark.skipif(not _LOAD_OK, reason=f"docker/mcp/app.py load failed")
 skip_pil  = pytest.mark.skipif(not _LOAD_OK or not _HAS_PIL if _LOAD_OK else True, reason="PIL not available")
@@ -281,7 +283,140 @@ class TestImageRenderer:
 
 
 # ===========================================================================
-# 2. GpuDetector — unit tests
+# 2. ImageRenderingPolicy — unit tests (no Docker, no network)
+# ===========================================================================
+
+@skip_load
+class TestImageRenderingPolicy:
+    """Unit tests for ImageRenderingPolicy OOP class."""
+
+    # ── has_image ────────────────────────────────────────────────────────────
+
+    def test_has_image_true_when_image_block_present(self):
+        blocks = [{"type": "text", "text": "hi"}, {"type": "image", "data": "abc", "mimeType": "image/jpeg"}]
+        assert ImageRenderingPolicy.has_image(blocks) is True
+
+    def test_has_image_false_when_no_image_block(self):
+        blocks = [{"type": "text", "text": "no image here"}]
+        assert ImageRenderingPolicy.has_image(blocks) is False
+
+    def test_has_image_false_on_empty_list(self):
+        assert ImageRenderingPolicy.has_image([]) is False
+
+    # ── is_image_tool ────────────────────────────────────────────────────────
+
+    def test_is_image_tool_screenshot(self):
+        assert ImageRenderingPolicy.is_image_tool("screenshot") is True
+
+    def test_is_image_tool_fetch_image(self):
+        assert ImageRenderingPolicy.is_image_tool("fetch_image") is True
+
+    def test_is_image_tool_image_generate(self):
+        assert ImageRenderingPolicy.is_image_tool("image_generate") is True
+
+    def test_is_image_tool_false_for_web_search(self):
+        assert ImageRenderingPolicy.is_image_tool("web_search") is False
+
+    def test_is_image_tool_false_for_orchestrate(self):
+        assert ImageRenderingPolicy.is_image_tool("orchestrate") is False
+
+    def test_image_tools_frozenset_is_frozenset(self):
+        assert isinstance(ImageRenderingPolicy.IMAGE_TOOLS, frozenset)
+
+    def test_image_tools_frozenset_contains_bulk_screenshot(self):
+        assert "bulk_screenshot" in ImageRenderingPolicy.IMAGE_TOOLS
+
+    # ── enforce — passthrough ─────────────────────────────────────────────
+
+    def test_enforce_passthrough_when_image_present(self):
+        """If blocks already contain an image, enforce() must return unchanged."""
+        img_block = {"type": "image", "data": "abc", "mimeType": "image/jpeg"}
+        txt_block = {"type": "text", "text": "hello"}
+        blocks = [txt_block, img_block]
+        result = ImageRenderingPolicy.enforce(blocks)
+        assert result is blocks  # same object — no copy
+
+    # ── enforce — placeholder fallback ───────────────────────────────────
+
+    def test_enforce_adds_placeholder_when_no_image(self):
+        """enforce() must append a placeholder image block when PIL is available."""
+        if not _HAS_PIL:
+            pytest.skip("PIL not available — placeholder not generated")
+        blocks = [{"type": "text", "text": "Image unavailable"}]
+        result = ImageRenderingPolicy.enforce(blocks)
+        assert ImageRenderingPolicy.has_image(result), (
+            "enforce() failed to add placeholder image block"
+        )
+
+    def test_enforce_placeholder_is_valid_base64_jpeg(self):
+        """The placeholder must be a non-empty valid JPEG."""
+        if not _HAS_PIL:
+            pytest.skip("PIL not available")
+        result = ImageRenderingPolicy.enforce([{"type": "text", "text": "x"}])
+        img = next((b for b in result if b.get("type") == "image"), None)
+        assert img is not None
+        raw = base64.b64decode(img["data"])
+        assert raw[:2] == b"\xff\xd8", "Placeholder is not a JPEG"
+        assert img["mimeType"] == "image/jpeg"
+
+    def test_enforce_placeholder_under_size_limit(self):
+        """The placeholder JPEG must be well under the inline size limit."""
+        if not _HAS_PIL:
+            pytest.skip("PIL not available")
+        result = ImageRenderingPolicy.enforce([{"type": "text", "text": "x"}])
+        img = next((b for b in result if b.get("type") == "image"), None)
+        assert img is not None
+        raw = base64.b64decode(img["data"])
+        assert len(raw) < _MAX_INLINE_BYTES
+
+    def test_enforce_preserves_existing_text_blocks(self):
+        """enforce() must keep all original text blocks alongside the new image."""
+        if not _HAS_PIL:
+            pytest.skip("PIL not available")
+        blocks = [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]
+        result = ImageRenderingPolicy.enforce(blocks)
+        texts = [b["text"] for b in result if b.get("type") == "text"]
+        assert "first" in texts
+        assert "second" in texts
+
+    # ── enforce — fallback_bytes path ─────────────────────────────────────
+
+    def test_enforce_uses_fallback_bytes_before_placeholder(self):
+        """When fallback_bytes are provided and valid, they produce an image block
+        instead of the placeholder."""
+        if not _HAS_PIL:
+            pytest.skip("PIL not available")
+        raw_png = _make_test_png_bytes(200, 150)
+        blocks = [{"type": "text", "text": "fallback test"}]
+        result = ImageRenderingPolicy.enforce(blocks, fallback_bytes=raw_png, content_type="image/png")
+        assert ImageRenderingPolicy.has_image(result), "enforce() ignored valid fallback_bytes"
+        img_bytes = _get_image_bytes(result)
+        assert len(img_bytes) > 0
+        assert len(img_bytes) <= _MAX_INLINE_BYTES
+
+    # ── _placeholder ──────────────────────────────────────────────────────
+
+    def test_placeholder_returns_none_when_no_pil(self, monkeypatch):
+        """Without PIL, _placeholder() must return None (caller handles)."""
+        monkeypatch.setattr(_mcp, "_HAS_PIL", False)
+        result = ImageRenderingPolicy._placeholder()
+        assert result is None
+
+    def test_placeholder_returns_dict_when_pil_available(self):
+        if not _HAS_PIL:
+            pytest.skip("PIL not available")
+        result = ImageRenderingPolicy._placeholder()
+        assert isinstance(result, dict)
+        assert result.get("type") == "image"
+        assert "data" in result
+        assert "mimeType" in result
+
+
+# ===========================================================================
+# 3. GpuDetector — unit tests
 # ===========================================================================
 
 @skip_load
