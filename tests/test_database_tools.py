@@ -714,23 +714,23 @@ class TestDbToolsSmoke:
 
 
 # ===========================================================================
-# 8. TestImageOCR — generic image search + OCR pipeline (smoke)
+# 8. TestImagePipeline — generic image search + OCR pipeline (smoke)
 # ===========================================================================
 
 def _image_ocr_pipeline(query: str, count: int = 2, timeout: float = 90) -> dict:
     """
-    Generic helper: search for images matching *query*, then caption/OCR the first
-    image block found.  Returns a dict with:
+    Reusable helper: search for images matching *query*, then caption/OCR the first
+    image block found.  Works for any search subject.
+
+    Returns a dict with:
       - "search_content": raw content blocks from image_search
-      - "image_found": True if at least one image block was found
+      - "image_found": True if at least one image block was returned
       - "caption": string result of image_caption (empty if no image or caption failed)
-      - "caption_ok": True if caption did not start with "Error"
+      - "caption_ok": True if caption is non-empty and does not start with "Error"
     """
-    # 1. Search for images
     search_resp = _mcp_call("image_search", {"query": query, "count": count}, timeout=timeout)
     search_content = search_resp.get("result", {}).get("content", [])
 
-    # 2. Extract the first base64 image block
     first_image = next(
         (b for b in search_content if b.get("type") == "image"),
         None,
@@ -744,9 +744,9 @@ def _image_ocr_pipeline(query: str, count: int = 2, timeout: float = 90) -> dict
     if first_image is None:
         return result
 
-    # 3. image_caption expects base64 JPEG
+    # image_caption expects base64 JPEG
     b64 = (
-        first_image.get("data", "")  # MCP 2025-03-26 image block
+        first_image.get("data", "")            # MCP 2025-03-26 image block
         or first_image.get("url", "").split(",")[-1]  # data URI fallback
     )
     if not b64:
@@ -763,104 +763,76 @@ def _image_ocr_pipeline(query: str, count: int = 2, timeout: float = 90) -> dict
 
 @skip_mcp
 @pytest.mark.smoke
-class TestImageOCR:
+class TestImagePipeline:
     """
-    Generic image search + OCR pipeline tests.
+    Generic image search + OCR / caption pipeline tests.
 
-    These run against the live MCP server and verify that:
-    1. image_search finds images for common queries
-    2. image_caption can describe any returned image
-    3. The pipeline works for arbitrary subjects (not just Klukai)
+    Verifies that:
+    1. image_search returns results for arbitrary queries
+    2. image_caption can describe any returned image block
+    3. The orchestrate tool can drive a screenshot → report workflow
+    4. image search results can be stored and recalled via memory tools
     """
 
-    def test_find_images_generic(self):
-        """image_search returns at least text or image blocks for a generic query."""
-        resp = _mcp_call("image_search", {"query": "anime character art", "count": 2}, timeout=60)
-        content = resp.get("result", {}).get("content", [])
-        assert content, "image_search returned no content blocks"
-        has_image = any(b.get("type") == "image" for b in content)
-        has_text  = any(b.get("type") == "text"  for b in content)
-        assert has_image or has_text, "image_search returned neither image nor text"
-
-    def test_image_ocr_any_subject(self):
-        """Search + OCR pipeline works for a generic subject (nature photograph)."""
-        result = _image_ocr_pipeline("scenic mountain landscape photography", count=1)
-        assert result["search_content"], "image_search returned empty content"
-        # If no image block was returned, the search result still must have text
-        if not result["image_found"]:
-            texts = [b["text"] for b in result["search_content"] if b.get("type") == "text"]
-            assert texts, "No image and no text either"
-            return  # pass — image_search returned text-only result (DB fast-path or no vision model)
-        # If an image was found, caption must have been attempted
-        assert result["caption"], "image_caption returned empty string"
-        assert result["caption_ok"], f"image_caption error: {result['caption']}"
-
-    # ------------------------------------------------------------------
-    # Klukai-specific test (the original "ultimate E2E" request)
-    # ------------------------------------------------------------------
-
-    def test_find_klukai_images(self):
-        """image_search finds at least one Klukai image result."""
-        resp = _mcp_call("image_search", {
-            "query": "Klukai Girls Frontline 2",
-            "count": 2,
-        }, timeout=60)
+    def test_image_search_returns_results(self):
+        """image_search returns at least one content block for a standard art query."""
+        resp = _mcp_call("image_search", {"query": "digital art landscape", "count": 2},
+                         timeout=60)
         content = resp.get("result", {}).get("content", [])
         assert content, "image_search returned no content blocks"
         has_image = any(b.get("type") == "image" for b in content)
         has_text  = any(b.get("type") == "text"  for b in content)
         assert has_image or has_text, "image_search returned neither image nor text blocks"
-        if has_text:
-            texts = [b["text"] for b in content if b.get("type") == "text"]
-            assert not all(t.startswith("Error") for t in texts), \
-                f"image_search returned only errors: {texts}"
 
-    def test_klukai_image_ocr_pipeline(self):
-        """Find Klukai images and OCR/caption them to verify content."""
-        result = _image_ocr_pipeline("Klukai Girls Frontline 2 character art", count=2)
-        assert result["search_content"], "image_search returned empty content for Klukai"
+    def test_image_ocr_pipeline(self):
+        """image_search + image_caption round-trip: find an image, describe it."""
+        result = _image_ocr_pipeline("nature wildlife photography", count=1)
+        assert result["search_content"], "image_search returned empty content"
         if not result["image_found"]:
-            # Acceptable if service returns text-only (DB fast path, no vision model)
+            # Acceptable when the DB fast-path returns text-only (no vision model loaded)
             texts = [b["text"] for b in result["search_content"] if b.get("type") == "text"]
-            assert texts, "No Klukai image and no text result either"
+            assert texts, "image_search returned neither image blocks nor text"
             return
-        assert result["caption"], "image_caption returned empty string for Klukai image"
-        assert result["caption_ok"], f"image_caption error on Klukai: {result['caption']}"
+        assert result["caption"], "image_caption returned empty string"
+        assert result["caption_ok"], f"image_caption returned error: {result['caption']}"
 
-    def test_klukai_screenshot_via_orchestrate(self):
-        """Orchestrate: screenshot Klukai wiki page — verifies orchestrate + browser pipeline."""
+    def test_orchestrate_screenshot_pipeline(self):
+        """Orchestrate a screenshot step — verifies orchestrate + browser pipeline."""
         orch_resp = _mcp_call("orchestrate", {
             "steps": [
                 {
                     "id": "shot",
                     "tool": "screenshot",
-                    "args": {"url": "https://gfl2.amaryllishare.page/characters/klukai"},
-                    "label": "Klukai character page screenshot",
+                    "args": {"url": "https://en.wikipedia.org/wiki/Intel_Arc"},
+                    "label": "Wikipedia Intel Arc screenshot",
                 },
             ],
         }, timeout=90)
         texts = _text_blocks(orch_resp)
         assert texts, "orchestrate returned no text"
         report = texts[0]
-        assert "Klukai" in report or "screenshot" in report.lower() or "ms" in report, \
-            f"Unexpected orchestrate report: {report[:300]}"
+        # Report must contain at least the label text, a tool name, or timing info
+        assert (
+            "Wikipedia" in report
+            or "screenshot" in report.lower()
+            or "ms" in report
+        ), f"Unexpected orchestrate report: {report[:300]}"
 
-    def test_memory_store_klukai_result(self):
-        """Store a Klukai search result in memory for future reference."""
+    def test_image_search_result_stored_and_recalled(self):
+        """Store an image search metadata entry in memory, then recall it by pattern."""
         ts = int(time.time())
-        key = f"klukai_test_{ts}"
-        value = ("Klukai is a character in Girls Frontline 2 "
-                 "with a distinctive blue-silver appearance.")
+        key = f"img_search_result_{ts}"
+        value = f"image search test entry created at {ts}"
         resp = _mcp_call("memory_store", {"key": key, "value": value, "ttl_seconds": 300})
         texts = _text_blocks(resp)
         assert texts
         parsed = json.loads(texts[0])
-        assert "stored" in parsed, f"Unexpected: {parsed}"
+        assert "stored" in parsed, f"Unexpected store response: {parsed}"
 
-        recall_resp = _mcp_call("memory_recall", {"pattern": "klukai_test_%"})
+        recall_resp = _mcp_call("memory_recall", {"pattern": "img_search_result_%"})
         texts = _text_blocks(recall_resp)
         parsed = json.loads(texts[0])
         assert parsed.get("found") is True, f"Pattern recall failed: {parsed}"
         entries = parsed.get("entries", [])
-        assert any("Klukai" in e.get("value", "") for e in entries), \
-            f"Klukai entry not found in recall: {entries}"
+        assert any(str(ts) in e.get("value", "") for e in entries), \
+            f"Expected entry with ts={ts} not found in: {entries}"

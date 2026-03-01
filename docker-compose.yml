@@ -26,10 +26,18 @@ services:
     build: ./docker/database
     environment:
       DATABASE_URL: postgresql://aichat:aichat@aichat-db:5432/aichat
+      INTEL_GPU: "1"
     depends_on:
       - aichat-db
     ports:
       - "8091:8091"
+    # Intel Arc A380: expose DRI devices for OpenCL/VA-API in image ops (phash, PIL).
+    # group_add uses host GIDs: 39=video (card1), 105=render (renderD128).
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=3)\""]
@@ -44,10 +52,17 @@ services:
     stdin_open: true
     environment:
       DATABASE_URL: http://aichat-database:8091
+      INTEL_GPU: "1"
     volumes:
       - /tmp/research:/tmp/research
     ports:
       - "8092:8092"
+    # Intel Arc A380: Playwright/Chromium benefits from GPU-accelerated rendering.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=3)\""]
@@ -84,13 +99,14 @@ services:
     ports:
       - "8096:8096"
     # ── GPU passthrough ─────────────────────────────────────────────────────
-    # Intel Arc / Intel integrated GPU (low-risk — uncommented by default).
-    # Gives in-container OpenCL/VA-API access for opencv-python-headless.
-    # Remove if your host has no /dev/dri device nodes.
+    # Intel Arc A380: card1 (video) + renderD128 (render/OpenCL).
+    # group_add uses host GIDs: 39=video, 105=render.  Numeric GIDs are used
+    # because container images may not define these group names in /etc/group.
     devices:
       - /dev/dri:/dev/dri
     group_add:
-      - video
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
     # NVIDIA: uncomment the two blocks below (requires nvidia-container-toolkit on host)
     # runtime: nvidia
     # deploy:
@@ -138,12 +154,13 @@ services:
       - ${HOME}/.config/aichat/tools:/data/tools
       - ${HOME}/git:/data/repos:ro
     # ── GPU passthrough ─────────────────────────────────────────────────────
-    # Intel Arc / integrated GPU — gives custom tools access to numpy/cv2 with
-    # OpenCL acceleration.  Remove if your host has no /dev/dri device nodes.
+    # Intel Arc A380: gives custom tools access to numpy/cv2 with OpenCL acceleration.
+    # group_add uses host GIDs: 39=video, 105=render.
     devices:
       - /dev/dri:/dev/dri
     group_add:
-      - video
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
     # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
