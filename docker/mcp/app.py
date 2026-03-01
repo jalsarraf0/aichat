@@ -37,6 +37,7 @@ import os
 import random
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import unquote as _url_unquote
@@ -60,6 +61,17 @@ try:
 except ImportError:
     _HAS_PIL = False
 
+try:
+    import cv2 as _cv2
+    import numpy as _np
+    _HAS_CV2 = True
+except ImportError:
+    _cv2 = None  # type: ignore[assignment]
+    _np  = None  # type: ignore[assignment]
+    _HAS_CV2 = False
+
+import textwrap as _textwrap
+import time as _time
 
 # ---------------------------------------------------------------------------
 # Perceptual hash helpers — pure PIL, no extra packages
@@ -89,7 +101,8 @@ def _hamming(h1: str, h2: str) -> int:
 
 
 async def _vision_confirm(
-    b64: str, subject: str, hc: "httpx.AsyncClient"
+    b64: str, subject: str, hc: "httpx.AsyncClient",
+    phash: str = "",
 ) -> "tuple[bool, str, float]":
     """Ask the loaded multimodal model whether the image shows *subject*.
 
@@ -97,10 +110,22 @@ async def _vision_confirm(
     image_search never breaks when no vision model is loaded in LM Studio.
     Uses IMAGE_GEN_BASE_URL/v1/chat/completions with 8-second timeout.
     Set IMAGE_VISION_CONFIRM=false to disable (skip confirmation, keep all images).
+
+    phash: if provided, VisionCache is checked first (skips GPU call on cache hit)
+    and the result is stored in VisionCache after a live LM Studio call.
+    ModelRegistry is used for a fast bail-out when no model is loaded.
     """
     env_flag = os.environ.get("IMAGE_VISION_CONFIRM", "true").lower()
     if env_flag not in ("1", "true", "yes"):
         return True, "", 0.6
+    # 1. In-memory cache check — free, instant, no GPU call
+    if phash:
+        cached = _vision_cache.get(phash)
+        if cached is not None:
+            return cached
+    # 2. ModelRegistry fast bail-out — avoids the full 8 s timeout when no model is loaded
+    if not await ModelRegistry.get().is_available(hc):
+        return True, "", 0.6   # fail-open (same as before)
     prompt = (
         f"Describe this image in one short sentence. "
         f"Then answer: does it clearly show '{subject}'? "
@@ -128,9 +153,13 @@ async def _vision_confirm(
             desc = text.split("DESCRIPTION:")[1].split("|")[0].strip()
         match = "MATCH: YES" in text.upper() or text.upper().strip().endswith("YES")
         conf  = 0.9 if match else 0.2
-        return match, desc, conf
+        result: tuple[bool, str, float] = (match, desc, conf)
     except Exception:
-        return True, "", 0.6   # fail-open
+        result = (True, "", 0.6)   # fail-open
+    # 3. Store in VisionCache for future calls
+    if phash:
+        _vision_cache.put(phash, result)
+    return result
 
 
 app = FastAPI(title="aichat-mcp")
@@ -1153,11 +1182,48 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "image_remix",
+        "description": (
+            "Style-transfer / creative remix of an existing workspace image using GPU AI (LM Studio). "
+            "Differs from image_edit: image_remix is for creative transformation (style, mood, medium) "
+            "while image_edit is for content edits (remove object, change sky). "
+            "Examples: 'anime style', 'oil painting', 'cyberpunk neon', 'make it dark mode', "
+            "'pixel art', 'watercolor sketch'. "
+            "Uses /v1/images/edits with a moderate strength to preserve structure. "
+            "Requires an image-generation model in LM Studio; returns a friendly error if none is loaded. "
+            "Returns up to 4 inline image variations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Source image filename or path in the workspace.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Style / transformation description, e.g. 'anime style' or 'oil painting on canvas'.",
+                },
+                "strength": {
+                    "type": "number",
+                    "description": "Transformation strength 0.1–1.0 (default 0.65). Lower = more faithful to source, higher = more creative.",
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "Number of variations to return, 1–4 (default 1).",
+                },
+            },
+            "required": ["path", "prompt"],
+        },
+    },
+    {
         "name": "image_upscale",
         "description": (
-            "Upscale a saved image using high-quality PIL LANCZOS resampling (no AI model required). "
+            "Upscale a saved image. GPU AI (via LM Studio) is the primary path — "
+            "supports both NVIDIA and Intel Arc GPUs. "
+            "CPU LANCZOS is the fallback only when no GPU model is available. "
             "Works on any image in the workspace including generated images, screenshots, or crops. "
-            "Optionally applies a sharpening pass after upscaling. "
+            "Set gpu=false to force CPU-only (LANCZOS + optional sharpening). "
             "Pipeline: image_generate → image_upscale(scale=4) → image_scan (read fine text in generated image). "
             "Also useful for making small thumbnails or cropped regions large enough for the vision model to read."
         ),
@@ -1170,11 +1236,18 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Upscale factor: 2.0 = 200%, max 8.0 (default 2.0).",
+                    "description": "CPU LANCZOS upscale factor: 2.0 = 200%, max 8.0 (default 2.0). Ignored when GPU path succeeds.",
                 },
                 "sharpen": {
                     "type": "boolean",
-                    "description": "Apply a sharpening pass after upscaling to recover edge crispness (default true).",
+                    "description": "Apply a sharpening pass after CPU LANCZOS upscaling (default true). Ignored when GPU path succeeds.",
+                },
+                "gpu": {
+                    "type": "boolean",
+                    "description": (
+                        "Default unset/true = try GPU first (NVIDIA + Intel Arc via LM Studio). "
+                        "Set gpu=false to force CPU LANCZOS only (no LM Studio call)."
+                    ),
                 },
             },
             "required": ["path"],
@@ -1270,7 +1343,11 @@ _TOOLS: list[dict[str, Any]] = [
             "Execute arbitrary Python code in a sandboxed subprocess with a 30-second timeout. "
             "Returns stdout, stderr, exit code, and duration. "
             "Optionally installs pip packages before running. "
-            "Use for data analysis, calculations, file manipulation, or testing code snippets."
+            "GPU support: when code references torch/tensorflow/cuda, a DEVICE variable is "
+            "automatically injected ('cuda', 'mps', or 'cpu') — use model.to(DEVICE) without "
+            "any setup. Pre-installed packages: numpy, scipy, opencv-python-headless (cv2), "
+            "Pillow, httpx. Larger GPU frameworks (torch, tensorflow) can be installed via packages param. "
+            "Use for data analysis, GPU tensor operations, image processing, or testing code snippets."
         ),
         "inputSchema": {
             "type": "object",
@@ -1370,6 +1447,79 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["content", "schema_json"],
         },
     },
+    {
+        "name": "orchestrate",
+        "description": (
+            "Execute a multi-step workflow of MCP tools with automatic parallelism and "
+            "dependency management. Steps without dependencies run in parallel via "
+            "asyncio.gather(); steps with 'depends_on' run after their prerequisites complete. "
+            "Earlier step outputs can be injected into later step arguments using "
+            "{step_id.result} placeholders. Returns a structured report with every step's "
+            "result and timing. "
+            "Use this to chain browser + research + summarise + store operations in a single "
+            "call, dramatically reducing the number of LLM turns needed for complex tasks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of workflow steps to execute.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": (
+                                    "Unique step identifier (letters, digits, underscores). "
+                                    "Used in depends_on references and {id.result} placeholders."
+                                ),
+                            },
+                            "tool": {
+                                "type": "string",
+                                "description": (
+                                    "MCP tool name to call "
+                                    "(e.g. 'screenshot', 'web_search', 'smart_summarize')."
+                                ),
+                            },
+                            "args": {
+                                "type": "object",
+                                "description": (
+                                    "Arguments for the tool. String values may contain "
+                                    "{id.result} to embed a prior step's text output."
+                                ),
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Step IDs that must complete before this step runs. "
+                                    "Omit or leave empty for parallel execution with other "
+                                    "independent steps."
+                                ),
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": (
+                                    "Human-readable label shown in the result report. "
+                                    "Defaults to the step id if omitted."
+                                ),
+                            },
+                        },
+                        "required": ["id", "tool", "args"],
+                    },
+                },
+                "stop_on_error": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, abort all remaining steps when any step fails. "
+                        "Default: false (continue executing independent steps)."
+                    ),
+                },
+            },
+            "required": ["steps"],
+        },
+    },
 ]
 
 
@@ -1382,36 +1532,160 @@ def _text(s: str) -> list[dict[str, Any]]:
 
 
 def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
-    """Return MCP content blocks: text summary + inline base64 image (compressed for LM Studio)."""
-    blocks: list[dict[str, Any]] = [{"type": "text", "text": summary}]
-    if not container_path:
-        return blocks
-    # container_path is e.g. /workspace/screenshot.png inside human_browser.
-    # The workspace is bind-mounted at BROWSER_WORKSPACE inside this container.
-    filename = os.path.basename(container_path)
-    local_path = os.path.join(BROWSER_WORKSPACE, filename)
-    if not os.path.isfile(local_path):
-        return blocks
-    try:
-        if _HAS_PIL:
-            # Resize to max 1280×1024 and compress as JPEG — large PNGs can exceed
-            # LM Studio's MCP message size limit and fail to render.
-            with _PilImage.open(local_path) as img:
-                img = img.convert("RGB")  # strip alpha channel (JPEG doesn't support it)
-                if img.width > 1280 or img.height > 1024:
-                    img.thumbnail((1280, 1024), _PilImage.LANCZOS)
-                buf = _io.BytesIO()
-                img.save(buf, format="JPEG", quality=82)
-            b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
-            mime = "image/jpeg"
-        else:
-            with open(local_path, "rb") as fh:
-                b64 = base64.standard_b64encode(fh.read()).decode("ascii")
-            mime = "image/png"
-        blocks.append({"type": "image", "data": b64, "mimeType": mime})
-    except Exception:
-        pass
-    return blocks
+    """Return MCP content blocks: text summary + inline base64 image (compressed for LM Studio).
+    Delegates to ImageRenderer.encode_path() which enforces the payload size cap."""
+    return _renderer.encode_path(container_path, summary)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration — WorkflowStep / WorkflowResult / WorkflowExecutor
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WorkflowStep:
+    """A single step in an orchestrated workflow."""
+    id: str                              # unique identifier; used in depends_on + {id.result}
+    tool: str                            # MCP tool name to call
+    args: dict                           # tool arguments (strings may use {id.result} placeholders)
+    depends_on: list[str] = field(default_factory=list)  # step IDs that must finish first
+    label: str = ""                      # human-readable label for the result report
+
+
+@dataclass
+class WorkflowResult:
+    """Result from a single executed workflow step."""
+    step_id: str
+    label: str
+    tool: str
+    result: str        # first text block returned by the tool
+    ok: bool           # False if the tool raised or returned an error
+    duration_ms: int
+
+
+class WorkflowExecutor:
+    """Execute a DAG of WorkflowSteps with automatic parallelism.
+
+    Steps with no pending dependencies are gathered and run concurrently
+    via asyncio.gather(). Steps that depend on earlier steps receive their
+    results via {step_id.result} interpolation in arg string values.
+    """
+
+    def __init__(self, steps: list[WorkflowStep], stop_on_error: bool = False) -> None:
+        self._steps = steps
+        self._stop_on_error = stop_on_error
+
+    async def run(self) -> list[WorkflowResult]:
+        """Execute all steps respecting dependencies; return results in execution order."""
+        waves = self._build_waves()
+        completed: dict[str, WorkflowResult] = {}
+        results: list[WorkflowResult] = []
+        for wave in waves:
+            if self._stop_on_error and any(not r.ok for r in results):
+                break
+            wave_results = await asyncio.gather(
+                *[self._run_step(s, completed) for s in wave]
+            )
+            for r in wave_results:
+                completed[r.step_id] = r
+                results.append(r)
+        return results
+
+    async def _run_step(
+        self, step: WorkflowStep, completed: dict[str, WorkflowResult]
+    ) -> WorkflowResult:
+        """Interpolate args, call the tool, return a WorkflowResult."""
+        label = step.label or step.id
+        t0 = _time.monotonic()
+        try:
+            interpolated = self._interpolate(step.args, completed)
+            content = await _call_tool(step.tool, interpolated)
+            text = next((b["text"] for b in content if b.get("type") == "text"), "")
+            ok = not (
+                text.startswith("Error ")
+                or text.startswith("Unknown tool")
+                or text.startswith(f"Step '{step.id}' raised")
+            )
+        except Exception as exc:
+            text = f"Step '{step.id}' raised: {exc}"
+            ok = False
+        ms = int((_time.monotonic() - t0) * 1000)
+        return WorkflowResult(step.id, label, step.tool, text, ok, ms)
+
+    def _build_waves(self) -> list[list[WorkflowStep]]:
+        """Topological sort via Kahn's algorithm → ordered execution waves.
+
+        Raises ValueError on cycle or unknown dependency reference.
+        """
+        by_id: dict[str, WorkflowStep] = {}
+        for s in self._steps:
+            if s.id in by_id:
+                raise ValueError(f"duplicate step id: '{s.id}'")
+            by_id[s.id] = s
+
+        # Validate all depends_on references
+        for s in self._steps:
+            for dep in s.depends_on:
+                if dep not in by_id:
+                    raise ValueError(
+                        f"step '{s.id}' depends on unknown step '{dep}'"
+                    )
+
+        # Kahn's algorithm
+        in_degree: dict[str, int] = {s.id: len(s.depends_on) for s in self._steps}
+        queue: list[str] = [sid for sid, d in in_degree.items() if d == 0]
+        waves: list[list[WorkflowStep]] = []
+        visited = 0
+
+        while queue:
+            wave = [by_id[sid] for sid in queue]
+            waves.append(wave)
+            visited += len(queue)
+            next_queue: list[str] = []
+            for sid in queue:
+                for s in self._steps:
+                    if sid in s.depends_on:
+                        in_degree[s.id] -= 1
+                        if in_degree[s.id] == 0:
+                            next_queue.append(s.id)
+            queue = next_queue
+
+        if visited != len(self._steps):
+            raise ValueError("cycle detected in workflow dependencies")
+        return waves
+
+    def _interpolate(self, args: dict, completed: dict[str, WorkflowResult]) -> dict:
+        """Recursively replace {step_id.result} in string arg values."""
+        out: dict = {}
+        for k, v in args.items():
+            if isinstance(v, str):
+                for step_id, res in completed.items():
+                    v = v.replace(f"{{{step_id}.result}}", res.result)
+                out[k] = v
+            elif isinstance(v, dict):
+                out[k] = self._interpolate(v, completed)
+            else:
+                out[k] = v
+        return out
+
+    @staticmethod
+    def _format_report(results: list[WorkflowResult]) -> str:
+        """Format a human-readable multi-line report of all step results."""
+        lines = ["## Workflow Results\n"]
+        for i, r in enumerate(results, 1):
+            status = "OK" if r.ok else "FAILED"
+            preview = r.result[:500] + ("..." if len(r.result) > 500 else "")
+            lines.append(
+                f"### Step {i}: {r.label} [{status}] ({r.duration_ms} ms)\n"
+                f"Tool: `{r.tool}`\n\n"
+                f"{preview}\n"
+            )
+        total_ms = sum(r.duration_ms for r in results)
+        ok_count = sum(1 for r in results if r.ok)
+        lines.append(
+            f"---\n**{ok_count}/{len(results)} steps succeeded** | "
+            f"total wall-time: {total_ms} ms"
+        )
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1443,27 +1717,682 @@ def _pil_to_blocks(
     quality: int = 90,
     save_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Encode a PIL Image as an inline JPEG MCP block (delegates to ImageRenderer)."""
+    return _renderer.encode(img, summary, save_prefix=save_prefix)
+
+
+# ---------------------------------------------------------------------------
+# ImageRenderer — OOP image encoding pipeline for LM Studio inline rendering
+# ---------------------------------------------------------------------------
+
+# LM Studio silently drops (shows "external image") when the MCP payload exceeds
+# its internal message size limit.  All encoding paths go through ImageRenderer,
+# which enforces a hard byte-count cap by stepping down JPEG quality.
+_MAX_INLINE_BYTES: int = 3_000_000   # 3 MB raw  ≈  4 MB base64 — safe for LM Studio
+
+
+class ImageRenderer:
     """
-    Encode a PIL Image as an inline JPEG MCP block.
-    If save_prefix is given, also write the result to BROWSER_WORKSPACE so the
-    filename can be used as 'path' in the next pipeline step.
+    OOP wrapper that encodes PIL images, workspace paths, and raw HTTP bytes
+    as inline MCP image content blocks, always honouring LM Studio's payload cap.
+
+    Usage
+    -----
+    renderer = ImageRenderer()
+    blocks = renderer.encode(pil_img, "Screenshot of …")
+    blocks = renderer.encode_path("/workspace/shot.png", "Summary text")
+    blocks = renderer.encode_url_bytes(raw_bytes, "image/jpeg", "Fetched from …")
     """
-    if save_prefix and os.path.isdir(BROWSER_WORKSPACE):
+
+    MAX_BYTES: int = _MAX_INLINE_BYTES
+    # Quality ladder: try highest first, step down until payload fits.
+    _QUALITY_LADDER: tuple[int, ...] = (85, 75, 65, 50)
+
+    # ── private helpers ──────────────────────────────────────────────────────
+
+    def _compress_to_limit(self, img: "_PilImage.Image") -> bytes:
+        """JPEG-compress img, reducing quality until payload < MAX_BYTES."""
+        for q in self._QUALITY_LADDER:
+            buf = _io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=q)
+            raw = buf.getvalue()
+            if len(raw) <= self.MAX_BYTES:
+                return raw
+        # Absolute last resort: quality=40 thumbnail
+        buf = _io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=40)
+        return buf.getvalue()
+
+    def _fit(
+        self,
+        img: "_PilImage.Image",
+        max_w: int = 1280,
+        max_h: int = 1024,
+    ) -> "_PilImage.Image":
+        """Downscale img to fit within max_w × max_h, preserving aspect ratio."""
+        if img.width > max_w or img.height > max_h:
+            img = img.copy()
+            img.thumbnail((max_w, max_h), _PilImage.LANCZOS)
+        return img
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def encode(
+        self,
+        img: "_PilImage.Image",
+        summary: str,
+        save_prefix: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Encode a PIL Image → [text_block, image_block], guaranteed to fit
+        within MAX_BYTES.  Optionally saves the compressed JPEG to BROWSER_WORKSPACE.
+        """
+        img = self._fit(img.convert("RGB"))
+        raw = self._compress_to_limit(img)
+        if save_prefix and os.path.isdir(BROWSER_WORKSPACE):
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                fname = f"{save_prefix}_{ts}.jpg"
+                with open(os.path.join(BROWSER_WORKSPACE, fname), "wb") as fh:
+                    fh.write(raw)
+                summary += f"\n→ Saved as: {fname}  (pass this as 'path' in the next pipeline step)"
+            except OSError:
+                pass  # workspace may be read-only; inline image is still returned
+        b64 = base64.standard_b64encode(raw).decode("ascii")
+        return [
+            {"type": "text",  "text": summary},
+            {"type": "image", "data": b64, "mimeType": "image/jpeg"},
+        ]
+
+    def encode_path(self, container_path: str, summary: str) -> list[dict[str, Any]]:
+        """
+        Load an image from BROWSER_WORKSPACE (given a container path or bare filename)
+        and return inline MCP blocks.  Returns text-only if the file is missing.
+        Replaces the old _image_blocks() function.
+        """
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": summary}]
+        if not container_path:
+            return blocks
+        fname = os.path.basename(container_path)
+        local_path = os.path.join(BROWSER_WORKSPACE, fname)
+        if not os.path.isfile(local_path):
+            return blocks
         try:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{save_prefix}_{ts}.jpg"
-            local_path = os.path.join(BROWSER_WORKSPACE, filename)
-            img.convert("RGB").save(local_path, format="JPEG", quality=quality)
-            summary += f"\n→ Saved as: {filename}  (pass this as 'path' in the next pipeline step)"
-        except OSError:
-            pass  # workspace may be read-only; inline image is still returned
-    buf = _io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=quality)
-    b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
-    return [
-        {"type": "text",  "text": summary},
-        {"type": "image", "data": b64, "mimeType": "image/jpeg"},
-    ]
+            if _HAS_PIL:
+                with _PilImage.open(local_path) as img:
+                    # Reuse encode() but skip the text block (already in blocks[0])
+                    encoded = self.encode(img, "")
+                    blocks.extend(b for b in encoded if b.get("type") == "image")
+            else:
+                with open(local_path, "rb") as fh:
+                    raw = fh.read()
+                b64 = base64.standard_b64encode(raw).decode("ascii")
+                blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
+        except Exception:
+            pass
+        return blocks
+
+    def encode_url_bytes(
+        self,
+        raw: bytes,
+        content_type: str,
+        summary: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Compress raw HTTP image bytes → inline MCP blocks.
+        Used by fetch_image so that large external images are always compressed
+        before being sent to LM Studio (fixes the "external image" display bug).
+        Falls back to raw if PIL is unavailable and the payload is small enough.
+        """
+        if _HAS_PIL:
+            try:
+                with _PilImage.open(_io.BytesIO(raw)) as img:
+                    return self.encode(img.convert("RGB"), summary)
+            except Exception:
+                pass  # corrupt / unrecognised format — try raw fallback below
+        # PIL unavailable or image unreadable — send raw only if it fits
+        if len(raw) <= self.MAX_BYTES:
+            b64 = base64.standard_b64encode(raw).decode("ascii")
+            return [
+                {"type": "text",  "text": summary},
+                {"type": "image", "data": b64, "mimeType": content_type},
+            ]
+        return [{"type": "text",
+                 "text": summary + "\n⚠ Image too large to render inline (PIL unavailable)."}]
+
+
+_renderer = ImageRenderer()   # module-level singleton used by all tool handlers
+
+
+# ---------------------------------------------------------------------------
+# GpuDetector / GpuUpscaler — GPU-accelerated upscaling via LM Studio
+# ---------------------------------------------------------------------------
+
+class GpuDetector:
+    """
+    Detect available GPU hardware (NVIDIA and Intel Arc) without requiring
+    PyTorch or other heavy frameworks — uses lightweight OS-level probes only.
+    Results are cached after the first call.
+    Only used by GpuUpscaler (image_upscale tool); not wired to other tools.
+    """
+
+    _cache: dict[str, str] | None = None   # {"vendor": "nvidia"|"intel"|"none", "name": str}
+
+    @classmethod
+    def detect(cls) -> dict[str, str]:
+        """Return {"vendor": "nvidia"|"intel"|"none", "name": <human readable>}."""
+        if cls._cache is not None:
+            return cls._cache
+        cls._cache = cls._probe()
+        return cls._cache
+
+    @classmethod
+    def _probe(cls) -> dict[str, str]:
+        import subprocess as _sp
+
+        # ── NVIDIA: check nvidia-smi or /dev/nvidia0 ──────────────────────
+        try:
+            out = _sp.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                timeout=4, stderr=_sp.DEVNULL,
+            ).decode().strip().splitlines()
+            if out:
+                return {"vendor": "nvidia", "name": out[0]}
+        except Exception:
+            pass
+        if os.path.exists("/dev/nvidia0"):
+            return {"vendor": "nvidia", "name": "NVIDIA (device node)"}
+
+        # ── Intel Arc / Intel GPU: check /dev/dri or vainfo ───────────────
+        try:
+            # vainfo reports the VA-API driver; Intel iHD = Arc/Iris/UHD
+            out = _sp.check_output(
+                ["vainfo", "--display", "drm"],
+                timeout=4, stderr=_sp.DEVNULL,
+            ).decode()
+            if "iHD" in out or "Intel" in out or "i965" in out:
+                # Extract driver name line if present
+                for ln in out.splitlines():
+                    if "Driver version" in ln or "vainfo: Driver" in ln:
+                        return {"vendor": "intel", "name": ln.strip()}
+                return {"vendor": "intel", "name": "Intel GPU (vainfo)"}
+        except Exception:
+            pass
+        # Fallback: render node exists → likely Intel integrated or Arc
+        try:
+            dri = os.listdir("/dev/dri")
+            renders = [d for d in dri if d.startswith("renderD")]
+            if renders:
+                return {"vendor": "intel", "name": f"Intel GPU (/dev/dri/{renders[0]})"}
+        except Exception:
+            pass
+
+        # ── Check env var override (useful in Docker with GPU passthrough) ─
+        if os.environ.get("NVIDIA_VISIBLE_DEVICES", "").strip() not in ("", "void"):
+            return {"vendor": "nvidia", "name": "NVIDIA (env NVIDIA_VISIBLE_DEVICES)"}
+        if os.environ.get("INTEL_GPU", "").strip() == "1":
+            return {"vendor": "intel", "name": "Intel GPU (env INTEL_GPU=1)"}
+
+        return {"vendor": "none", "name": "No GPU detected"}
+
+    @classmethod
+    def available(cls) -> bool:
+        return cls.detect()["vendor"] != "none"
+
+    @classmethod
+    def vendor(cls) -> str:
+        return cls.detect()["vendor"]
+
+    @classmethod
+    def name(cls) -> str:
+        return cls.detect()["name"]
+
+
+class GpuUpscaler:
+    """
+    AI-powered image upscaling via LM Studio's /v1/images/edits endpoint.
+    Supports both NVIDIA and Intel Arc GPUs (LM Studio handles the acceleration).
+    Only used by the image_upscale tool.
+
+    Falls back gracefully: if no GPU is detected or the LM Studio call fails,
+    returns None so the caller can fall through to LANCZOS upscaling.
+    """
+
+    _PROMPT = "upscale to high resolution, sharpen fine details, enhance clarity"
+    _STRENGTH = "0.35"   # low strength = preserve structure, enhance quality
+
+    def __init__(self, base_url: str, model: str = "") -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model    = model
+
+    async def upscale(
+        self,
+        img: "_PilImage.Image",
+        client: "httpx.AsyncClient",
+    ) -> "_PilImage.Image | None":
+        """
+        Send img to LM Studio /v1/images/edits for AI upscaling.
+        Returns the upscaled PIL Image on success, None on any failure.
+        """
+        if not _HAS_PIL:
+            return None
+        # Encode input image as JPEG for the multipart upload
+        in_buf = _io.BytesIO()
+        img.convert("RGB").save(in_buf, format="JPEG", quality=92)
+        in_buf.seek(0)
+
+        form: dict[str, str] = {
+            "prompt": self._PROMPT,
+            "n": "1",
+            "response_format": "b64_json",
+            "strength": self._STRENGTH,
+        }
+        if self.model:
+            form["model"] = self.model
+
+        try:
+            resp = await asyncio.wait_for(
+                client.post(
+                    f"{self.base_url}/v1/images/edits",
+                    files={"image": ("input.jpg", in_buf, "image/jpeg")},
+                    data=form,
+                    timeout=90.0,
+                ),
+                timeout=95.0,
+            )
+            if resp.status_code != 200:
+                return None
+            b64_out = resp.json()["data"][0]["b64_json"]
+            return _PilImage.open(_io.BytesIO(base64.b64decode(b64_out))).convert("RGB")
+        except Exception:
+            return None
+
+    def gpu_label(self) -> str:
+        """Human-readable GPU label for the summary text."""
+        info = GpuDetector.detect()
+        return info["name"]
+
+
+# ---------------------------------------------------------------------------
+# GpuImageProcessor — OpenCV/CUDA-accelerated image ops, PIL fallback
+# ---------------------------------------------------------------------------
+
+class GpuImageProcessor:
+    """
+    GPU-accelerated image operations for the aichat image pipeline tools.
+
+    Uses OpenCV (cv2) with CUDA support when available; otherwise falls back
+    transparently to PIL/Pillow.  All public methods accept and return PIL
+    Images so existing tool code needs minimal changes.
+
+    Call GpuImageProcessor.backend() to see which engine is active.
+    """
+
+    # Class-level engine detection (set once at class definition time)
+    _CUDA_OK: bool = False   # cv2 built with CUDA and a GPU is present
+    _CV2_OK:  bool = _HAS_CV2
+
+    if _HAS_CV2:
+        try:
+            _CUDA_OK = _cv2.cuda.getCudaEnabledDeviceCount() > 0  # type: ignore[union-attr]
+        except Exception:
+            _CUDA_OK = False
+
+    # ── internal conversion helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _to_np(img: "_PilImage.Image") -> "_np.ndarray":
+        """PIL Image → BGR numpy array (OpenCV native format)."""
+        rgb = _np.array(img.convert("RGB"))
+        return _cv2.cvtColor(rgb, _cv2.COLOR_RGB2BGR)  # type: ignore[union-attr]
+
+    @staticmethod
+    def _to_pil(arr: "_np.ndarray") -> "_PilImage.Image":
+        """BGR numpy array → PIL Image."""
+        rgb = _cv2.cvtColor(arr, _cv2.COLOR_BGR2RGB)  # type: ignore[union-attr]
+        return _PilImage.fromarray(rgb)
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    @classmethod
+    def backend(cls) -> str:
+        """Return the active image processing engine name."""
+        if cls._CUDA_OK:
+            return "opencv-cuda"
+        if cls._CV2_OK:
+            return "opencv-cpu"
+        return "pillow"
+
+    @classmethod
+    def resize(
+        cls,
+        img: "_PilImage.Image",
+        w: int,
+        h: int,
+    ) -> "_PilImage.Image":
+        """High-quality resize to w×h.  LANCZOS4 via cv2, LANCZOS via PIL."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            resized = _cv2.resize(arr, (w, h), interpolation=_cv2.INTER_LANCZOS4)  # type: ignore[union-attr]
+            return cls._to_pil(resized)
+        copy = img.copy()
+        copy.thumbnail((w, h), _PilImage.LANCZOS)
+        return copy
+
+    @classmethod
+    def sharpen(
+        cls,
+        img: "_PilImage.Image",
+        radius: float = 0.5,
+        percent: int = 80,
+        threshold: int = 2,
+    ) -> "_PilImage.Image":
+        """Unsharp-mask sharpening.  cv2 GaussianBlur kernel, PIL UnsharpMask fallback."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            blur = _cv2.GaussianBlur(arr, (0, 0), max(0.1, radius * 4))  # type: ignore[union-attr]
+            amount = percent / 100.0
+            sharpened = _cv2.addWeighted(arr, 1.0 + amount, blur, -amount, 0)  # type: ignore[union-attr]
+            return cls._to_pil(sharpened)
+        return img.filter(_ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
+
+    @classmethod
+    def enhance_contrast(
+        cls,
+        img: "_PilImage.Image",
+        factor: float = 2.5,
+    ) -> "_PilImage.Image":
+        """Contrast enhancement.  cv2 convertScaleAbs, PIL ImageEnhance fallback."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            # Linear contrast stretch: new = clip(alpha*old + beta)
+            alpha = max(0.5, min(factor, 5.0))
+            enhanced = _cv2.convertScaleAbs(arr, alpha=alpha, beta=0)  # type: ignore[union-attr]
+            return cls._to_pil(enhanced)
+        return _ImageEnhance.Contrast(img).enhance(factor)
+
+    @classmethod
+    def enhance_sharpness(
+        cls,
+        img: "_PilImage.Image",
+        factor: float = 1.4,
+    ) -> "_PilImage.Image":
+        """Sharpness enhancement.  cv2 Laplacian kernel, PIL ImageEnhance fallback."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            kernel = _np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=_np.float32)  # type: ignore[union-attr]
+            # Scale kernel weight by factor
+            k = max(0.0, factor - 1.0)
+            kernel = _np.array([[0, -k, 0], [-k, 1 + 4 * k, -k], [0, -k, 0]], dtype=_np.float32)  # type: ignore[union-attr]
+            sharpened = _cv2.filter2D(arr, -1, kernel)  # type: ignore[union-attr]
+            return cls._to_pil(sharpened)
+        return _ImageEnhance.Sharpness(img).enhance(factor)
+
+    @classmethod
+    def diff(
+        cls,
+        img1: "_PilImage.Image",
+        img2: "_PilImage.Image",
+    ) -> "_PilImage.Image":
+        """Pixel-wise absolute difference.  cv2.absdiff, PIL ImageChops fallback."""
+        if cls._CV2_OK:
+            a1 = cls._to_np(img1)
+            a2 = cls._to_np(img2)
+            # Resize img2 to match img1 if sizes differ
+            if a1.shape != a2.shape:
+                a2 = _cv2.resize(a2, (a1.shape[1], a1.shape[0]), interpolation=_cv2.INTER_LANCZOS4)  # type: ignore[union-attr]
+            d = _cv2.absdiff(a1, a2)  # type: ignore[union-attr]
+            return cls._to_pil(d)
+        if img1.size != img2.size:
+            img2 = img2.resize(img1.size, _PilImage.LANCZOS)
+        return _ImageChops.difference(img1, img2)
+
+    @classmethod
+    def to_grayscale(cls, img: "_PilImage.Image") -> "_PilImage.Image":
+        """Convert to grayscale.  cv2.cvtColor or PIL convert('L')."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            gray = _cv2.cvtColor(arr, _cv2.COLOR_BGR2GRAY)  # type: ignore[union-attr]
+            return _PilImage.fromarray(gray)
+        return img.convert("L")
+
+    @classmethod
+    def annotate(
+        cls,
+        img: "_PilImage.Image",
+        boxes: "list[tuple[int,int,int,int]]",
+        labels: "list[str]",
+        color: "tuple[int,int,int]" = (255, 80, 0),
+        thickness: int = 3,
+    ) -> "_PilImage.Image":
+        """Draw bounding boxes + labels.  cv2.rectangle/putText, PIL ImageDraw fallback."""
+        if cls._CV2_OK:
+            arr = cls._to_np(img)
+            bgr = (color[2], color[1], color[0])  # RGB → BGR
+            for (x1, y1, x2, y2), label in zip(boxes, labels):
+                _cv2.rectangle(arr, (x1, y1), (x2, y2), bgr, thickness)  # type: ignore[union-attr]
+                if label:
+                    _cv2.putText(  # type: ignore[union-attr]
+                        arr, label, (x1, max(y1 - 6, 0)),
+                        _cv2.FONT_HERSHEY_SIMPLEX, 0.6, bgr, 2, _cv2.LINE_AA,  # type: ignore[union-attr]
+                    )
+            return cls._to_pil(arr)
+        # PIL fallback
+        draw = _ImageDraw.Draw(img)
+        for (x1, y1, x2, y2), label in zip(boxes, labels):
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=thickness)
+            if label:
+                draw.text((x1, max(y1 - 14, 0)), label, fill=color)
+        return img
+
+
+_GpuImg = GpuImageProcessor()   # module-level singleton
+
+
+# ---------------------------------------------------------------------------
+# ModelRegistry — /v1/models probe with TTL cache
+# ---------------------------------------------------------------------------
+
+class ModelRegistry:
+    """
+    Probes LM Studio's /v1/models endpoint (30 s TTL) so tools can make
+    adaptive decisions: skip GPU calls when no model is loaded, surface
+    helpful errors instead of 90 s timeouts, route to the right model.
+
+    Usage: await ModelRegistry.get().is_available(client)
+    """
+
+    _TTL:      float = 30.0
+    _instance: "ModelRegistry | None" = None
+
+    def __init__(self) -> None:
+        self._models:      list[dict[str, Any]] = []
+        self._last_probe:  float = 0.0
+        self._probe_ok:    bool  = False
+
+    @classmethod
+    def get(cls) -> "ModelRegistry":
+        """Return the process-level singleton."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def invalidate(self) -> None:
+        """Force a fresh probe on the next access."""
+        self._last_probe = 0.0
+
+    async def _refresh(self, client: httpx.AsyncClient) -> None:
+        """Probe /v1/models; update cache.  Silently swallows all errors."""
+        try:
+            r = await asyncio.wait_for(
+                client.get(f"{IMAGE_GEN_BASE_URL}/v1/models"),
+                timeout=4.0,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                self._models     = data.get("data", [])
+                self._probe_ok   = True
+                self._last_probe = _time.monotonic()
+                return
+        except Exception:
+            pass
+        self._models     = []
+        self._probe_ok   = False
+        self._last_probe = _time.monotonic()
+
+    async def _ensure_fresh(self, client: httpx.AsyncClient) -> None:
+        if _time.monotonic() - self._last_probe >= self._TTL:
+            await self._refresh(client)
+
+    async def models(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        """Return cached model list, refreshing if the TTL has expired."""
+        await self._ensure_fresh(client)
+        return list(self._models)
+
+    async def is_available(self, client: httpx.AsyncClient) -> bool:
+        """True if LM Studio responded with at least one model."""
+        await self._ensure_fresh(client)
+        return self._probe_ok and bool(self._models)
+
+    async def has_vision(self, client: httpx.AsyncClient) -> bool:
+        """True if any loaded model supports vision (multimodal)."""
+        for m in await self.models(client):
+            mid = (m.get("id") or "").lower()
+            mtype = (m.get("type") or "").lower()
+            if "vision" in mid or "vlm" in mid or "vision" in mtype or "multimodal" in mtype:
+                return True
+        return False
+
+    async def has_image_gen(self, client: httpx.AsyncClient) -> bool:
+        """True if any image-generation model is loaded."""
+        for m in await self.models(client):
+            mid  = (m.get("id") or "").lower()
+            mtype = (m.get("type") or "").lower()
+            if any(k in mid for k in ("flux", "sdxl", "stable-diffusion", "sd-", "img2img")):
+                return True
+            if "image" in mtype or "diffusion" in mtype:
+                return True
+        # If IMAGE_GEN_MODEL env is explicitly set, trust the user
+        if IMAGE_GEN_MODEL.strip():
+            return self._probe_ok
+        return False
+
+    async def best_chat_model(self, client: httpx.AsyncClient) -> str:
+        """Return IMAGE_GEN_MODEL if set, else first available chat model, else ''."""
+        if IMAGE_GEN_MODEL.strip():
+            return IMAGE_GEN_MODEL.strip()
+        for m in await self.models(client):
+            mtype = (m.get("type") or "").lower()
+            if "llm" in mtype or "chat" in mtype or not mtype:
+                return m.get("id", "")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# VisionCache — in-memory phash → vision result (LRU, MAX_SIZE=500)
+# ---------------------------------------------------------------------------
+
+class VisionCache:
+    """
+    LRU in-memory cache mapping image perceptual hashes (phash) to vision
+    confirmation results.  Eliminates redundant LM Studio /v1/chat/completions
+    calls for images that have already been confirmed or rejected.
+
+    Capacity: 500 entries; oldest evicted on overflow.
+    """
+
+    _MAX_SIZE: int = 500
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[bool, str, float]] = {}
+        self._order: list[str] = []    # FIFO for eviction
+
+    def get(self, phash: str) -> "tuple[bool, str, float] | None":
+        """Return cached (is_match, desc, conf) for phash, or None if absent."""
+        if not phash:
+            return None
+        return self._cache.get(phash)
+
+    def put(self, phash: str, result: tuple[bool, str, float]) -> None:
+        """Store result; evict the oldest entry when over capacity."""
+        if not phash:
+            return
+        if phash not in self._cache:
+            if len(self._cache) >= self._MAX_SIZE:
+                oldest = self._order.pop(0)
+                self._cache.pop(oldest, None)
+            self._order.append(phash)
+        self._cache[phash] = result
+
+    def size(self) -> int:
+        return len(self._cache)
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._order.clear()
+
+
+_vision_cache = VisionCache()   # module-level singleton
+
+
+# ---------------------------------------------------------------------------
+# GpuCodeRuntime — auto-inject GPU device detection into code_run payloads
+# ---------------------------------------------------------------------------
+
+class GpuCodeRuntime:
+    """
+    Prepends a GPU device detection preamble to user-supplied code when the
+    code references torch, tensorflow, or CUDA keywords.  This gives the
+    ``code_run`` tool a ``DEVICE`` variable (``'cuda'`` | ``'mps'`` | ``'cpu'``)
+    that works automatically regardless of the host GPU type.
+
+    Pre-installed packages (available without pip install):
+      numpy, scipy, opencv-python-headless (cv2), Pillow, httpx
+    """
+
+    _PREINSTALLED: frozenset[str] = frozenset({"numpy", "scipy", "cv2", "PIL", "httpx"})
+    _GPU_TRIGGERS: frozenset[str] = frozenset({"torch", "tensorflow", "tf.", "cuda", ".to(", "device"})
+
+    _PREAMBLE = _textwrap.dedent("""\
+        # ── GPU device auto-detection (injected by aichat GpuCodeRuntime) ──────
+        _device = "cpu"
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _device = "cuda"
+            elif getattr(getattr(_torch, "backends", None), "mps", None) and _torch.backends.mps.is_available():
+                _device = "mps"
+        except ImportError:
+            pass
+        DEVICE = _device   # use this in your code: model.to(DEVICE)
+        # ───────────────────────────────────────────────────────────────────────
+    """)
+
+    @classmethod
+    def needs_device_injection(cls, code: str) -> bool:
+        """True if the code mentions GPU-related keywords."""
+        return any(kw in code for kw in cls._GPU_TRIGGERS)
+
+    @classmethod
+    def prepare(cls, code: str) -> str:
+        """Return code with the DEVICE preamble prepended when GPU triggers detected."""
+        if cls.needs_device_injection(code):
+            return cls._PREAMBLE + "\n" + code
+        return code
+
+    @classmethod
+    def available_packages(cls) -> list[str]:
+        """Return importable GPU-related packages in the current Python env."""
+        candidates = ["torch", "tensorflow", "cv2", "numpy", "scipy", "cupy", "jax"]
+        available: list[str] = []
+        import importlib
+        for pkg in candidates:
+            try:
+                importlib.import_module(pkg)
+                available.append(pkg)
+            except ImportError:
+                pass
+        return available
 
 
 # ---------------------------------------------------------------------------
@@ -1606,17 +2535,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     })
                 except Exception:
                     pass
-                # Return inline base64 image
-                b64 = base64.standard_b64encode(img_data).decode("ascii")
+                # Return inline base64 image — always compress via ImageRenderer so
+                # large PNGs/WebPs never exceed LM Studio's MCP payload cap.
                 summary = (
                     f"Image from: {url}\n"
                     f"Type: {content_type}  Size: {len(img_data):,} bytes\n"
                     f"File: {host_path}"
                 )
-                return [
-                    {"type": "text", "text": summary},
-                    {"type": "image", "data": b64, "mimeType": content_type},
-                ]
+                return _renderer.encode_url_bytes(img_data, content_type, summary)
 
             # ----------------------------------------------------------------
             if name == "screenshot_search":
@@ -2159,11 +3085,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     scale = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
                     region = img.crop(box) if box != (0, 0, w, h) else img
                     rw, rh = region.size
-                    zoomed = region.resize((int(rw * scale), int(rh * scale)), _PilImage.LANCZOS)
+                    zoomed = _GpuImg.resize(region, int(rw * scale), int(rh * scale))
                     zw, zh = zoomed.size
                     summary = (
                         f"Zoomed {scale:.1f}× from ({box[0]},{box[1]})→({box[2]},{box[3]})\n"
-                        f"Region: {rw}×{rh}  Output: {zw}×{zh}  Source: {os.path.basename(path)}"
+                        f"Region: {rw}×{rh}  Output: {zw}×{zh}  Source: {os.path.basename(path)}\n"
+                        f"Backend: {_GpuImg.backend()}"
                     )
                     return _pil_to_blocks(zoomed, summary, quality=92, save_prefix="zoomed")
 
@@ -2173,17 +3100,17 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     # Auto-upscale small regions so fine text is legible for the vision model
                     if rw < 800:
                         up = max(2, 800 // max(rw, 1))
-                        region = region.resize((rw * up, rh * up), _PilImage.LANCZOS)
+                        region = _GpuImg.resize(region, rw * up, rh * up)
                         rw, rh = region.size
-                    # Greyscale → contrast boost → sharpen → unsharp mask
-                    region = region.convert("L")
-                    region = _ImageEnhance.Contrast(region).enhance(2.5)
-                    region = _ImageEnhance.Sharpness(region).enhance(3.0)
-                    region = region.filter(_ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+                    # Greyscale → contrast boost → sharpen → unsharp mask (GPU-accelerated)
+                    region = _GpuImg.to_grayscale(region)
+                    region = _GpuImg.enhance_contrast(region.convert("RGB"), 2.5)
+                    region = _GpuImg.enhance_sharpness(region, 3.0)
+                    region = _GpuImg.sharpen(region, radius=1, percent=150, threshold=3)
                     summary = (
                         f"Scan-enhanced for text reading — greyscale + contrast×2.5 + sharpen×3.0\n"
                         f"Region: ({box[0]},{box[1]})→({box[2]},{box[3]})  Output: {rw}×{rh}\n"
-                        f"Source: {os.path.basename(path)}\n"
+                        f"Source: {os.path.basename(path)}  Backend: {_GpuImg.backend()}\n"
                         f"Read all text visible in this image."
                     )
                     return _pil_to_blocks(region, summary, quality=95, save_prefix="scanned")
@@ -2196,14 +3123,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     result = img.copy()
                     if grayscale:
                         result = result.convert("L").convert("RGB")
-                    result = _ImageEnhance.Contrast(result).enhance(contrast)
-                    result = _ImageEnhance.Sharpness(result).enhance(sharpness)
-                    result = _ImageEnhance.Brightness(result).enhance(brightness)
+                    result = _GpuImg.enhance_contrast(result, contrast)
+                    result = _GpuImg.enhance_sharpness(result, sharpness)
+                    result = _ImageEnhance.Brightness(result).enhance(brightness)  # PIL only
                     summary = (
                         f"Enhanced: contrast={contrast:.1f} sharpness={sharpness:.1f} "
                         f"brightness={brightness:.1f}"
                         + (" grayscale" if grayscale else "") + "\n"
-                        f"Size: {w}×{h}  Source: {os.path.basename(path)}"
+                        f"Size: {w}×{h}  Source: {os.path.basename(path)}\n"
+                        f"Backend: {_GpuImg.backend()}"
                     )
                     return _pil_to_blocks(result, summary, save_prefix="enhanced")
 
@@ -2267,9 +3195,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     img_a = ia.convert("RGB").copy()
                 with _PilImage.open(loc_b) as ib:
                     img_b = ib.convert("RGB").copy()
-                if img_a.size != img_b.size:
-                    img_b = img_b.resize(img_a.size, _PilImage.LANCZOS)
-                diff = _ImageChops.difference(img_a, img_b)
+                diff = _GpuImg.diff(img_a, img_b)   # handles size mismatch internally
                 diff_l = diff.convert("L")
                 diff_l = _ImageEnhance.Brightness(diff_l).enhance(amplify)
                 white = _PilImage.new("RGB", img_a.size, (255, 255, 255))
@@ -2278,7 +3204,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 summary = (
                     f"Pixel diff: {os.path.basename(path_a)} vs {os.path.basename(path_b)}\n"
                     f"Amplify: {amplify:.1f}×  Size: {img_a.width}×{img_a.height}\n"
-                    f"Red pixels = changed regions."
+                    f"Backend: {_GpuImg.backend()}  Red pixels = changed regions."
                 )
                 return _pil_to_blocks(result, summary, save_prefix="diff")
 
@@ -2300,24 +3226,45 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 outline_width = max(1, int(args.get("outline_width", 3)))
                 with _PilImage.open(loc) as src:
                     img = src.convert("RGB").copy()
-                draw = _ImageDraw.Draw(img)
+                # Parse boxes into tuples for GpuImageProcessor.annotate()
+                box_tuples: list[tuple[int, int, int, int]] = []
+                box_labels: list[str] = []
+                box_colors: list[tuple[int, int, int]] = []
                 for box in boxes:
                     bx_l = int(box.get("left",   0))
                     bx_t = int(box.get("top",    0))
                     bx_r = int(box.get("right",  img.width))
                     bx_b = int(box.get("bottom", img.height))
-                    color = str(box.get("color", "#FF3333"))
-                    label = str(box.get("label", ""))
-                    for i in range(outline_width):
-                        draw.rectangle([bx_l - i, bx_t - i, bx_r + i, bx_b + i], outline=color)
-                    if label:
-                        tx, ty = bx_l + 2, max(0, bx_t - 18)
-                        draw.rectangle([tx - 2, ty - 2, tx + len(label) * 7 + 2, ty + 16], fill=color)
-                        draw.text((tx, ty), label, fill="white")
+                    box_tuples.append((bx_l, bx_t, bx_r, bx_b))
+                    box_labels.append(str(box.get("label", "")))
+                    raw_col = str(box.get("color", "#FF3333")).lstrip("#")
+                    try:
+                        r = int(raw_col[0:2], 16)
+                        g = int(raw_col[2:4], 16)
+                        b = int(raw_col[4:6], 16)
+                        box_colors.append((r, g, b))
+                    except Exception:
+                        box_colors.append((255, 51, 51))
+                # Use the first box color for all (GpuImageProcessor uses a single color param)
+                # For multi-color support, fall back to PIL draw loop
+                if len(set(str(c) for c in box_colors)) == 1 or _HAS_CV2:
+                    primary_color = box_colors[0] if box_colors else (255, 51, 51)
+                    img = _GpuImg.annotate(img, box_tuples, box_labels,
+                                           color=primary_color, thickness=outline_width)
+                else:
+                    # Multiple distinct colors — use PIL for per-box color control
+                    draw = _ImageDraw.Draw(img)
+                    for (bx_l, bx_t, bx_r, bx_b), label, col in zip(box_tuples, box_labels, box_colors):
+                        for i in range(outline_width):
+                            draw.rectangle([bx_l - i, bx_t - i, bx_r + i, bx_b + i], outline=col)
+                        if label:
+                            tx, ty = bx_l + 2, max(0, bx_t - 18)
+                            draw.rectangle([tx - 2, ty - 2, tx + len(label) * 7 + 2, ty + 16], fill=col)
+                            draw.text((tx, ty), label, fill="white")
                 n = len(boxes)
                 summary = (
                     f"Annotated {n} bounding box{'es' if n != 1 else ''} on {os.path.basename(path)}\n"
-                    f"Size: {img.width}×{img.height}"
+                    f"Size: {img.width}×{img.height}  Backend: {_GpuImg.backend()}"
                 )
                 return _pil_to_blocks(img, summary, save_prefix="annotated")
 
@@ -2611,6 +3558,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 prompt = str(args.get("prompt", "")).strip()
                 if not prompt:
                     return _text("image_generate: 'prompt' is required")
+                # Fast model-availability check — avoids a 180 s timeout when nothing is loaded
+                if not await ModelRegistry.get().has_image_gen(c):
+                    loaded = [m.get("id","?") for m in await ModelRegistry.get().models(c)]
+                    loaded_str = ", ".join(loaded) if loaded else "none"
+                    return _text(
+                        f"image_generate: no image-generation model is loaded in LM Studio.\n"
+                        f"Currently loaded: {loaded_str}\n"
+                        "→ Load FLUX, SDXL, or another diffusion model in LM Studio and try again."
+                    )
                 model = str(args.get("model", IMAGE_GEN_MODEL)).strip() or None
                 size  = str(args.get("size", "512x512")).strip()
                 n     = max(1, min(int(args.get("n", 1)), 4))
@@ -2696,6 +3652,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 local = _resolve_image_path(path)
                 if not local:
                     return _text(f"image_edit: image not found — '{path}' in {BROWSER_WORKSPACE}")
+                # Fast model check before spending time on file I/O + 90 s timeout
+                if not await ModelRegistry.get().has_image_gen(c):
+                    loaded = [m.get("id","?") for m in await ModelRegistry.get().models(c)]
+                    loaded_str = ", ".join(loaded) if loaded else "none"
+                    return _text(
+                        f"image_edit: no image-generation model is loaded in LM Studio.\n"
+                        f"Currently loaded: {loaded_str}\n"
+                        "→ Load FLUX, SDXL, or another diffusion model and try again."
+                    )
                 model    = str(args.get("model", IMAGE_GEN_MODEL)).strip() or None
                 neg      = str(args.get("negative_prompt", "")).strip() or None
                 strength = max(0.0, min(float(args.get("strength", 0.75)), 1.0))
@@ -2784,7 +3749,88 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 return blocks_e if blocks_e else _text("image_edit: no image data in response")
 
             # ----------------------------------------------------------------
-            # image_upscale — high-quality LANCZOS upscale (no AI model required)
+            # image_remix — GPU AI style transfer via /v1/images/edits
+            #               OOP: ModelRegistry (model check) + ImageRenderer (encode)
+            # ----------------------------------------------------------------
+            if name == "image_remix":
+                if not _HAS_PIL:
+                    return _text("image_remix: Pillow is not installed.")
+                path_rm   = str(args.get("path", "")).strip()
+                prompt_rm = str(args.get("prompt", "")).strip()
+                if not path_rm:
+                    return _text("image_remix: 'path' is required")
+                if not prompt_rm:
+                    return _text("image_remix: 'prompt' is required")
+                local_rm = _resolve_image_path(path_rm)
+                if not local_rm:
+                    return _text(f"image_remix: image not found — '{path_rm}' in {BROWSER_WORKSPACE}")
+                strength_rm = max(0.1, min(float(args.get("strength", 0.65)), 1.0))
+                n_rm        = max(1, min(int(args.get("n", 1)), 4))
+                # Fast model check — friendly error instead of 90 s timeout
+                if not await ModelRegistry.get().has_image_gen(c):
+                    loaded_rm = [m.get("id","?") for m in await ModelRegistry.get().models(c)]
+                    return _text(
+                        f"image_remix: no image-generation model loaded in LM Studio.\n"
+                        f"Currently loaded: {', '.join(loaded_rm) or 'none'}\n"
+                        "→ Load FLUX, SDXL, or another diffusion model and try again."
+                    )
+                # Encode source image as JPEG for multipart upload
+                with _PilImage.open(local_rm) as src_rm:
+                    img_rm = _ImageOps.exif_transpose(src_rm).convert("RGB")
+                in_buf_rm = _io.BytesIO()
+                img_rm.save(in_buf_rm, format="JPEG", quality=92)
+                in_buf_rm.seek(0)
+                rm_model  = IMAGE_GEN_MODEL.strip() or None
+                form_rm: dict[str, str] = {
+                    "prompt":          prompt_rm,
+                    "n":               str(n_rm),
+                    "response_format": "b64_json",
+                    "strength":        str(strength_rm),
+                }
+                if rm_model:
+                    form_rm["model"] = rm_model
+                try:
+                    resp_rm = await asyncio.wait_for(
+                        c.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/images/edits",
+                            files={"image": ("source.jpg", in_buf_rm, "image/jpeg")},
+                            data=form_rm,
+                            timeout=120.0,
+                        ),
+                        timeout=125.0,
+                    )
+                    resp_rm.raise_for_status()
+                    data_rm = resp_rm.json()
+                except Exception as exc_rm:
+                    return _text(
+                        f"image_remix failed: {exc_rm}\n"
+                        "→ Ensure an image-generation model supports /v1/images/edits in LM Studio."
+                    )
+                blocks_rm: list[dict[str, Any]] = []
+                src_name_rm = os.path.basename(path_rm)
+                for idx_rm, item_rm in enumerate(data_rm.get("data", [])):
+                    b64_rm = item_rm.get("b64_json", "")
+                    if not b64_rm:
+                        continue
+                    try:
+                        ri_rm = _PilImage.open(_io.BytesIO(base64.b64decode(b64_rm))).convert("RGB")
+                        summary_rm = (
+                            f"Remix [{idx_rm+1}/{n_rm}]: '{prompt_rm[:80]}'\n"
+                            f"Source: {src_name_rm}  {img_rm.width}×{img_rm.height}"
+                            f"  strength={strength_rm:.2f}  GPU: {GpuDetector.name()}"
+                        )
+                        blocks_rm.extend(_renderer.encode(ri_rm, summary_rm, save_prefix="remix"))
+                    except Exception:
+                        continue
+                return blocks_rm if blocks_rm else _text(
+                    f"image_remix: no image data in response for prompt '{prompt_rm[:60]}'"
+                )
+
+            # ----------------------------------------------------------------
+            # image_upscale — GPU AI primary (NVIDIA / Intel Arc via LM Studio);
+            #                  CPU LANCZOS is fallback only if GPU is unavailable
+            #                  or the model call fails.
+            #                  OOP via GpuDetector + GpuUpscaler + ImageRenderer.
             # ----------------------------------------------------------------
             if name == "image_upscale":
                 if not _HAS_PIL:
@@ -2797,9 +3843,36 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"image_upscale: image not found — '{path}' in {BROWSER_WORKSPACE}")
                 scale   = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
                 sharpen = bool(args.get("sharpen", True))
+                # gpu param: None/unset → auto (GPU primary), False → force CPU only
+                gpu_arg = args.get("gpu", None)
+                force_cpu = (gpu_arg is False or str(gpu_arg).lower() == "false")
                 with _PilImage.open(local) as src:
                     img = _ImageOps.exif_transpose(src).convert("RGB")
                 ow, oh = img.size
+                # ── PRIMARY: GPU AI upscale (NVIDIA + Intel Arc via LM Studio) ──
+                if not force_cpu and IMAGE_GEN_BASE_URL:
+                    gpu_info  = GpuDetector.detect()
+                    # Fast check: skip 90 s timeout if no image-gen model is loaded
+                    _has_gen  = await ModelRegistry.get().has_image_gen(c)
+                    upscaler  = GpuUpscaler(IMAGE_GEN_BASE_URL, IMAGE_GEN_MODEL)
+                    ai_result = await upscaler.upscale(img, c) if _has_gen else None
+                    if ai_result is not None:
+                        ai_w, ai_h = ai_result.size
+                        summary = (
+                            f"GPU AI upscale ({gpu_info['name']})\n"
+                            f"  {ow}×{oh} → {ai_w}×{ai_h}\n"
+                            f"Source: {os.path.basename(path)}"
+                        )
+                        return _renderer.encode(ai_result, summary, save_prefix="upscaled")
+                    # GPU call failed — warn and fall through to CPU LANCZOS
+                    cpu_note = (
+                        f"⚠ GPU AI upscale failed (no model loaded or LM Studio unreachable). "
+                        f"GPU detected: {gpu_info['name']}. "
+                        f"Falling back to CPU LANCZOS.\n"
+                    )
+                else:
+                    cpu_note = ""
+                # ── FALLBACK (CPU): LANCZOS ──────────────────────────────────────
                 # Safety cap: clamp scale so no output dimension exceeds 8192 px
                 max_dim = max(ow, oh)
                 if max_dim * scale > 8192:
@@ -2813,12 +3886,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     upscaled = _ImageEnhance.Sharpness(upscaled).enhance(1.4)
                     upscaled = upscaled.filter(_ImageFilter.UnsharpMask(radius=0.5, percent=80, threshold=2))
                 summary = (
-                    f"Upscaled {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
+                    cpu_note
+                    + f"CPU LANCZOS upscale {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
                     + (" + sharpen" if sharpen else "")
                     + (" [scale capped to 8192px]" if capped else "")
                     + f"\nSource: {os.path.basename(path)}"
                 )
-                return _pil_to_blocks(upscaled, summary, quality=92, save_prefix="upscaled")
+                return _renderer.encode(upscaled, summary, save_prefix="upscaled")
 
             # ----------------------------------------------------------------
             if name == "browser_save_images":
@@ -3218,7 +4292,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     )
                     if not img_b64:
                         return blocks
-                    is_match, desc, conf = await _vision_confirm(img_b64, query, c)
+                    is_match, desc, conf = await _vision_confirm(img_b64, query, c, phash=img_hash)
                     if not is_match:
                         return None
                     # Fire-and-forget: persist confirmed image to DB
@@ -3411,6 +4485,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 timeout_cr = max(1, min(120, int(args.get("timeout", 30))))
                 if not code_cr:
                     return _text("code_run: 'code' is required")
+                # Auto-inject DEVICE variable for torch/tensorflow/cuda code
+                code_cr = GpuCodeRuntime.prepare(code_cr)
                 install_log_cr: list[str] = []
                 if pkgs_cr:
                     for pkg in pkgs_cr:
@@ -3605,6 +4681,32 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"structured_extract: LM Studio request failed — {exc}\n"
                             "Make sure a chat model is loaded (ideally one that supports json_object mode)."
                         )
+
+            # ----------------------------------------------------------------
+            elif name == "orchestrate":
+                raw_steps = args.get("steps", [])
+                stop_on_error = bool(args.get("stop_on_error", False))
+                if not isinstance(raw_steps, list) or not raw_steps:
+                    return _text("orchestrate: 'steps' must be a non-empty list")
+                try:
+                    steps = [
+                        WorkflowStep(
+                            id=str(s["id"]),
+                            tool=str(s["tool"]),
+                            args=dict(s.get("args", {})),
+                            depends_on=list(s.get("depends_on", [])),
+                            label=str(s.get("label", s["id"])),
+                        )
+                        for s in raw_steps
+                    ]
+                except (KeyError, TypeError) as exc:
+                    return _text(f"orchestrate: invalid step definition — {exc}")
+                try:
+                    executor = WorkflowExecutor(steps, stop_on_error=stop_on_error)
+                    results = await executor.run()
+                except ValueError as exc:
+                    return _text(f"orchestrate: workflow error — {exc}")
+                return _text(WorkflowExecutor._format_report(results))
 
             return _text(f"Unknown tool: {name}")
 

@@ -82,6 +82,33 @@ services:
       - aichat-researchbox
     ports:
       - "8096:8096"
+    # ── GPU passthrough ─────────────────────────────────────────────────────
+    # Intel Arc / Intel integrated GPU (low-risk — uncommented by default).
+    # Gives in-container OpenCL/VA-API access for opencv-python-headless.
+    # Remove if your host has no /dev/dri device nodes.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+      MEMORY_URL:   http://aichat-memory:8094
+      RESEARCH_URL: http://aichat-researchbox:8092
+      TOOLKIT_URL:  http://aichat-toolkit:8095
+      BROWSER_URL:  http://human_browser:7081
+      IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
+      IMAGE_GEN_MODEL: ""
+      INTEL_GPU: "1"
+    # NVIDIA: uncomment the two blocks below (requires nvidia-container-toolkit on host)
+    # runtime: nvidia
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8096/health', timeout=3)\""]
@@ -110,6 +137,7 @@ services:
     build: ./docker/toolkit
     environment:
       DATABASE_URL: http://aichat-database:8091
+      INTEL_GPU: "1"
     depends_on:
       - aichat-database
     ports:
@@ -117,6 +145,14 @@ services:
     volumes:
       - ${HOME}/.config/aichat/tools:/data/tools
       - ${HOME}/git:/data/repos:ro
+    # ── GPU passthrough ─────────────────────────────────────────────────────
+    # Intel Arc / integrated GPU — gives custom tools access to numpy/cv2 with
+    # OpenCL acceleration.  Remove if your host has no /dev/dri device nodes.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=3)\""]

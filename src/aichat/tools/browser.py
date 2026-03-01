@@ -31,7 +31,76 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "17"
+_REQUIRED_SERVER_VERSION = "18"
+
+
+class BrowserGpuConfig:
+    """Host-side mirror of the BrowserGpuConfig embedded in _SERVER_SRC.
+
+    Identical logic — probes /dev/dri and INTEL_GPU env var to decide
+    whether Chromium gets hardware-accelerated launch args (--use-gl=egl,
+    VA-API) or the safe --disable-gpu fallback.
+
+    This host-side copy exists so tests can import and exercise the class
+    without exec-ing the full _SERVER_SRC string (which requires playwright).
+    """
+
+    _BASE_ARGS: list[str] = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--window-size=1920,1080",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--use-mock-keychain",
+        "--disable-features=TranslateUI",
+        "--lang=en-US",
+    ]
+
+    _GPU_ARGS: list[str] = [
+        "--use-gl=egl",
+        "--enable-features=VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization",
+        "--enable-gpu-rasterization",
+        "--enable-zero-copy",
+        "--ignore-gpu-blocklist",
+        "--disable-software-rasterizer",
+    ]
+
+    @classmethod
+    def _has_dri(cls) -> bool:
+        """True if /dev/dri/renderD* is accessible."""
+        try:
+            return any(f.startswith("renderD") for f in os.listdir("/dev/dri"))
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
+
+    @classmethod
+    def _intel_gpu_env(cls) -> bool:
+        return os.environ.get("INTEL_GPU", "") == "1"
+
+    @classmethod
+    def gpu_available(cls) -> bool:
+        return cls._has_dri() or cls._intel_gpu_env()
+
+    @classmethod
+    def launch_args(cls) -> list[str]:
+        """Return the full Chromium arg list for the current environment."""
+        args = list(cls._BASE_ARGS)
+        if cls.gpu_available():
+            args.extend(cls._GPU_ARGS)
+        else:
+            args.append("--disable-gpu")
+        return args
+
+    @classmethod
+    def info(cls) -> dict:
+        return {
+            "gpu_available": cls.gpu_available(),
+            "dri_accessible": cls._has_dri(),
+            "intel_gpu_env": cls._intel_gpu_env(),
+        }
 
 # ---------------------------------------------------------------------------
 # FastAPI Playwright server — injected into the container at first use
@@ -40,10 +109,11 @@ _REQUIRED_SERVER_VERSION = "17"
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v17"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v18"""
 from __future__ import annotations
 
 import asyncio
+import os as _os
 import random as _random
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -53,7 +123,71 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "17"
+_VERSION = "18"
+
+
+class BrowserGpuConfig:
+    """Detects Intel/NVIDIA GPU inside the container and returns Chromium launch
+    args for hardware-accelerated rasterization + VA-API video decode.
+    Gracefully falls back to --disable-gpu when /dev/dri is not mapped into
+    this container (the safe default for the external human_browser container)."""
+
+    _BASE_ARGS: list = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--window-size=1920,1080",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--use-mock-keychain",
+        "--disable-features=TranslateUI",
+        "--lang=en-US",
+    ]
+
+    _GPU_ARGS: list = [
+        "--use-gl=egl",
+        "--enable-features=VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization",
+        "--enable-gpu-rasterization",
+        "--enable-zero-copy",
+        "--ignore-gpu-blocklist",
+        "--disable-software-rasterizer",
+    ]
+
+    @classmethod
+    def _has_dri(cls) -> bool:
+        """True if /dev/dri/renderD* is accessible inside this container."""
+        try:
+            return any(f.startswith("renderD") for f in _os.listdir("/dev/dri"))
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
+
+    @classmethod
+    def _intel_gpu_env(cls) -> bool:
+        return _os.environ.get("INTEL_GPU", "") == "1"
+
+    @classmethod
+    def gpu_available(cls) -> bool:
+        return cls._has_dri() or cls._intel_gpu_env()
+
+    @classmethod
+    def launch_args(cls) -> list:
+        """Return the full Chromium arg list for the current environment."""
+        args = list(cls._BASE_ARGS)
+        if cls.gpu_available():
+            args.extend(cls._GPU_ARGS)
+        else:
+            args.append("--disable-gpu")
+        return args
+
+    @classmethod
+    def info(cls) -> dict:
+        return {
+            "gpu_available": cls.gpu_available(),
+            "dri_accessible": cls._has_dri(),
+            "intel_gpu_env": cls._intel_gpu_env(),
+        }
 
 # UA matches the actual Playwright Chromium version (145) to avoid the
 # trivially detectable Chrome/124 vs Sec-Ch-Ua:v="145" mismatch.
@@ -337,20 +471,10 @@ _CHROMIUM_PATHS = [
     "/usr/bin/google-chrome",
 ]
 
-_LAUNCH_ARGS = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-blink-features=AutomationControlled",
-    "--disable-infobars",
-    "--window-size=1920,1080",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-default-apps",
-    "--use-mock-keychain",
-    "--disable-features=TranslateUI",
-    "--lang=en-US",
-]
+# BrowserGpuConfig.launch_args() detects /dev/dri at startup and returns
+# GPU-accelerated args (--use-gl=egl, VA-API) when hardware is available,
+# or --disable-gpu when this container has no DRI device passthrough.
+_LAUNCH_ARGS = BrowserGpuConfig.launch_args()
 
 
 async def _restart_browser():
@@ -633,7 +757,7 @@ async def _rotate_context_and_page() -> object:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": _VERSION}
+    return {"ok": True, "version": _VERSION, "gpu": BrowserGpuConfig.info()}
 
 
 class NavReq(BaseModel):

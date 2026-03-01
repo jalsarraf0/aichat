@@ -1,6 +1,39 @@
 # AIChat
 
-A local-first AI chat TUI (Terminal User Interface) built with [Textual](https://github.com/Textualize/textual). Connects to a local LLM via [LM Studio](https://lmstudio.ai), with a full suite of Docker-backed tools: real Chromium browsing (Playwright), image search and processing pipeline, shell execution, RSS/research, persistent memory, and a WhatsApp bot.
+A local-first AI chat TUI (Terminal User Interface) built with [Textual](https://github.com/Textualize/textual). Connects to a local LLM via [LM Studio](https://lmstudio.ai) with a full suite of Docker-backed tools: real Chromium browsing (Playwright), image search and generation pipeline, GPU-accelerated image processing, shell execution, RSS/research, persistent memory, parallel thinking, conversation history, and a WhatsApp bot — all accessible through the Model Context Protocol (MCP).
+
+---
+
+## Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                          Host Machine                              │
+│                                                                    │
+│  aichat TUI (Textual)                                              │
+│  ├── LM Studio  http://localhost:1234  (LLM / embeddings / TTS)   │
+│  └── MCP stdio  (aichat mcp)                                       │
+│                                                                    │
+│  Docker services:                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │
+│  │ aichat-db    │  │ aichat-      │  │ aichat-      │            │
+│  │ postgres:16  │  │ database     │  │ researchbox  │            │
+│  │ :5432        │  │ :8091        │  │ :8092        │            │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘            │
+│         │                 │                  │                    │
+│  ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐            │
+│  │ aichat-      │  │ aichat-mcp   │  │ aichat-      │            │
+│  │ memory       │  │ :8096 ◄──MCP │  │ toolkit      │            │
+│  │ :8094        │  │  orchestrate │  │ :8095 + GPU  │            │
+│  └──────────────┘  └──────────────┘  └──────────────┘            │
+│                                                                    │
+│  ┌──────────────┐  ┌──────────────┐                               │
+│  │ aichat-      │  │ human_browser│                               │
+│  │ whatsapp     │  │ :7081 + noVNC│                               │
+│  │ :8097        │  │ :36411       │                               │
+│  └──────────────┘  └──────────────┘                               │
+└────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -67,6 +100,12 @@ concise_mode: false                    # Shorter responses
 active_personality: linux-shell-programming
 context_length: 35063                  # Model context window (tokens); history trimmed to fit
 max_response_tokens: 4096              # Tokens reserved for the assistant response
+compact_model: ""                      # Model for compaction (defaults to main model)
+tool_result_max_chars: 8000            # Max characters kept per tool result
+rag_recency_days: 30                   # Days window for date-weighted RAG scoring
+thinking_enabled: false                # Enable parallel thinking chains
+thinking_paths: 3                      # Number of parallel reasoning chains
+thinking_model: ""                     # Model for thinking (defaults to main model)
 ```
 
 **Override the LM Studio URL** without editing the file:
@@ -81,14 +120,14 @@ LM_STUDIO_URL=http://localhost:1234 aichat
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Header (model name, approval mode, streaming indicator)        │
+│  Header: model name | approval mode | streaming | THK:ON        │
 ├────────────────────────────────┬────────────────────────────────┤
 │  Transcript (chat bubbles)     │  Tools panel (tool output log) │
 │                                │  Sessions panel                │
 ├────────────────────────────────┴────────────────────────────────┤
 │  Prompt input                                                   │
 ├─────────────────────────────────────────────────────────────────┤
-│  Keybind bar: F1..F12  ^S  ^G                                   │
+│  Keybind bar: F1..F12  ^S  ^G | CTX%  ⟳N tools                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,6 +135,8 @@ LM_STUDIO_URL=http://localhost:1234 aichat
 - **Tools panel**: Raw tool output streams here in real time.
 - **Sessions panel**: Active shell sessions.
 - **Prompt input**: Enter key sends, Shift+Enter inserts a newline.
+- **CTX%**: Live context window utilisation indicator.
+- **⟳N**: Number of tool calls in the current turn.
 
 ---
 
@@ -126,8 +167,6 @@ LM_STUDIO_URL=http://localhost:1234 aichat
 
 ## Slash Commands
 
-Type these directly in the prompt input.
-
 ### Chat
 
 | Command | Description |
@@ -137,12 +176,33 @@ Type these directly in the prompt input.
 | `/clear` | Clear the transcript display |
 | `/copy` | Copy the last assistant response to clipboard |
 | `/export` | Export the current chat to a Markdown file |
-| `/concise on` | Enable concise (shorter) responses |
-| `/concise off` | Disable concise mode |
+| `/concise on\|off` | Enable/disable concise (shorter) responses |
 | `/verbose` | Alias for `/concise off` |
-| `/shell on` | Enable shell tool |
-| `/shell off` | Disable shell tool |
+| `/shell on\|off` | Enable/disable shell tool |
 | `!<cmd>` | Run a shell command directly (when shell is enabled) |
+
+### Context & History
+
+| Command | Description |
+|---------|-------------|
+| `/ctx` | Show context window usage summary |
+| `/ctx graph` | ASCII bar chart of per-turn token usage |
+| `/compact` | Summarise old turns to free context space |
+| `/compact dry` | Preview what would be summarised (no change) |
+| `/compact history` | Show all past compaction summaries |
+| `/history` | Browse past conversation sessions |
+| `/sessions` | List saved sessions with title + date |
+| `/context` | Show RAG context used for the current session |
+| `/fork` | Clone the current conversation into a new session |
+
+### Thinking
+
+| Command | Description |
+|---------|-------------|
+| `/think <question>` | Run parallel thinking chains on a question, synthesise best answer |
+| `/thinking on\|off` | Toggle auto-thinking on every submission |
+| `/thinking paths N` | Set number of parallel reasoning chains (1–8) |
+| `/thinking model <id>` | Use a specific model for thinking chains |
 
 ### RSS & Research
 
@@ -185,25 +245,13 @@ Type these directly in the prompt input.
 
 ---
 
-## Tool Approval Modes
+## MCP Tool Inventory (49 tools)
 
-| Mode | Behaviour |
-|------|-----------|
-| `AUTO` | All tools run immediately (default) |
-| `ASK` | Each tool call shows a confirmation dialog |
-| `DENY` | All tool calls are blocked |
-
-Cycle with **F4** or set permanently in `~/.config/aichat/config.yml` (`approval: AUTO`).
-
----
-
-## Built-in Tools
-
-All tools are exposed via both the MCP HTTP server (`aichat-mcp`) and the stdio MCP server (`aichat mcp`). The complete tool inventory is grouped below.
+All tools are exposed via both the MCP HTTP server (`aichat-mcp` at port 8096) and the stdio MCP server (`aichat mcp`).
 
 ### Browser Tools — Real Chromium (Playwright)
 
-All browser/screenshot operations run inside the `human_browser` Docker container via a Playwright/FastAPI server that is auto-deployed and auto-upgraded on first use.
+All browser operations run inside the `human_browser` Docker container via a Playwright/FastAPI server (v18) that is auto-deployed and upgraded on first use.
 
 **Setup**: Start the `human_browser` container once:
 ```bash
@@ -215,22 +263,20 @@ docker run -d --name human_browser \
   human-browser:latest
 ```
 
-The browser server auto-upgrades when a newer version is detected — simply use aichat and it redeployes transparently. The current v17 server includes:
-
-- **15-section stealth JS**: removes `webdriver` flag, spoofs `navigator.plugins`, `navigator.languages`, canvas fingerprint noise (per-session XOR seed), WebGL GPU (NVIDIA RTX 3070), AudioContext noise, screen geometry, `deviceMemory = 8`, media devices stub, `navigator.vendor = "Google Inc."`, `maxTouchPoints`, `cookieEnabled`, `onLine`, `window.name` — eliminates every signal checked by Cloudflare Turnstile, PerimeterX, DataDome, and Kasada
-- **Human-like mouse movement**: real Playwright `mouse.move()` events fire after navigation, satisfying bot detectors that require at least one `mousemove` event
-- **Route-based ad blocking**: 30+ ad/tracker domains are aborted before they load (no extension required)
-- **Scroll jitter**: randomised inter-step timing (`0.6–1.5×`) prevents robotic fixed-interval scrolling
-- **Screenshot block-retry**: if a Cloudflare / captcha page is captured, the context is rotated and the screenshot retried automatically
-- **Randomised viewport**: picks from common desktop sizes (1366×768, 1440×900, 1920×1080, etc.) on every new context
-- **Context rotation on block**: `_ALWAYS_ROTATE_DOMAINS` (Twitter, Reddit, Pinterest, Instagram) get a fresh browser context on every visit
+The browser server (v18) features:
+- **15-section stealth JS**: removes `webdriver` flag, spoofs `navigator.plugins`, canvas fingerprint noise (per-session XOR seed), WebGL GPU string, AudioContext noise, screen geometry, `deviceMemory`, media devices stub — bypasses Cloudflare Turnstile, PerimeterX, DataDome
+- **Human-like mouse movement**: real `mouse.move()` events after navigation
+- **Route-based ad blocking**: 30+ ad/tracker domains aborted before load
+- **Scroll jitter**: randomised inter-step timing (0.6–1.5×)
+- **Screenshot block-retry**: Cloudflare/captcha detection with automatic context rotation
 - **Browser crash recovery**: full Chromium restart on WebSocket close or OOM
+- **GPU acceleration**: `BrowserGpuConfig` class dynamically enables VA-API hardware decode when `/dev/dri` is available
 
-The noVNC web UI is accessible at `http://localhost:36411` to watch the browser in real time.
+The noVNC web UI is accessible at `http://localhost:36411` to watch the browser live.
 
 | Tool | Description |
 |------|-------------|
-| `screenshot` | Navigate to a URL and take a screenshot. Supports `find_text` (scroll to and clip text region) and `find_image` (clip to a specific `<img>` element). Returns image inline. |
+| `screenshot` | Navigate to a URL and take a screenshot. `find_text` clips to a text region; `find_image` clips to a specific `<img>` element. Returns image inline. |
 | `browser` | Navigate/read/click/fill/eval on the live page. Session persists between calls. |
 | `scroll_screenshot` | Full-page screenshot assembled from multiple viewport-height scrolls. |
 | `bulk_screenshot` | Screenshot multiple URLs in parallel. |
@@ -239,32 +285,33 @@ The noVNC web UI is accessible at `http://localhost:36411` to watch the browser 
 | `browser_save_images` | Download a list of image URLs to the workspace. |
 | `browser_download_page_images` | Download all images found on a page to the workspace. |
 | `page_scrape` | Full-page text extraction with lazy-scroll rendering. Supports `include_links`. |
-| `page_images` | Extract all image URLs from a live page using 7 extraction strategies (img src, srcset, og:image, background-image, picture, data-src, lazy-load attributes). |
+| `page_images` | Extract all image URLs from a live page using 7 strategies (img src, srcset, og:image, background-image, picture, data-src, lazy-load attributes). |
 
 ### Web Tools
 
 | Tool | Description |
 |------|-------------|
-| `web_fetch` | Fetch a URL and return clean readable text (HTML stripped). `max_chars` up to 16 000. |
+| `web_fetch` | Fetch a URL and return clean readable text (HTML stripped). `max_chars` up to 16,000. |
 | `web_search` | DuckDuckGo web search with three-tier fallback. Returns titles + snippets. |
 | `extract_article` | Fetch a URL and extract the main article body (readability-style). |
 | `page_extract` | Structured data extraction from a live page. |
-| `image_search` | Multi-tier image search with diversity guarantee. Returns up to `count` images (default 4). |
+| `image_search` | Multi-tier image search with diversity guarantee. Returns up to `count` images (default 4). Supports `offset` for pagination. |
 
 #### `image_search` — How it works
 
-- **Query expansion**: game-specific abbreviations auto-expand (e.g. `gfl2` → "Girls Frontline 2", `hsr` → "Honkai Star Rail")
+- **Query expansion**: abbreviations auto-expand (`gfl2` → "Girls Frontline 2", `hsr` → "Honkai Star Rail")
 - **Tier 1** — DDG web search → `page_images` on top article pages (1 scroll each)
 - **Tier 2** — DuckDuckGo Images page → decodes proxy URLs
-- **Tier 3** — Bing Images → different CDN corpus from DDG for variety
-- **Scoring**: `pbs.twimg.com` +10, known good image hosts +6, keyword in alt text +5, keyword in URL +2, natural width ≥ 500 px +4
-- **Domain cap**: max 2 images per domain
-- **Cross-call dedup**: seen URLs stored in `aichat-memory` with 1-hour TTL so repeated calls return new images
-- **Pagination**: `offset` parameter skips the first N candidates
+- **Tier 3** — Bing Images → different CDN corpus for variety
+- **DB-first fast path**: returns cached confirmed images if enough exist in the database (~25× faster)
+- **Perceptual hash dedup**: dHash (9×8) + Hamming distance < 8 removes near-duplicate images
+- **Vision confirm**: optional LLM vision check on each candidate (disable with `IMAGE_VISION_CONFIRM=false`)
+- **Domain cap**: max 2 images per domain per call
+- **Cross-call dedup**: seen URLs stored in `aichat-memory` with 1-hour TTL
 
 ### Image Pipeline Tools
 
-All image tools operate on files in the browser workspace (`/docker/human_browser/workspace`). Pass filenames (not full paths) between tools.
+All image tools operate on files in the browser workspace (`/docker/human_browser/workspace`). Pass filenames between tools.
 
 | Tool | Description |
 |------|-------------|
@@ -275,16 +322,21 @@ All image tools operate on files in the browser workspace (`/docker/human_browse
 | `image_stitch` | Combine multiple images side-by-side or in a grid. |
 | `image_diff` | Pixel-level difference highlight between two images (ImageChops). |
 | `image_annotate` | Draw bounding boxes and labels on an image (ImageDraw). |
-| `image_upscale` | LANCZOS upscale (1.1–8.0×, default 2×) with optional UnsharpMask sharpening. EXIF rotation is applied automatically; output is capped at 8192 px per side to prevent OOM. |
-| `image_generate` | Text-to-image via LM Studio OpenAI-compatible `/v1/images/generations`. Requires a loaded image-gen model. |
-| `image_edit` | Image-to-image / inpainting via `/v1/images/edits`. Supports strength parameter. |
+| `image_upscale` | LANCZOS upscale (1.1–8.0×, default 2×) with optional sharpening. EXIF rotation applied; output capped at 8192 px per side. |
+| `image_generate` | Text-to-image via LM Studio `/v1/images/generations`. Requires a loaded image-gen model. |
+| `image_edit` | Image-to-image / inpainting via `/v1/images/edits`. |
+| `image_remix` | Generate creative variants of an uploaded image using the vision+generate pipeline. |
 
 **Pipeline examples:**
 ```
-image_generate → image_upscale(scale=4) → image_scan   # read fine text in a generated image
-screenshot → image_crop → image_zoom → image_scan       # zoom in on a UI element
-screenshot → image_edit("watercolor style") → image_diff(original, edited)
-image_generate × 2 → image_stitch → image_diff         # compare two generated variants
+# Read fine text in a generated image
+image_generate → image_upscale(scale=4) → image_scan
+
+# Zoom in on a UI element
+screenshot → image_crop → image_zoom → image_scan
+
+# Compare two generated variants
+image_generate × 2 → image_stitch → image_diff
 ```
 
 ### Database / Cache Tools
@@ -295,7 +347,7 @@ image_generate × 2 → image_stitch → image_diff         # compare two genera
 | `db_search` | Full-text search across stored articles. Supports `offset` and `summary_only`. |
 | `db_cache_store` | Store a key-value entry in the web cache (with optional TTL). |
 | `db_cache_get` | Retrieve a cached entry by key. |
-| `db_store_image` | Store an image URL + metadata in the database. |
+| `db_store_image` | Store an image URL + metadata (subject, description, phash, quality_score) in the database. |
 | `db_list_images` | List stored images, optionally filtered by topic. |
 
 ### Memory Tools
@@ -321,6 +373,18 @@ image_generate × 2 → image_stitch → image_diff         # compare two genera
 | `delete_custom_tool` | Permanently remove a custom tool. |
 | `call_custom_tool` | Call a custom tool by name with arguments. |
 
+### LM Studio Tools
+
+| Tool | Description |
+|------|-------------|
+| `tts` | Convert text to speech via LM Studio. Audio saved to workspace. |
+| `embed_store` | Compute and store embeddings for a text chunk. |
+| `embed_search` | Cosine-similarity search over stored embeddings. |
+| `code_run` | Execute a Python code snippet in an isolated subprocess (120s cap). |
+| `smart_summarize` | Summarise long text using the loaded model. |
+| `image_caption` | Generate a text caption for an image using the vision model. |
+| `structured_extract` | Extract structured data from text according to a JSON schema. |
+
 ### System Tools
 
 | Tool | Description |
@@ -330,33 +394,192 @@ image_generate × 2 → image_stitch → image_diff         # compare two genera
 
 ---
 
+## `orchestrate` — Multi-Step Workflow Tool
+
+The `orchestrate` tool lets an LLM compose a complete multi-step workflow in a single call, rather than issuing tool calls one-by-one across multiple turns.
+
+### Key features
+
+- **Automatic parallelism** — steps with no `depends_on` run concurrently via `asyncio.gather()`
+- **Dependency management** — steps with `depends_on` wait for their prerequisites
+- **Result interpolation** — inject an earlier step's output into a later step's args using `{step_id.result}`
+- **Stop-on-error** — optionally abort remaining steps if any step fails
+- **Structured report** — returns a formatted report with each step's label, status (`OK`/`FAILED`), timing, and a result preview
+
+### Step schema
+
+```json
+{
+  "id":         "unique_step_id",
+  "tool":       "mcp_tool_name",
+  "args":       { "param": "value or {other_step.result}" },
+  "depends_on": ["step_id_1", "step_id_2"],
+  "label":      "Human-readable label"
+}
+```
+
+### Example 1 — Parallel web research + screenshot, then summarise
+
+Two searches and a screenshot fire in parallel. The summary waits for both searches.
+
+```json
+{
+  "steps": [
+    {
+      "id": "search_news",
+      "tool": "web_search",
+      "args": { "query": "Intel Arc A380 GPU review 2025" },
+      "label": "Search for reviews"
+    },
+    {
+      "id": "search_specs",
+      "tool": "web_search",
+      "args": { "query": "Intel Arc A380 specifications benchmarks" },
+      "label": "Search for specs"
+    },
+    {
+      "id": "summary",
+      "tool": "smart_summarize",
+      "args": { "text": "Reviews:\n{search_news.result}\n\nSpecs:\n{search_specs.result}" },
+      "depends_on": ["search_news", "search_specs"],
+      "label": "Combine and summarise"
+    }
+  ]
+}
+```
+
+### Example 2 — Research pipeline: search → screenshot → store
+
+```json
+{
+  "steps": [
+    {
+      "id": "find",
+      "tool": "web_search",
+      "args": { "query": "Fedora 43 release notes" },
+      "label": "Find Fedora 43 release page"
+    },
+    {
+      "id": "shot",
+      "tool": "screenshot",
+      "args": { "url": "https://fedoraproject.org/wiki/Releases/43/ChangeSet" },
+      "label": "Screenshot change set"
+    },
+    {
+      "id": "extract",
+      "tool": "extract_article",
+      "args": { "url": "https://fedoraproject.org/wiki/Releases/43/ChangeSet" },
+      "label": "Extract article text"
+    },
+    {
+      "id": "store",
+      "tool": "db_store_article",
+      "args": {
+        "title": "Fedora 43 ChangeSet",
+        "url": "https://fedoraproject.org/wiki/Releases/43/ChangeSet",
+        "body": "{extract.result}",
+        "topic": "linux"
+      },
+      "depends_on": ["extract"],
+      "label": "Store in database"
+    }
+  ]
+}
+```
+
+### Example 3 — Image pipeline: generate → upscale → scan
+
+```json
+{
+  "steps": [
+    {
+      "id": "gen",
+      "tool": "image_generate",
+      "args": { "prompt": "a detailed circuit board diagram, technical, 4K" },
+      "label": "Generate circuit board image"
+    },
+    {
+      "id": "upscale",
+      "tool": "image_upscale",
+      "args": { "path": "{gen.result}", "scale": 3 },
+      "depends_on": ["gen"],
+      "label": "Upscale 3x"
+    },
+    {
+      "id": "ocr",
+      "tool": "image_scan",
+      "args": { "path": "{upscale.result}", "prompt": "Read all visible text and labels" },
+      "depends_on": ["upscale"],
+      "label": "OCR scan upscaled image"
+    }
+  ]
+}
+```
+
+---
+
+## GPU Acceleration
+
+AIChat includes hardware GPU acceleration for both the browser server and the toolkit sandbox, using Intel Arc / integrated GPUs via VA-API, OpenCL, and DRI device passthrough.
+
+### Browser Server — `BrowserGpuConfig`
+
+The `BrowserGpuConfig` class (in `src/aichat/tools/browser.py`) dynamically detects GPU availability at runtime and passes the appropriate Chromium launch arguments:
+
+- **GPU available** (`/dev/dri/renderD*` present or `INTEL_GPU=1` env): enables `--use-gl=egl`, `--enable-features=VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization`, `--enable-gpu-rasterization`, `--enable-zero-copy`
+- **No GPU**: falls back to `--disable-gpu`
+
+The `/health` endpoint on the browser server now reports GPU status:
+```json
+{"version": "18", "gpu": {"gpu_available": false, "dri_accessible": false, "intel_gpu_env": false}}
+```
+
+### Toolkit Sandbox — `ToolkitGpuRuntime`
+
+The `ToolkitGpuRuntime` class (in `docker/toolkit/app.py`) reports which GPU-accelerated packages are importable in custom tools:
+
+```json
+{"available": true, "dri_accessible": true, "packages": ["numpy", "cv2"]}
+```
+
+Custom tools can use `numpy` and `cv2` with OpenCL acceleration when `/dev/dri` is mounted.
+
+### Enabling GPU passthrough
+
+The `docker-compose.yml` already includes GPU passthrough for `aichat-toolkit`:
+
+```yaml
+aichat-toolkit:
+  devices:
+    - /dev/dri:/dev/dri
+  group_add:
+    - video
+  environment:
+    INTEL_GPU: "1"
+```
+
+For NVIDIA GPUs, uncomment the `runtime: nvidia` block in `docker-compose.yml` and ensure `nvidia-container-toolkit` is installed on the host.
+
+---
+
 ## Docker Services
 
 All services start automatically with `docker compose up -d --build`.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `aichat-db` | 5432 | PostgreSQL — stores articles, images, and web cache |
+| `aichat-db` | 5432 | PostgreSQL 16 — articles, images, web cache, conversations |
 | `aichat-database` | 8091 | FastAPI REST wrapper for PostgreSQL |
 | `aichat-researchbox` | 8092 | RSS/feed discovery service |
-| `aichat-memory` | 8094 | Persistent key-value memory store (SQLite) |
-| `aichat-toolkit` | 8095 | Dynamic tool execution sandbox |
-| `aichat-mcp` | 8096 | MCP HTTP/SSE server (LM Studio / Claude Desktop integration) |
+| `aichat-memory` | 8094 | Persistent key-value + embedding store (SQLite) |
+| `aichat-toolkit` | 8095 | Dynamic custom tool execution sandbox (GPU-enabled) |
+| `aichat-mcp` | 8096 | MCP HTTP/SSE server — 49 tools |
 | `aichat-whatsapp` | 8097 | WhatsApp bot (Baileys + LM Studio + full MCP tool access) |
-| `human_browser` | 36411 | Chromium browser + Playwright API + noVNC |
+| `human_browser` | 7081 (API), 36411 (noVNC) | Chromium + Playwright — all web/screenshot ops |
 
-**Start all services:**
 ```bash
-docker compose up -d --build
-```
-
-**Stop all services:**
-```bash
-docker compose down
-```
-
-**View logs:**
-```bash
+docker compose up -d --build     # start all
+docker compose down               # stop all (data volumes preserved)
 docker compose logs -f aichat-mcp
 docker logs human_browser
 ```
@@ -365,9 +588,9 @@ docker logs human_browser
 
 ## MCP Server (LM Studio / Claude Desktop)
 
-`aichat-mcp` exposes all 40 tools over the network via the Model Context Protocol. It supports both SSE (legacy 2024-11-05) and Streamable HTTP (2025-03-26) transports. Tool calls are **non-blocking** — the server returns immediately and delivers results asynchronously, preventing LM Studio timeouts on slow tools.
+`aichat-mcp` exposes all 49 tools over the network via the Model Context Protocol. It supports both SSE (legacy 2024-11-05) and Streamable HTTP (2025-03-26) transports. Tool calls are **non-blocking** — the server returns immediately and delivers results asynchronously, preventing LM Studio timeouts on slow tools.
 
-**LM Studio `mcp_servers.json` entry (Streamable HTTP):**
+**LM Studio `mcp_servers.json` entry (Streamable HTTP, recommended):**
 ```json
 {
   "mcpServers": {
@@ -392,9 +615,48 @@ docker logs human_browser
 **Health check:**
 ```bash
 curl http://localhost:8096/health
+# {"ok": true, "sessions": 0, "tools": 49, "transports": [...]}
 ```
 
-Returns a JSON object listing active sessions, available tools, and supported transports.
+---
+
+## Parallel Thinking
+
+When `/thinking on` (or `thinking_enabled: true` in config), aichat fans out `N` parallel reasoning chains before generating the final answer. Each chain independently reasons about the question, a scoring heuristic picks the best chain, and the final response is synthesised from it.
+
+```
+User: What are the trade-offs between PostgreSQL JSONB and a normalised schema?
+
+  Chain 1 ──► score: 0.82
+  Chain 2 ──► score: 0.91  ◄── best
+  Chain 3 ──► score: 0.75
+
+Final answer synthesised from Chain 2.
+```
+
+Control with `/thinking paths N` (1–8 chains) and `/thinking model <id>` (use a faster/cheaper model for thinking).
+
+---
+
+## Contextual Compaction
+
+When the conversation grows past 95% of the context window, aichat automatically summarises old turns instead of dropping them. This preserves important context across very long sessions.
+
+- `/compact` — manually trigger compaction
+- `/compact dry` — preview what would be summarised
+- `/compact history` — see all past compaction summaries
+- Compaction summaries are persisted to the conversation database and re-injected as system context in new sessions
+
+---
+
+## Conversation History
+
+Every session is persisted to PostgreSQL (`conversation_sessions` + `conversation_turns` tables). The RAG system automatically searches past conversations for relevant context on each new query.
+
+- `/history` — browse all sessions with date + title
+- `/sessions` — list sessions (title, date, turn count)
+- Session titles are auto-generated by the LLM after the first exchange
+- RAG uses date-weighted scoring (recent sessions scored higher via exponential decay)
 
 ---
 
@@ -402,31 +664,50 @@ Returns a JSON object listing active sessions, available tools, and supported tr
 
 `aichat-whatsapp` bridges WhatsApp messages to LM Studio via the full MCP tool suite.
 
-**First-run setup** — scan the QR code at `http://localhost:8097` to pair your WhatsApp account. The session is persisted in a Docker volume (`whatsappauth`) so you only need to pair once.
+**First-run setup** — scan the QR code at `http://localhost:8097` to pair your WhatsApp account. Session persisted in Docker volume `whatsappauth`.
 
 **Features:**
-- Full conversation history per contact (stored in `aichat-memory` with 20-message window)
-- Tool calling: the bot can browse the web, search for images, run shell commands, query the database, etc. — same capabilities as the TUI
+- Full conversation history per contact (20-message window in `aichat-memory`)
+- Tool calling: browse web, search images, run shell commands, query database
 - Up to 5 tool iterations per user message
 - Image/media extraction from incoming messages
 - Group chat support (disabled by default; set `ALLOW_GROUPS=true`)
 
-**Environment variables** (in `docker-compose.yml`):
+---
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LM_STUDIO_URL` | `http://host.docker.internal:1234` | LM Studio endpoint |
-| `BOT_NAME` | `AI Assistant` | Bot display name |
-| `MAX_HISTORY` | `20` | Messages to keep in context per contact |
-| `MAX_TOOL_ITER` | `5` | Max tool-call iterations per message |
-| `MAX_TOKENS` | `1024` | Max response tokens |
-| `ALLOW_GROUPS` | `false` | Enable group chat responses |
+## Custom Tool Development
+
+The `create_tool` MCP tool lets the LLM write and deploy tools at runtime:
+
+```
+Tool name: port_check
+Description: Check if a TCP port is open on a host.
+Parameters: {"host": "str", "port": "int"}
+Code:
+    import asyncio
+    host = kwargs["host"]
+    port = int(kwargs["port"])
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=3
+        )
+        writer.close()
+        return f"{host}:{port} is OPEN"
+    except Exception:
+        return f"{host}:{port} is CLOSED or unreachable"
+```
+
+Tools are saved to `~/.config/aichat/tools/<name>.py` and hot-reloaded by `aichat-toolkit` on next call (2-second TTL cache).
+
+Available libraries in the sandbox: `asyncio`, `json`, `re`, `os`, `math`, `datetime`, `pathlib`, `shlex`, `subprocess`, `httpx`, `numpy` (GPU-accelerated), `cv2` (OpenCV, GPU-accelerated).
+
+User git repos are available at `/data/repos/<reponame>` (read-only mount of `~/git`).
 
 ---
 
 ## Themes
 
-Switch with **F5**. Four built-in themes:
+Switch with **F5**:
 
 | Theme | Description |
 |-------|-------------|
@@ -458,105 +739,62 @@ Switch with **F5**. Four built-in themes:
 | **Business** | Finance Analyst, Political Analyst, Legal Operations |
 | **Other** | Educator/Coach |
 
-Add custom personalities with `/persona add` — they're stored in `~/.config/aichat/config.yml`.
+Add custom personalities with `/persona add` — stored in `~/.config/aichat/config.yml`.
 
 ---
 
-## Model Selection
+## Tool Approval Modes
 
-- Press **F2** to open the model picker. Models are fetched live from LM Studio.
-- If the configured model is not available, the first available model is selected automatically.
-- The selected model is saved to `~/.config/aichat/config.yml`.
+| Mode | Behaviour |
+|------|-----------|
+| `AUTO` | All tools run immediately (default) |
+| `ASK` | Each tool call shows a confirmation dialog |
+| `DENY` | All tool calls are blocked |
 
----
-
-## Streaming
-
-- **F6** toggles streaming on/off.
-- When streaming is on, responses appear token by token.
-- **F11** cancels an in-progress response.
-
----
-
-## Transcript Behaviour
-
-- All responses are sanitized: `<think>` blocks, XML tool-call artifacts, and special model tokens are stripped.
-- Structured JSON/XML responses from tools are rendered as formatted Markdown code blocks.
-- The full conversation history (including tool messages) is stored at `~/.local/share/aichat/transcript.jsonl`.
-- `/new` starts a fresh context; the old context is archived to `/tmp/context`.
-
----
-
-## Shell Tool Details
-
-- Shell is enabled by default. Toggle with `Ctrl+S` or `/shell on|off`.
-- Working directory persists across shell commands within a session.
-- `sudo` commands are run non-interactively (`sudo -n`). If your sudo policy requires a password, they will fail.
-- Output streams live to the Tools panel and also appears as a "Shell" bubble in the transcript.
-- **Blocked commands** (regardless of approval mode): `rm -rf` on critical paths, fork bombs (`:(){:|:&};:`), `mkfs`, `wipefs`, `dd` to raw block devices, `chmod 777` on system paths, `kill -9 1`.
-
----
-
-## Custom Tool Development
-
-The `create_tool` command lets the LLM write and deploy tools on the fly:
-
-```python
-# Example: a tool that checks if a port is open
-tool_name: port_check
-description: Check if a TCP port is open on a host.
-parameters: {"host": str, "port": int}
-
-# Implementation (body of async def run(**kwargs) -> str:)
-import asyncio
-host = kwargs["host"]
-port = int(kwargs["port"])
-try:
-    _, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port), timeout=3
-    )
-    writer.close()
-    return f"{host}:{port} is OPEN"
-except Exception:
-    return f"{host}:{port} is CLOSED or unreachable"
-```
-
-Tools are saved to `~/.config/aichat/tools/<name>.py` and loaded from `aichat-toolkit` on startup. They can access the user's git repos at `/data/repos/<reponame>` (read-only bind mount of `~/git`).
-
-Available libraries: `asyncio`, `json`, `re`, `os`, `math`, `datetime`, `pathlib`, `shlex`, `subprocess`, `httpx`.
-
----
-
-## GitHub Repo Management
-
-```bash
-aichat repo create --private
-aichat repo create --public --owner <org>
-```
-
-Requirements:
-- GitHub CLI (`gh`) installed and authenticated (`gh auth login`)
-- A working SSH key in `~/.ssh` (`id_ed25519` or `id_rsa`)
+Cycle with **F4** or set permanently in config (`approval: AUTO`).
 
 ---
 
 ## Running Tests
 
 ```bash
-# All tests
+# Activate the venv first
+source ~/.local/share/aichat/venv/bin/activate
+
+# All tests (827+ pass, 3 skipped)
 pytest
 
-# Only fast unit tests (no Docker required)
-pytest tests/test_sanitizer.py tests/test_tool_args.py tests/test_keybinds.py
+# Fast unit tests only (no Docker required)
+pytest -k "not smoke" -q
 
-# Full image pipeline + MCP integration (requires Docker services running)
-pytest tests/test_image_pipeline.py
+# Orchestration tool tests
+pytest tests/test_orchestrate.py -v -k "not smoke"
 
-# Full e2e (requires Docker services running)
-pytest tests/test_tools_e2e.py
+# GPU acceleration tests
+pytest tests/test_browser_gpu.py -v -k "not smoke"
+
+# Image pipeline
+pytest tests/test_image_pipeline.py -q
+
+# Smoke tests (require Docker services running)
+pytest -m smoke -v
 ```
 
-The test suite has 145 tests. Live tool tests skip gracefully when Docker services are not available.
+---
+
+## Environment Variables
+
+| Variable | Service | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | all | PostgreSQL FastAPI URL (default: `http://aichat-database:8091`) |
+| `MEMORY_URL` | mcp | Memory service URL (default: `http://aichat-memory:8094`) |
+| `BROWSER_URL` | mcp | Browser server URL (default: `http://human_browser:7081`) |
+| `IMAGE_GEN_BASE_URL` | mcp | LM Studio base URL for image generation + embeddings |
+| `IMAGE_GEN_MODEL` | mcp | Specific image model to use (empty = first loaded model) |
+| `IMAGE_VISION_CONFIRM` | mcp | Set `false` to disable vision verification in `image_search` |
+| `INTEL_GPU` | mcp, toolkit | Set `1` to force GPU mode even without `/dev/dri` detection |
+| `TOOL_TIMEOUT` | mcp, toolkit | Max seconds per tool call (default: `30`) |
+| `LM_STUDIO_URL` | tui | Override LM Studio URL from shell |
 
 ---
 
