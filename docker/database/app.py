@@ -651,6 +651,74 @@ def embeddings_list(limit: int = 20, topic: Optional[str] = None) -> dict:
 # Conversations  (persistent sessions + turns with optional embeddings)
 # ---------------------------------------------------------------------------
 
+
+class ConversationSearcher:
+    """Encapsulates cosine-similarity ranking of conversation turns.
+
+    Responsibilities
+    ----------------
+    * Accept raw DB rows fetched outside (so the caller controls the query).
+    * Score each row against a query vector using pure-Python cosine similarity.
+    * Apply optional session exclusion *after* scoring (useful when the query
+      already has a WHERE clause, but lets callers double-filter).
+    * Return the top-N results as a sorted list of dicts.
+
+    Usage
+    -----
+    searcher = ConversationSearcher(rows, query_vec)
+    results  = searcher.exclude(bad_session_id).top(50)
+    """
+
+    # DB row column indices for the SELECT used in conv_search_turns
+    _COL_ID         = 0
+    _COL_SESSION_ID = 1
+    _COL_ROLE       = 2
+    _COL_CONTENT    = 3
+    _COL_EMBEDDING  = 4
+    _COL_TIMESTAMP  = 5
+
+    def __init__(self, rows: list, query_vec: list[float]) -> None:
+        self._query_vec = query_vec
+        self._scored: list[dict] = self._score_rows(rows)
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def exclude(self, session_id: str | None) -> "ConversationSearcher":
+        """Return a new instance with rows from *session_id* removed."""
+        if not session_id:
+            return self
+        filtered = [r for r in self._scored if r["session_id"] != session_id]
+        copy = object.__new__(ConversationSearcher)
+        copy._query_vec = self._query_vec
+        copy._scored = filtered
+        return copy
+
+    def top(self, n: int) -> list[dict]:
+        """Return the top *n* results sorted by similarity (highest first)."""
+        return sorted(self._scored, key=lambda d: d["similarity"], reverse=True)[:n]
+
+    # ── internal helpers ─────────────────────────────────────────────────────
+
+    def _score_rows(self, rows: list) -> list[dict]:
+        scored: list[dict] = []
+        for row in rows:
+            try:
+                vec = json.loads(row[self._COL_EMBEDDING])
+                sim = _cosine_sim(self._query_vec, vec)
+                ts  = row[self._COL_TIMESTAMP]
+                scored.append({
+                    "turn_id":    row[self._COL_ID],
+                    "session_id": row[self._COL_SESSION_ID],
+                    "role":       row[self._COL_ROLE],
+                    "content":    row[self._COL_CONTENT],
+                    "similarity": round(sim, 6),
+                    "timestamp":  ts.isoformat() if ts else "",
+                })
+            except Exception:
+                continue  # corrupt row — skip silently
+        return scored
+
+
 class ConvSessionIn(BaseModel):
     session_id: str
     title: Optional[str] = None
@@ -746,48 +814,25 @@ def conv_store_turn(req: ConvTurnIn) -> dict:
 def conv_search_turns(req: ConvSearchIn) -> dict:
     """Return the top-N conversation turns most similar to the given embedding."""
     try:
-        limit = max(1, min(req.limit, 50))
+        limit = max(1, min(req.limit, 2000))
         with conn() as c:
-            if req.exclude_session:
-                rows = c.execute(
-                    """
-                    SELECT t.id, t.session_id, t.role, t.content, t.embedding, t.timestamp
-                    FROM conversation_turns t
-                    WHERE t.role IN ('user', 'assistant')
-                      AND t.embedding IS NOT NULL
-                      AND t.session_id != %s
-                    """,
-                    (req.exclude_session,),
-                ).fetchall()
-            else:
-                rows = c.execute(
-                    """
-                    SELECT t.id, t.session_id, t.role, t.content, t.embedding, t.timestamp
-                    FROM conversation_turns t
-                    WHERE t.role IN ('user', 'assistant')
-                      AND t.embedding IS NOT NULL
-                    """
-                ).fetchall()
+            # Fetch all embedded turns; ConversationSearcher handles scoring +
+            # exclusion in pure Python so a single query path suffices.
+            rows = c.execute(
+                """
+                SELECT t.id, t.session_id, t.role, t.content, t.embedding, t.timestamp
+                FROM conversation_turns t
+                WHERE t.role IN ('user', 'assistant')
+                  AND t.embedding IS NOT NULL
+                """
+            ).fetchall()
 
-        query_vec = req.embedding
-        scored: list[dict] = []
-        for row in rows:
-            try:
-                vec = json.loads(row[4])
-                sim = _cosine_sim(query_vec, vec)
-                scored.append({
-                    "turn_id":    row[0],
-                    "session_id": row[1],
-                    "role":       row[2],
-                    "content":    row[3],
-                    "similarity": round(sim, 6),
-                    "timestamp":  row[5].isoformat() if row[5] else "",
-                })
-            except Exception:
-                continue
-
-        scored.sort(key=lambda d: d["similarity"], reverse=True)
-        return {"results": scored[:limit]}
+        results = (
+            ConversationSearcher(rows, req.embedding)
+            .exclude(req.exclude_session)
+            .top(limit)
+        )
+        return {"results": results}
     except Exception as exc:
         log.error("conv_search_turns failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

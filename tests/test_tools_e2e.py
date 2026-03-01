@@ -1744,15 +1744,26 @@ class TestLoggingSystem:
     async def test_report_error_helper_does_not_raise(self):
         """_report_error must silently swallow all exceptions (fire-and-forget)."""
         import aichat.mcp_server as mcp
-        # memory's _report_error
-        from docker.memory import app as memory_app  # noqa: F401 — just checking import
+        # Verify docker/memory/app.py is importable and _report_error exists there.
+        # docker/ has no __init__.py so we load via importlib (same pattern as
+        # test_image_rendering.py and test_orchestrate.py).
+        import importlib.util, pathlib
+        _spec = importlib.util.spec_from_file_location(
+            "docker_memory_app",
+            pathlib.Path(__file__).parent.parent / "docker" / "memory" / "app.py",
+        )
+        _mem_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mem_mod)  # type: ignore[union-attr]
+        assert callable(getattr(_mem_mod, "_report_error", None)), (
+            "docker/memory/app.py is missing _report_error function"
+        )
         # The key property: even when the DB is unreachable, _report_error must not raise
         # We test the ToolManager's database path instead (no side effects needed).
         mgr = ToolManager()
         with patch.object(mgr.db, "get_errors", new=AsyncMock(side_effect=Exception("DB down"))):
             try:
                 await mgr.run_get_errors(10, "", ApprovalMode.AUTO, None)
-            except Exception as exc:
+            except Exception:
                 # get_errors may propagate DB exceptions — that's fine.
                 # The important thing is _report_error itself never crashes.
                 pass
