@@ -136,12 +136,19 @@ async def _download_to_tmp(url: str) -> str:
     suffix = Path(url.split("?")[0]).suffix or ".mp4"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.close()
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            with open(tmp.name, "wb") as f:
-                async for chunk in resp.aiter_bytes(65536):
-                    f.write(chunk)
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                with open(tmp.name, "wb") as f:
+                    async for chunk in resp.aiter_bytes(65536):
+                        f.write(chunk)
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
     return tmp.name
 
 

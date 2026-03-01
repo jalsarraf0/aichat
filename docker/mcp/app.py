@@ -1887,6 +1887,16 @@ def _text(s: str) -> list[dict[str, Any]]:
     return [{"type": "text", "text": s}]
 
 
+def _json_or_err(r: "httpx.Response", tool: str) -> list[dict[str, Any]]:
+    """Return .json() as text, or an error message if the status code is not 2xx."""
+    if r.status_code >= 400:
+        return _text(f"{tool}: upstream returned {r.status_code} — {r.text[:300]}")
+    try:
+        return _text(json.dumps(r.json()))
+    except Exception:
+        return _text(f"{tool}: upstream returned {r.status_code} (non-JSON)")
+
+
 def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
     """Return MCP content blocks: text summary + inline base64 image (compressed for LM Studio).
     Delegates to ImageRenderer.encode_path() which enforces the payload size cap."""
@@ -2483,7 +2493,10 @@ class GpuUpscaler:
             )
             if resp.status_code != 200:
                 return None
-            b64_out = resp.json()["data"][0]["b64_json"]
+            rdata = resp.json().get("data") or []
+            if not rdata or not rdata[0].get("b64_json"):
+                return None
+            b64_out = rdata[0]["b64_json"]
             return _PilImage.open(_io.BytesIO(base64.b64decode(b64_out))).convert("RGB")
         except Exception:
             return None
@@ -3259,7 +3272,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # ----------------------------------------------------------------
             if name == "db_store_article":
                 r = await c.post(f"{DATABASE_URL}/articles/store", json=args)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "db_store_article")
 
             if name == "db_search":
                 search_params: dict = {}
@@ -3275,7 +3288,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if args.get("summary_only"):
                     search_params["summary_only"] = "true"
                 r = await c.get(f"{DATABASE_URL}/articles/search", params=search_params)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "db_search")
 
             if name == "db_cache_store":
                 cache_url_cs = str(args.get("url", "")).strip()
@@ -3288,14 +3301,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if args.get("title"):
                     cache_payload_cs["title"] = str(args["title"])
                 r = await c.post(f"{DATABASE_URL}/cache/store", json=cache_payload_cs)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "db_cache_store")
 
             if name == "db_cache_get":
                 cache_url_cg = str(args.get("url", "")).strip()
                 if not cache_url_cg:
                     return _text("db_cache_get: 'url' is required")
                 r = await c.get(f"{DATABASE_URL}/cache/get", params={"url": cache_url_cg})
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "db_cache_get")
 
             # ----------------------------------------------------------------
             if name == "db_store_image":
@@ -3304,11 +3317,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     "host_path": args.get("host_path", ""),
                     "alt_text":  args.get("alt_text", ""),
                 })
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "db_store_image")
 
             if name == "db_list_images":
                 limit = int(args.get("limit", 20))
                 r = await c.get(f"{DATABASE_URL}/images/list", params={"limit": limit})
+                if r.status_code >= 400:
+                    return _text(f"db_list_images: upstream returned {r.status_code}")
                 data = r.json()
                 images = data.get("images", [])
                 if not images:
@@ -3339,7 +3354,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     except (ValueError, TypeError):
                         return _text("memory_store: 'ttl_seconds' must be an integer")
                 r = await c.post(f"{MEMORY_URL}/store", json=payload)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "memory_store")
 
             if name == "memory_recall":
                 params: dict = {}
@@ -3348,15 +3363,15 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if args.get("pattern"):
                     params["pattern"] = str(args["pattern"])
                 r = await c.get(f"{MEMORY_URL}/recall", params=params)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "memory_recall")
 
             if name == "researchbox_search":
                 r = await c.get(f"{RESEARCH_URL}/search-feeds", params={"topic": args.get("topic", "")})
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "researchbox_search")
 
             if name == "researchbox_push":
                 r = await c.post(f"{RESEARCH_URL}/push-feed", json=args)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "researchbox_push")
 
             # ----------------------------------------------------------------
             if name == "browser":
@@ -3512,18 +3527,18 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     },
                     timeout=10.0,
                 )
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "create_tool")
 
             if name == "list_custom_tools":
                 r = await c.get(f"{TOOLKIT_URL}/tools", timeout=10.0)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "list_custom_tools")
 
             if name == "delete_custom_tool":
                 tool_name = str(args.get("tool_name", "")).strip()
                 if not tool_name:
                     return _text("delete_custom_tool: 'tool_name' is required")
                 r = await c.delete(f"{TOOLKIT_URL}/tool/{tool_name}", timeout=10.0)
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "delete_custom_tool")
 
             if name == "call_custom_tool":
                 tool_name = str(args.get("tool_name", "")).strip()
@@ -3535,7 +3550,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     json={"params": params},
                     timeout=30.0,
                 )
-                return _text(json.dumps(r.json()))
+                return _json_or_err(r, "call_custom_tool")
 
             # ----------------------------------------------------------------
             if name == "get_errors":
@@ -3841,21 +3856,21 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     data = json.loads(raw) if isinstance(raw, str) else (raw or {})
                     lines: list[str] = []
                     if data.get("title"):
-                        lines.append(f"Title: {data['title']}")
+                        lines.append(f"Title: {data.get('title')}")
                     for k, v in list((data.get("meta") or {}).items())[:10]:
                         lines.append(f"  meta[{k}]: {str(v)[:120]}")
                     if "headings" in data:
                         lines.append(f"\nHeadings ({len(data['headings'])}):")
                         for hd in data["headings"]:
-                            lines.append(f"  {hd['tag']}: {hd['text'][:120]}")
+                            lines.append(f"  {hd.get('tag','?')}: {str(hd.get('text',''))[:120]}")
                     if "links" in data:
                         lines.append(f"\nLinks ({len(data['links'])}):")
                         for lk in data["links"]:
-                            lines.append(f"  [{lk['text'][:60]}] → {lk['href'][:120]}")
+                            lines.append(f"  [{str(lk.get('text',''))[:60]}] → {str(lk.get('href',''))[:120]}")
                     if "images" in data:
                         lines.append(f"\nImages ({len(data['images'])}):")
                         for im in data["images"][:10]:
-                            lines.append(f"  {im['src'][:100]}  alt='{im['alt'][:60]}'")
+                            lines.append(f"  {str(im.get('src',''))[:100]}  alt='{str(im.get('alt',''))[:60]}'")
                     if "tables" in data:
                         lines.append(f"\nTables ({len(data['tables'])}):")
                         for ti, tbl in enumerate(data["tables"]):
@@ -3969,13 +3984,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 final_url = data.get("url", url)
                 lines = [f"Found {count} images on: {final_url}  ({title})"]
                 for img in imgs:
-                    line = f"[{img.get('type','?')}] {img['url']}"
+                    line = f"[{img.get('type','?')}] {img.get('url','')}"
                     if img.get("alt"):
-                        line += f"  alt={img['alt']!r}"
+                        line += f"  alt={img.get('alt','')!r}"
                     if img.get("natural_w"):
-                        line += f"  {img['natural_w']}×{img['natural_h']}"
+                        line += f"  {img.get('natural_w',0)}×{img.get('natural_h',0)}"
                     elif img.get("srcset_width"):
-                        line += f"  {img['srcset_width']}w"
+                        line += f"  {img.get('srcset_width','')}w"
                     lines.append(line)
                 return _text("\n".join(lines))
 
@@ -4837,14 +4852,19 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     if not is_match:
                         return None
                     # Fire-and-forget: persist confirmed image to DB
-                    asyncio.create_task(c.post(
-                        f"{DATABASE_URL}/images/store",
-                        json={
-                            "url": url, "subject": _norm_subject,
-                            "description": desc, "phash": img_hash,
-                            "quality_score": conf,
-                        },
-                    ))
+                    async def _store_img():
+                        try:
+                            await c.post(
+                                f"{DATABASE_URL}/images/store",
+                                json={
+                                    "url": url, "subject": _norm_subject,
+                                    "description": desc, "phash": img_hash,
+                                    "quality_score": conf,
+                                },
+                            )
+                        except Exception:
+                            pass
+                    asyncio.create_task(_store_img())
                     return blocks
 
                 confirmed_results = await asyncio.gather(
@@ -5277,6 +5297,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 r = await c.post(f"{GRAPH_URL}/nodes/add",
                                  json={"id": node_id, "labels": labels, "properties": properties},
                                  timeout=10)
+                if r.status_code >= 400:
+                    return _text(f"graph_add_node failed: {r.status_code} — {r.text[:300]}")
                 d = r.json()
                 return _text(f"Node added: {d.get('added')} (labels={d.get('labels')})")
 
@@ -5291,6 +5313,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                  json={"from_id": from_id, "to_id": to_id,
                                        "type": etype, "properties": properties},
                                  timeout=10)
+                if r.status_code >= 400:
+                    return _text(f"graph_add_edge failed: {r.status_code} — {r.text[:300]}")
                 d = r.json()
                 return _text(f"Edge added: {d.get('from_id')} -[{etype}]-> {d.get('to_id')} (id={d.get('added')})")
 
@@ -5301,6 +5325,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 r = await c.get(f"{GRAPH_URL}/nodes/{node_id}/neighbors", timeout=10)
                 if r.status_code == 404:
                     return _text(f"graph_query: node '{node_id}' not found")
+                if r.status_code >= 400:
+                    return _text(f"graph_query failed: {r.status_code} — {r.text[:300]}")
                 d = r.json()
                 neighbors = d.get("neighbors", [])
                 if not neighbors:
@@ -5308,7 +5334,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 lines = [f"Neighbors of '{node_id}' ({len(neighbors)}):"]
                 for nb in neighbors:
                     props = nb.get("properties", {})
-                    lines.append(f"  → {nb['id']} [{nb.get('edge_type','')}]"
+                    lines.append(f"  → {nb.get('id','?')} [{nb.get('edge_type','')}]"
                                  + (f" {props}" if props else ""))
                 return _text("\n".join(lines))
 
@@ -5319,6 +5345,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text("graph_path: 'from_id' and 'to_id' are required")
                 r = await c.post(f"{GRAPH_URL}/path",
                                  json={"from_id": from_id, "to_id": to_id}, timeout=15)
+                if r.status_code >= 400:
+                    return _text(f"graph_path failed: {r.status_code} — {r.text[:300]}")
                 d = r.json()
                 path = d.get("path")
                 if not path:
@@ -5333,6 +5361,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 r = await c.post(f"{GRAPH_URL}/search",
                                  json={"label": label, "properties": properties, "limit": limit_g},
                                  timeout=10)
+                if r.status_code >= 400:
+                    return _text(f"graph_search failed: {r.status_code} — {r.text[:300]}")
                 d = r.json()
                 results_g = d.get("results", [])
                 if not results_g:
@@ -5341,7 +5371,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 for node in results_g:
                     lbl = ",".join(node.get("labels", []))
                     props = node.get("properties", {})
-                    lines.append(f"  {node['id']} [{lbl}] {props}")
+                    lines.append(f"  {node.get('id','?')} [{lbl}] {props}")
                 return _text("\n".join(lines))
 
             # ----------------------------------------------------------------

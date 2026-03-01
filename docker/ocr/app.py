@@ -138,20 +138,28 @@ def ocr_path(payload: dict) -> dict:
     if not path:
         raise HTTPException(status_code=422, detail="'path' is required")
 
-    # Resolve path — allow /workspace prefix
+    # Resolve path — allow /workspace prefix; enforce containment
+    from pathlib import Path as _Path
+    workspace_root = _Path(WORKSPACE).resolve()
     if not os.path.isabs(path):
-        full = os.path.join(WORKSPACE, path)
+        full = (workspace_root / path).resolve()
     else:
-        full = path
+        full = _Path(path).resolve()
 
-    if not os.path.isfile(full):
-        # Try stripping /workspace and re-joining
-        basename = os.path.basename(full)
-        alt = os.path.join(WORKSPACE, basename)
-        if os.path.isfile(alt):
+    # Security: ensure resolved path is within workspace
+    try:
+        full.relative_to(workspace_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied: path outside workspace")
+
+    if not full.is_file():
+        # Try basename only (for paths like /other/workspace/file.png)
+        alt = workspace_root / full.name
+        if alt.is_file():
             full = alt
         else:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    full = str(full)
 
     try:
         img = Image.open(full).convert("RGB")

@@ -87,6 +87,9 @@ async def push_feed(payload: dict) -> dict:
     feed_url = str(payload.get("feed_url", "")).strip()
     if not topic or not feed_url:
         return {"error": "topic and feed_url are required", "inserted": 0, "failed": 0}
+    from urllib.parse import urlparse as _urlparse
+    if _urlparse(feed_url).scheme not in ("http", "https"):
+        return {"error": "feed_url must use http or https", "inserted": 0, "failed": 0}
 
     # feedparser.parse is synchronous; run in a thread to avoid blocking the event loop
     loop = asyncio.get_running_loop()

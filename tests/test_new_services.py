@@ -305,7 +305,7 @@ class TestGraphE2E:
         _mcp_text("graph_add_node", {"id": f"iso1:{uid}", "labels": ["N"]})
         _mcp_text("graph_add_node", {"id": f"iso2:{uid}", "labels": ["N"]})
         text = _mcp_text("graph_path", {"from_id": f"iso1:{uid}", "to_id": f"iso2:{uid}"})
-        assert "no path" in text.lower()
+        assert "no path" in text.lower() or "not found" in text.lower()
 
     def test_search_by_label(self):
         uid = self._uid()
