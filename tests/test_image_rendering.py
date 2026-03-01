@@ -314,6 +314,9 @@ class TestImageRenderingPolicy:
     def test_is_image_tool_image_generate(self):
         assert ImageRenderingPolicy.is_image_tool("image_generate") is True
 
+    def test_is_image_tool_face_recognize(self):
+        assert ImageRenderingPolicy.is_image_tool("face_recognize") is True
+
     def test_is_image_tool_false_for_web_search(self):
         assert ImageRenderingPolicy.is_image_tool("web_search") is False
 

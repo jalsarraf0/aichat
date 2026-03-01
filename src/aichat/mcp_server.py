@@ -612,6 +612,39 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "face_recognize",
+        "description": (
+            "Detect faces in an image and optionally compare them against a reference face. "
+            "Returns an annotated image and a text summary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Image filename or path to analyze.",
+                },
+                "reference_path": {
+                    "type": "string",
+                    "description": "Optional reference image path for same-person matching.",
+                },
+                "match_threshold": {
+                    "type": "number",
+                    "description": "Similarity threshold 0.0–1.0 (default 0.82).",
+                },
+                "min_face_size": {
+                    "type": "integer",
+                    "description": "Minimum face size in pixels (default 40).",
+                },
+                "annotate": {
+                    "type": "boolean",
+                    "description": "Draw face boxes and labels on output image (default true).",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
         "name": "page_extract",
         "description": (
             "Extract structured data from the current browser page: links, headings, tables, images, "
@@ -959,6 +992,7 @@ _IMAGE_TOOLS: frozenset[str] = frozenset(
         "image_stitch",
         "image_diff",
         "image_annotate",
+        "face_recognize",
         "image_upscale",
     }
 )
@@ -1527,6 +1561,155 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                     f"Size: {img.width}×{img.height}"
                 )
                 return _pil_blocks(img, summary)
+
+        if name == "face_recognize":
+            try:
+                from PIL import Image as _PI, ImageDraw as _ID, ImageOps as _IO
+                import cv2 as _cv
+                import numpy as _np
+                import io as _io_mod
+            except ImportError:
+                return _text(
+                    "face_recognize: missing dependencies. Install Pillow, opencv-python, and numpy."
+                )
+            _WORKSPACE = "/docker/human_browser/workspace"
+            raw_path = str(arguments.get("path", "")).strip()
+            if not raw_path:
+                return _text("face_recognize: 'path' is required")
+
+            def _resolve(p: str) -> str | None:
+                basename = os.path.basename(p)
+                if "/" not in p or p.startswith("/workspace/") or p.startswith("/docker/human_browser/workspace/"):
+                    c = os.path.join(_WORKSPACE, basename)
+                    return c if os.path.isfile(c) else None
+                return p if os.path.isfile(p) else None
+
+            def _encode(pil_img, quality: int = 90) -> str:
+                buf = _io_mod.BytesIO()
+                pil_img.convert("RGB").save(buf, format="JPEG", quality=quality)
+                return base64.standard_b64encode(buf.getvalue()).decode("ascii")
+
+            def _detect_faces(
+                pil_img: _PI.Image,
+                *,
+                min_face_size: int = 40,
+            ) -> list[tuple[int, int, int, int]]:
+                arr = _np.array(pil_img.convert("RGB"))
+                gray = _cv.cvtColor(arr, _cv.COLOR_RGB2GRAY)
+                gray = _cv.equalizeHist(gray)
+                cascade_path = os.path.join(_cv.data.haarcascades, "haarcascade_frontalface_default.xml")
+                detector = _cv.CascadeClassifier(cascade_path)
+                if detector.empty():
+                    return []
+                faces = detector.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(max(12, min_face_size), max(12, min_face_size)),
+                )
+                parsed = [
+                    (int(x), int(y), int(w), int(h))
+                    for (x, y, w, h) in list(faces)
+                ]
+                parsed.sort(key=lambda box: box[2] * box[3], reverse=True)
+                return parsed
+
+            def _embedding(pil_img: _PI.Image, box: tuple[int, int, int, int]):
+                x, y, w, h = box
+                arr = _np.array(pil_img.convert("RGB"))
+                gray = _cv.cvtColor(arr, _cv.COLOR_RGB2GRAY)
+                y1, y2 = max(0, y), min(gray.shape[0], y + h)
+                x1, x2 = max(0, x), min(gray.shape[1], x + w)
+                face = gray[y1:y2, x1:x2]
+                if face.size == 0:
+                    return None
+                face = _cv.resize(face, (64, 64), interpolation=_cv.INTER_AREA)
+                vec = face.astype("float32").reshape(-1)
+                vec -= float(vec.mean())
+                norm = float(_np.linalg.norm(vec))
+                if norm <= 1e-9:
+                    return None
+                return vec / norm
+
+            def _sim(vec_a, vec_b) -> float:
+                raw = float(_np.dot(vec_a, vec_b))
+                return float(_np.clip((raw + 1.0) / 2.0, 0.0, 1.0))
+
+            local = _resolve(raw_path)
+            if not local:
+                return _text(f"face_recognize: image not found — '{raw_path}'")
+
+            try:
+                min_face_size = max(12, min(int(arguments.get("min_face_size", 40)), 2048))
+            except (ValueError, TypeError):
+                min_face_size = 40
+            try:
+                match_threshold = max(0.0, min(float(arguments.get("match_threshold", 0.82)), 1.0))
+            except (ValueError, TypeError):
+                match_threshold = 0.82
+            annotate = bool(arguments.get("annotate", True))
+
+            with _PI.open(local) as src:
+                img = _IO.exif_transpose(src.convert("RGB").copy())
+            out_img = img.copy()
+            faces = _detect_faces(img, min_face_size=min_face_size)
+            lines = [
+                f"Detected {len(faces)} face(s) in {os.path.basename(raw_path)} "
+                f"(min_face_size={min_face_size}px)."
+            ]
+
+            similarities: list[float] = []
+            matched: list[bool] = []
+            ref_path = str(arguments.get("reference_path", "")).strip()
+            if ref_path:
+                ref_local = _resolve(ref_path)
+                if not ref_local:
+                    lines.append(f"Reference image not found: {ref_path}")
+                else:
+                    with _PI.open(ref_local) as ref_src:
+                        ref_img = _IO.exif_transpose(ref_src.convert("RGB").copy())
+                    ref_faces = _detect_faces(ref_img, min_face_size=min_face_size)
+                    if not ref_faces:
+                        lines.append(
+                            f"Reference image '{os.path.basename(ref_path)}' has no detectable faces."
+                        )
+                    else:
+                        ref_vec = _embedding(ref_img, ref_faces[0])
+                        if ref_vec is None:
+                            lines.append("Reference face embedding failed.")
+                        else:
+                            for box in faces:
+                                emb = _embedding(img, box)
+                                score = _sim(ref_vec, emb) if emb is not None else 0.0
+                                similarities.append(score)
+                                matched.append(score >= match_threshold)
+                            if similarities:
+                                best_idx = max(range(len(similarities)), key=lambda i: similarities[i])
+                                best_score = similarities[best_idx]
+                                lines.append(
+                                    f"Best match: face #{best_idx + 1} similarity={best_score:.3f} "
+                                    f"({'MATCH' if best_score >= match_threshold else 'NO MATCH'}) "
+                                    f"threshold={match_threshold:.2f}."
+                                )
+
+            if annotate:
+                draw = _ID.Draw(out_img)
+                for idx, (x, y, w, h) in enumerate(faces, start=1):
+                    is_match = matched[idx - 1] if idx - 1 < len(matched) else False
+                    color = (64, 176, 89) if is_match else (230, 57, 70)
+                    draw.rectangle([x, y, x + w, y + h], outline=color, width=3)
+                    label = f"Face {idx}"
+                    if idx - 1 < len(similarities):
+                        label = f"{label} {similarities[idx - 1]:.2f}"
+                    tx, ty = x + 2, max(0, y - 18)
+                    draw.rectangle([tx - 2, ty - 2, tx + len(label) * 7 + 2, ty + 16], fill=color)
+                    draw.text((tx, ty), label, fill="white")
+
+            summary = "\n".join(lines)
+            return [
+                {"type": "text", "text": summary},
+                {"type": "image", "data": _encode(out_img), "mimeType": "image/jpeg"},
+            ]
 
         if name == "page_extract":
             include = list(arguments.get("include") or ["links", "headings", "tables", "images", "meta", "text"])
