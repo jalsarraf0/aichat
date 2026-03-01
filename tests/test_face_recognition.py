@@ -89,6 +89,27 @@ class TestFaceRecognizeSchema:
         assert "reference_path" in props
 
 
+@skip_load
+class TestImagePathResolution:
+    def test_resolve_client_alias_to_latest_workspace_image(self, tmp_path, monkeypatch):
+        older = tmp_path / "older.png"
+        newer = tmp_path / "newer.jpg"
+        older.write_bytes(b"\x89PNG\r\n\x1a\n")
+        newer.write_bytes(b"\xff\xd8\xff\xe0")
+        # Ensure deterministic ordering by touching newer last.
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_100, 1_700_000_100))
+
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("image-1772402117277.jpg")
+        assert resolved == str(newer)
+
+    def test_resolve_non_alias_missing_path_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("definitely-missing-file.png")
+        assert resolved is None
+
+
 @pytest.fixture
 def test_face_image_path() -> str:
     fname = f"face_tool_test_{uuid.uuid4().hex[:8]}.png"

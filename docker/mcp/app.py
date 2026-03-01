@@ -2214,11 +2214,41 @@ def _resolve_image_path(path: str) -> str | None:
     if not path:
         return None
     name = os.path.basename(path)
+
+    def _resolve_client_alias() -> str | None:
+        # Some chat clients send synthetic attachment names (for example,
+        # "image-1772402117277.jpg") that are not real workspace filenames.
+        # In that case, use the most recent real image in the workspace.
+        if not re.fullmatch(r"image-\d{8,}\.(?:png|jpe?g|webp|gif|bmp|tiff?)", name, flags=re.IGNORECASE):
+            return None
+        if not os.path.isdir(BROWSER_WORKSPACE):
+            return None
+        picks: list[tuple[float, str]] = []
+        for fn in os.listdir(BROWSER_WORKSPACE):
+            full = os.path.join(BROWSER_WORKSPACE, fn)
+            if not os.path.isfile(full):
+                continue
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
+                continue
+            try:
+                picks.append((os.path.getmtime(full), full))
+            except OSError:
+                continue
+        if not picks:
+            return None
+        picks.sort(key=lambda p: p[0], reverse=True)
+        return picks[0][1]
+
     # Bare filename or known prefix → remap to our bind-mount
     if "/" not in path or path.startswith("/workspace/") or path.startswith("/docker/human_browser/workspace/"):
         candidate = os.path.join(BROWSER_WORKSPACE, name)
-        return candidate if os.path.isfile(candidate) else None
-    return path if os.path.isfile(path) else None
+        if os.path.isfile(candidate):
+            return candidate
+        return _resolve_client_alias()
+    if os.path.isfile(path):
+        return path
+    return _resolve_client_alias()
 
 
 def _pil_to_blocks(
@@ -4869,6 +4899,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 local = _resolve_image_path(path)
                 if not local:
                     return _text(f"image_upscale: image not found — '{path}' in {BROWSER_WORKSPACE}")
+                resolved_name = os.path.basename(local)
+                alias_note = ""
+                if os.path.basename(path) != resolved_name:
+                    alias_note = (
+                        f"\nInput alias '{os.path.basename(path)}' resolved to workspace image "
+                        f"'{resolved_name}'."
+                    )
                 try:
                     scale = max(1.1, min(float(args.get("scale", 2.0)), 8.0))
                 except (ValueError, TypeError):
@@ -4894,7 +4931,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         summary = (
                             f"GPU AI upscale ({gpu_info['name']})\n"
                             f"  {ow}×{oh} → {ai_w}×{ai_h}\n"
-                            f"Source: {os.path.basename(path)}"
+                            f"Source: {resolved_name}{alias_note}"
                         )
                         return _renderer.encode(ai_result, summary, save_prefix="upscaled",
                                                 max_w=4096, max_h=4096)
@@ -4924,7 +4961,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     + f"{_GpuImg.backend()} upscale {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
                     + (" + sharpen" if sharpen else "")
                     + (" [scale capped to 8192px]" if capped else "")
-                    + f"\nSource: {os.path.basename(path)}"
+                    + f"\nSource: {resolved_name}{alias_note}"
                 )
                 return _renderer.encode(upscaled, summary, save_prefix="upscaled",
                                         max_w=4096, max_h=4096)
