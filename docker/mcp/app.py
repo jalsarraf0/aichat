@@ -3303,21 +3303,26 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text("image_stitch: at least 2 paths are required")
                 paths = paths[:8]
                 direction = str(args.get("direction", "vertical")).lower()
-                gap = max(0, int(args.get("gap", 0)))
+                try:
+                    gap = max(0, int(args.get("gap", 0)))
+                except (ValueError, TypeError):
+                    gap = 0
                 images: list["_PilImage.Image"] = []
                 for p in paths:
                     loc = _resolve_image_path(p)
                     if not loc:
                         return _text(f"image_stitch: image not found — '{p}'")
                     with _PilImage.open(loc) as im:
-                        images.append(im.convert("RGB").copy())
+                        images.append(_ImageOps.exif_transpose(im.convert("RGB").copy()))
                 if direction == "horizontal":
                     total_w = sum(im.width for im in images) + gap * (len(images) - 1)
                     max_h   = max(im.height for im in images)
                     canvas  = _PilImage.new("RGB", (total_w, max_h), (255, 255, 255))
                     x = 0
                     for im in images:
-                        canvas.paste(im, (x, 0))
+                        # Center shorter images vertically within the canvas
+                        y_off = (max_h - im.height) // 2
+                        canvas.paste(im, (x, y_off))
                         x += im.width + gap
                 else:
                     max_w   = max(im.width for im in images)
@@ -3325,7 +3330,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     canvas  = _PilImage.new("RGB", (max_w, total_h), (255, 255, 255))
                     y = 0
                     for im in images:
-                        canvas.paste(im, (0, y))
+                        # Center narrower images horizontally within the canvas
+                        x_off = (max_w - im.width) // 2
+                        canvas.paste(im, (x_off, y))
                         y += im.height + gap
                 summary = (
                     f"Stitched {len(images)} images ({direction})\n"
@@ -3347,11 +3354,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"image_diff: path_a not found — '{path_a}'")
                 if not loc_b:
                     return _text(f"image_diff: path_b not found — '{path_b}'")
-                amplify = max(1.0, min(float(args.get("amplify", 3.0)), 10.0))
+                try:
+                    amplify = max(1.0, min(float(args.get("amplify", 3.0)), 10.0))
+                except (ValueError, TypeError):
+                    amplify = 3.0
                 with _PilImage.open(loc_a) as ia:
-                    img_a = ia.convert("RGB").copy()
+                    img_a = _ImageOps.exif_transpose(ia.convert("RGB").copy())
                 with _PilImage.open(loc_b) as ib:
-                    img_b = ib.convert("RGB").copy()
+                    img_b = _ImageOps.exif_transpose(ib.convert("RGB").copy())
                 diff = _GpuImg.diff(img_a, img_b)   # handles size mismatch internally
                 diff_l = diff.convert("L")
                 diff_l = _ImageEnhance.Brightness(diff_l).enhance(amplify)
@@ -3380,18 +3390,24 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 loc = _resolve_image_path(path)
                 if not loc:
                     return _text(f"image_annotate: image not found — '{path}'")
-                outline_width = max(1, int(args.get("outline_width", 3)))
+                try:
+                    outline_width = max(1, int(args.get("outline_width", 3)))
+                except (ValueError, TypeError):
+                    outline_width = 3
                 with _PilImage.open(loc) as src:
-                    img = src.convert("RGB").copy()
+                    img = _ImageOps.exif_transpose(src.convert("RGB").copy())
                 # Parse boxes into tuples for GpuImageProcessor.annotate()
                 box_tuples: list[tuple[int, int, int, int]] = []
                 box_labels: list[str] = []
                 box_colors: list[tuple[int, int, int]] = []
                 for box in boxes:
-                    bx_l = int(box.get("left",   0))
-                    bx_t = int(box.get("top",    0))
-                    bx_r = int(box.get("right",  img.width))
-                    bx_b = int(box.get("bottom", img.height))
+                    try:
+                        bx_l = int(box.get("left",   0))
+                        bx_t = int(box.get("top",    0))
+                        bx_r = int(box.get("right",  img.width))
+                        bx_b = int(box.get("bottom", img.height))
+                    except (ValueError, TypeError):
+                        continue  # skip malformed box rather than crash
                     box_tuples.append((bx_l, bx_t, bx_r, bx_b))
                     box_labels.append(str(box.get("label", "")))
                     raw_col = str(box.get("color", "#FF3333")).lstrip("#")
