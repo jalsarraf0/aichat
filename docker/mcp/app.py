@@ -148,7 +148,8 @@ async def _vision_confirm(
             hc.post(f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload),
             timeout=8.0,
         )
-        text = r.json()["choices"][0]["message"]["content"].strip()
+        _choices = r.json().get("choices", [])
+        text = (_choices[0]["message"]["content"].strip() if _choices else "")
         desc  = ""
         if "DESCRIPTION:" in text:
             desc = text.split("DESCRIPTION:")[1].split("|")[0].strip()
@@ -2746,9 +2747,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
                 }
                 # 24-second budget for all screenshots — fits within LM Studio's timeout.
-                _deadline = asyncio.get_event_loop().time() + 24.0
+                _deadline = asyncio.get_running_loop().time() + 24.0
                 for i, url in enumerate(urls):
-                    remaining = _deadline - asyncio.get_event_loop().time()
+                    remaining = _deadline - asyncio.get_running_loop().time()
                     if remaining < 3:
                         blocks.append({"type": "text", "text": f"(time budget reached — stopped at {i} of {len(urls)} results)"})
                         break
@@ -4740,7 +4741,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_ss
                         )
                         r_ss.raise_for_status()
-                        summary = r_ss.json()["choices"][0]["message"]["content"].strip()
+                        _ch_ss = r_ss.json().get("choices", [])
+                        summary = (_ch_ss[0]["message"]["content"].strip() if _ch_ss else "")
                         return _text(summary if summary else "smart_summarize: empty response from model")
                     except Exception as exc:
                         return _text(
@@ -4784,7 +4786,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             timeout=12.0,
                         )
                         r_ic.raise_for_status()
-                        caption = r_ic.json()["choices"][0]["message"]["content"].strip()
+                        _ch_ic = r_ic.json().get("choices", [])
+                        caption = (_ch_ic[0]["message"]["content"].strip() if _ch_ic else "")
                         return _text(caption if caption else "image_caption: empty response from vision model")
                     except Exception as exc:
                         return _text(
@@ -4827,7 +4830,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                             f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_se
                         )
                         r_se.raise_for_status()
-                        raw_se = r_se.json()["choices"][0]["message"]["content"].strip()
+                        _ch_se = r_se.json().get("choices", [])
+                        raw_se = (_ch_se[0]["message"]["content"].strip() if _ch_se else "")
                         try:
                             parsed = _js_se.loads(raw_se)
                             return _text(_js_se.dumps(parsed, indent=2))

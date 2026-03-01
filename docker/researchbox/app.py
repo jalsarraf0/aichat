@@ -83,11 +83,13 @@ def search_feeds(topic: str) -> dict:
 
 @app.post("/push-feed")
 async def push_feed(payload: dict) -> dict:
-    topic = payload["topic"]
-    feed_url = payload["feed_url"]
+    topic    = str(payload.get("topic", "")).strip()
+    feed_url = str(payload.get("feed_url", "")).strip()
+    if not topic or not feed_url:
+        return {"error": "topic and feed_url are required", "inserted": 0, "failed": 0}
 
     # feedparser.parse is synchronous; run in a thread to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         parsed = await asyncio.wait_for(
             loop.run_in_executor(None, feedparser.parse, feed_url),
