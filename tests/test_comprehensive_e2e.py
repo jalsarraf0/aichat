@@ -243,7 +243,7 @@ class TestLMStudioTools:
             "These models are trained on vast amounts of text data and can perform "
             "tasks ranging from translation to creative writing."
         )
-        blocks = _mcp_content("smart_summarize", {"text": long_text}, timeout=60)
+        blocks = _mcp_content("smart_summarize", {"content": long_text}, timeout=60)
         text = _text_from(blocks)
         assert len(text) > 20, f"Summary too short: {text!r}"
         assert "error" not in text.lower()[:20]
@@ -376,7 +376,7 @@ class TestOrchestrate:
                 {"id": "search", "tool": "web_search",
                  "args": {"query": "Python asyncio"}, "label": "Web Search"},
                 {"id": "summarize", "tool": "smart_summarize",
-                 "args": {"text": "{search.result}"},
+                 "args": {"content": "{search.result}"},
                  "depends_on": ["search"], "label": "Summary"},
             ],
         }, timeout=120)
