@@ -2036,20 +2036,17 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             import zoneinfo
             tz_name = str(arguments.get("timezone", "")).strip()
             try:
-                if tz_name:
-                    tz = zoneinfo.ZoneInfo(tz_name)
-                else:
-                    tz = None  # use local timezone
+                tz = zoneinfo.ZoneInfo(tz_name) if tz_name else None
             except (zoneinfo.ZoneInfoNotFoundError, KeyError):
                 return _text(f"server_time: unknown timezone '{tz_name}'")
-            now = datetime.now(tz=tz or None)
+            now = datetime.now(tz=tz) if tz else datetime.now().astimezone()
             utc_now = datetime.now(timezone.utc)
             offset = now.strftime("%z") or "local"
             return _text(
                 f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} ({offset})\n"
                 f"UTC time:     {utc_now.strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n"
                 f"Day of week:  {now.strftime('%A')}\n"
-                f"Timezone:     {tz_name or 'server local'}\n"
+                f"Timezone:     {tz_name or now.tzname() or 'server local'}\n"
                 f"Unix epoch:   {int(utc_now.timestamp())}"
             )
 
@@ -2105,7 +2102,7 @@ async def _handle(line: str) -> None:
             },
         }))
 
-    elif method == "notifications/initialized":
+    elif method in ("notifications/initialized", "initialized"):
         # Notification — no response needed
         pass
 
@@ -2116,9 +2113,18 @@ async def _handle(line: str) -> None:
         tool_name = params.get("name", "")
         arguments = params.get("arguments") or {}
         content_blocks = await _call_tool(tool_name, arguments)
+        is_error = (
+            bool(content_blocks)
+            and not any(b.get("type") == "image" for b in content_blocks)
+            and all(b.get("type") == "text" for b in content_blocks)
+            and any(
+                b.get("text", "").startswith(("Error", "Unknown tool", "Tool denied"))
+                for b in content_blocks
+            )
+        )
         _write(_ok(req_id, {
             "content": content_blocks,
-            "isError": False,
+            "isError": is_error,
         }))
 
     elif method == "ping":

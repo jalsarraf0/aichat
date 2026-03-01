@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     repo_parser = subparsers.add_parser("repo", help="GitHub repository helpers")
-    repo_sub = repo_parser.add_subparsers(dest="repo_command")
+    repo_sub = repo_parser.add_subparsers(dest="repo_command", required=True)
     create_parser = repo_sub.add_parser("create", help="Create and push the GitHub repo via SSH")
     create_parser.add_argument("--owner", help="GitHub owner/org for the repo")
     create_visibility = create_parser.add_mutually_exclusive_group()
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.set_defaults(func=repo_create_command)
 
     gh_parser = subparsers.add_parser("github", help="GitHub shortcuts")
-    gh_sub = gh_parser.add_subparsers(dest="gh_command")
+    gh_sub = gh_parser.add_subparsers(dest="gh_command", required=True)
     gh_init = gh_sub.add_parser("init", help="Alias for: aichat repo create")
     gh_init.add_argument("--owner", help="GitHub owner/org for the repo")
     gh_visibility = gh_init.add_mutually_exclusive_group()
