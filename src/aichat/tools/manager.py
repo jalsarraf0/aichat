@@ -924,11 +924,11 @@ class ToolManager:
     async def run_db_store_article(
         self,
         url: str,
-        title: str,
-        content: str,
-        topic: str,
-        mode: ApprovalMode,
-        confirmer: Callable[[str], Awaitable[bool]] | None,
+        title: str | None = None,
+        content: str | None = None,
+        topic: str | None = None,
+        mode: ApprovalMode = ApprovalMode.AUTO,
+        confirmer: Callable[[str], Awaitable[bool]] | None = None,
     ) -> dict:
         await self._check_approval(mode, ToolName.DB_STORE_ARTICLE.value, confirmer)
         return await self.db.store_article(url, title=title, content=content, topic=topic)

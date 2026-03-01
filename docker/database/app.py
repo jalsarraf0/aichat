@@ -539,13 +539,13 @@ def _cosine_sim(a: list, b: list) -> float:
 class EmbeddingIn(BaseModel):
     key:       str
     content:   str
-    embedding: list          # JSON array of floats
+    embedding: list[float]   # JSON array of floats
     model:     Optional[str] = None
     topic:     Optional[str] = None
 
 
 class EmbeddingSearchIn(BaseModel):
-    embedding: list          # query embedding (float array)
+    embedding: list[float]   # query embedding (float array)
     limit:     int = 5
     topic:     Optional[str] = None
 
@@ -734,11 +734,11 @@ class ConvTurnIn(BaseModel):
     role: str
     content: str
     turn_index: Optional[int] = 0
-    embedding: Optional[list] = None
+    embedding: Optional[list[float]] = None
 
 
 class ConvSearchIn(BaseModel):
-    embedding: list
+    embedding: list[float]
     limit: int = 5
     exclude_session: Optional[str] = None
 

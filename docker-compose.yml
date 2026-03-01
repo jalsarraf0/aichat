@@ -71,6 +71,7 @@ services:
       # Set IMAGE_GEN_MODEL to the exact model name shown in LM Studio to pin a model.
       IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
       IMAGE_GEN_MODEL: ""
+      INTEL_GPU: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -90,15 +91,6 @@ services:
       - /dev/dri:/dev/dri
     group_add:
       - video
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-      MEMORY_URL:   http://aichat-memory:8094
-      RESEARCH_URL: http://aichat-researchbox:8092
-      TOOLKIT_URL:  http://aichat-toolkit:8095
-      BROWSER_URL:  http://human_browser:7081
-      IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
-      IMAGE_GEN_MODEL: ""
-      INTEL_GPU: "1"
     # NVIDIA: uncomment the two blocks below (requires nvidia-container-toolkit on host)
     # runtime: nvidia
     # deploy:
