@@ -815,7 +815,9 @@ class ToolManager:
                         _vc.post(f"{_LM_STUDIO_URL}/v1/chat/completions", json=payload),
                         timeout=8.0,
                     )
-                text = r2.json()["choices"][0]["message"]["content"].strip()
+                r2.raise_for_status()
+                choices = r2.json().get("choices") or []
+                text = choices[0]["message"]["content"].strip() if choices else ""
                 desc  = ""
                 if "DESCRIPTION:" in text:
                     desc = text.split("DESCRIPTION:")[1].split("|")[0].strip()

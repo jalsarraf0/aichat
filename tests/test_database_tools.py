@@ -280,6 +280,7 @@ class TestDbCacheStoreE2E:
         if json_body is None:
             json_body = {"status": "cached", "url": "https://example.com"}
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = json_body
         mock_resp.status_code = status
         mock_c = MagicMock()
@@ -354,6 +355,7 @@ class TestDbCacheGetE2E:
 
     def test_valid_get_sends_url_param(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"found": True, "title": "T", "content": "C"}
         mock_c = MagicMock()
         mock_c.get = AsyncMock(return_value=mock_resp)
@@ -373,6 +375,7 @@ class TestDbCacheGetE2E:
 
     def test_result_contains_found_field(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"found": True, "content": "cached content"}
         mock_c = MagicMock()
         mock_c.get = AsyncMock(return_value=mock_resp)
@@ -400,6 +403,7 @@ class TestMemoryStoreE2E:
 
     def test_valid_store_sends_key_and_value(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"stored": "greeting"}
         mock_c = MagicMock()
         mock_c.post = AsyncMock(return_value=mock_resp)
@@ -420,6 +424,7 @@ class TestMemoryStoreE2E:
 
     def test_ttl_included_when_provided(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"stored": "k", "expires_at": 9999}
         mock_c = MagicMock()
         mock_c.post = AsyncMock(return_value=mock_resp)
@@ -437,6 +442,7 @@ class TestMemoryStoreE2E:
 
     def test_result_contains_stored_key(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"stored": "mykey"}
         mock_c = MagicMock()
         mock_c.post = AsyncMock(return_value=mock_resp)
@@ -466,6 +472,7 @@ class TestDbSearchE2E:
         if articles is None:
             articles = [{"id": 1, "title": "AI Today", "url": "https://ai.example"}]
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"articles": articles, "total": len(articles)}
         mock_c = MagicMock()
         mock_c.get = AsyncMock(return_value=mock_resp)
