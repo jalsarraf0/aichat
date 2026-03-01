@@ -180,6 +180,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-memory:8094")
 RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-researchbox:8092")
 TOOLKIT_URL   = os.environ.get("TOOLKIT_URL",  "http://aichat-toolkit:8095")
+GRAPH_URL     = os.environ.get("GRAPH_URL",   "http://aichat-graph:8098")
+VECTOR_URL    = os.environ.get("VECTOR_URL",  "http://aichat-vector:6333")
+VIDEO_URL     = os.environ.get("VIDEO_URL",   "http://aichat-video:8099")
+OCR_URL       = os.environ.get("OCR_URL",     "http://aichat-ocr:8100")
+DOCS_URL      = os.environ.get("DOCS_URL",    "http://aichat-docs:8101")
+PLANNER_URL   = os.environ.get("PLANNER_URL", "http://aichat-planner:8102")
 # human_browser browser-server API — reachable after install connects it to this network.
 BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
 # Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
@@ -1447,6 +1453,354 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["content", "schema_json"],
+        },
+    },
+    # ── Knowledge Graph ──────────────────────────────────────────────────────
+    {
+        "name": "graph_add_node",
+        "description": (
+            "Add or update a node in the knowledge graph. "
+            "Nodes have an ID, a list of labels (categories), and arbitrary JSON properties. "
+            "Use this to build a persistent knowledge base of entities and concepts. "
+            "Pipeline: graph_add_node → graph_add_edge to connect nodes → graph_query to explore."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id":         {"type": "string", "description": "Unique node ID (e.g. 'person:alice', 'concept:AI')."},
+                "labels":     {"type": "array",  "items": {"type": "string"},
+                               "description": "Category labels (e.g. ['Person', 'Researcher'])."},
+                "properties": {"type": "object", "description": "Arbitrary key-value metadata."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "graph_add_edge",
+        "description": (
+            "Add a directed edge between two nodes in the knowledge graph. "
+            "Edges have a from_id, to_id, type (relationship label), and optional properties. "
+            "Example: graph_add_edge(from_id='person:alice', to_id='org:mit', type='works_at')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_id":    {"type": "string", "description": "Source node ID."},
+                "to_id":      {"type": "string", "description": "Target node ID."},
+                "type":       {"type": "string", "description": "Relationship type (e.g. 'knows', 'works_at', 'related_to')."},
+                "properties": {"type": "object", "description": "Optional edge metadata."},
+            },
+            "required": ["from_id", "to_id"],
+        },
+    },
+    {
+        "name": "graph_query",
+        "description": (
+            "Get a node and all its connected neighbors from the knowledge graph. "
+            "Returns the node's properties plus its outgoing and incoming edges. "
+            "Use this to explore what is connected to a known entity."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Node ID to look up."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "graph_path",
+        "description": (
+            "Find the shortest path between two nodes in the knowledge graph using BFS. "
+            "Returns the list of node IDs forming the path, or null if no path exists. "
+            "Useful for discovering indirect relationships between entities."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_id": {"type": "string", "description": "Starting node ID."},
+                "to_id":   {"type": "string", "description": "Target node ID."},
+            },
+            "required": ["from_id", "to_id"],
+        },
+    },
+    {
+        "name": "graph_search",
+        "description": (
+            "Search the knowledge graph for nodes matching a label and/or property values. "
+            "Returns a list of matching nodes with their properties. "
+            "Example: graph_search(label='Person', properties={'city': 'Seattle'})."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "label":      {"type": "string", "description": "Node label to filter by (substring match)."},
+                "properties": {"type": "object", "description": "Property key-value pairs to match exactly."},
+                "limit":      {"type": "integer", "description": "Max results (default 50)."},
+            },
+        },
+    },
+    # ── Vector Store (Qdrant) ────────────────────────────────────────────────
+    {
+        "name": "vector_store",
+        "description": (
+            "Store a text embedding in the Qdrant vector database for later semantic search. "
+            "Text is embedded via LM Studio (/v1/embeddings) and stored with its metadata. "
+            "Supports multiple collections (namespaces) for organizing different knowledge domains. "
+            "Pipeline: vector_store → vector_search to retrieve similar content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text":       {"type": "string", "description": "Text to embed and store."},
+                "id":         {"type": "string", "description": "Unique identifier for this entry."},
+                "collection": {"type": "string", "description": "Qdrant collection name (default: 'default')."},
+                "metadata":   {"type": "object", "description": "Arbitrary metadata stored alongside the vector."},
+            },
+            "required": ["text", "id"],
+        },
+    },
+    {
+        "name": "vector_search",
+        "description": (
+            "Semantic search in the Qdrant vector database. "
+            "Embeds the query text and finds the most similar stored entries. "
+            "Returns top_k results with scores and metadata. "
+            "More powerful than embed_search: supports multi-collection and metadata filtering."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query":      {"type": "string",  "description": "Search query text."},
+                "collection": {"type": "string",  "description": "Qdrant collection to search (default: 'default')."},
+                "top_k":      {"type": "integer", "description": "Number of results (default 5)."},
+                "filter":     {"type": "object",  "description": "Optional Qdrant payload filter object."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "vector_delete",
+        "description": "Delete a vector entry from Qdrant by its ID.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id":         {"type": "string", "description": "Entry ID to delete."},
+                "collection": {"type": "string", "description": "Collection name (default: 'default')."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "vector_collections",
+        "description": "List all Qdrant collections (vector namespaces) and their sizes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    # ── Video Analysis ───────────────────────────────────────────────────────
+    {
+        "name": "video_info",
+        "description": (
+            "Get metadata from a video URL: duration, frame rate, resolution, codec, file size. "
+            "Supports HTTP/HTTPS video URLs (mp4, webm, mkv, etc.). "
+            "Use this before video_frames to know the video length and choose a good interval."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "HTTP/HTTPS URL of the video file."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "video_frames",
+        "description": (
+            "Extract frames from a video at regular intervals and save them to the workspace. "
+            "Returns a list of frame file paths with their timestamps. "
+            "Frames can be passed to screenshot, image_crop, ocr_image, or image_caption for analysis. "
+            "Pipeline: video_frames → [frame paths] → image_caption or ocr_image."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":          {"type": "string",  "description": "HTTP/HTTPS URL of the video."},
+                "interval_sec": {"type": "number",  "description": "Seconds between frames (default 5.0)."},
+                "max_frames":   {"type": "integer", "description": "Maximum frames to extract (default 20, max 100)."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "video_thumbnail",
+        "description": (
+            "Extract a single frame from a video at a specific timestamp. "
+            "Returns the frame as an inline image block. "
+            "Use to preview video content or get a representative image for a specific moment."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":           {"type": "string", "description": "HTTP/HTTPS URL of the video."},
+                "timestamp_sec": {"type": "number", "description": "Timestamp in seconds (default 0.0)."},
+            },
+            "required": ["url"],
+        },
+    },
+    # ── OCR ─────────────────────────────────────────────────────────────────
+    {
+        "name": "ocr_image",
+        "description": (
+            "Extract text from an image in the workspace using Tesseract OCR. "
+            "More accurate than LLM vision for dense text (receipts, scanned docs, charts with labels). "
+            "Pass a workspace file path (e.g. from screenshot, video_frames, image_scan). "
+            "Pipeline: screenshot → ocr_image to read text from any web page or document scan."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace file path (e.g. '/workspace/screenshot_20260301.png')."},
+                "lang": {"type": "string", "description": "Tesseract language code (default 'eng'). Use 'eng+fra' for multi-language."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "ocr_pdf",
+        "description": (
+            "Extract text from a PDF file using Tesseract OCR (rasterizes pages at 300 DPI). "
+            "Better than pdfminer for scanned PDFs that have no embedded text. "
+            "Provide the PDF path from the workspace. Returns per-page text and a combined full_text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path":  {"type": "string",  "description": "Workspace path to the PDF file."},
+                "pages": {"type": "array", "items": {"type": "integer"},
+                          "description": "Specific 1-based page numbers to OCR (omit for all pages)."},
+                "lang":  {"type": "string", "description": "Tesseract language code (default 'eng')."},
+            },
+            "required": ["path"],
+        },
+    },
+    # ── Document Ingestion ───────────────────────────────────────────────────
+    {
+        "name": "docs_ingest",
+        "description": (
+            "Convert a document (PDF, DOCX, XLSX, PPTX, HTML, MD, TXT) to clean Markdown. "
+            "Accepts a URL (downloaded automatically) or a workspace file path. "
+            "Extracts headings, paragraphs, and tables in normalized Markdown format. "
+            "Pipeline: docs_ingest → smart_summarize to summarize any document in one step."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":      {"type": "string", "description": "HTTP/HTTPS URL of the document (alternative to path)."},
+                "path":     {"type": "string", "description": "Workspace file path (alternative to url)."},
+                "filename": {"type": "string", "description": "Filename with extension — needed for format detection when using path."},
+            },
+        },
+    },
+    {
+        "name": "docs_extract_tables",
+        "description": (
+            "Extract all tables from a document as structured JSON. "
+            "Each table has a title, headers list, and rows list. "
+            "Supports PDF, DOCX, XLSX, HTML. "
+            "Use when you need the data from tables in a structured format for analysis."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url":      {"type": "string", "description": "HTTP/HTTPS URL of the document."},
+                "path":     {"type": "string", "description": "Workspace file path."},
+                "filename": {"type": "string", "description": "Filename with extension."},
+            },
+        },
+    },
+    # ── Task Planner ─────────────────────────────────────────────────────────
+    {
+        "name": "plan_create_task",
+        "description": (
+            "Create a task in the persistent task planner with optional dependencies. "
+            "A task is 'ready' when all its depends_on tasks are done. "
+            "Use this to break complex goals into trackable sub-tasks with a dependency graph. "
+            "Pipeline: plan_create_task (multiple, with depends_on) → plan_list_tasks → plan_complete_task."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title":       {"type": "string",  "description": "Short task title."},
+                "description": {"type": "string",  "description": "Detailed task description."},
+                "depends_on":  {"type": "array", "items": {"type": "string"},
+                                "description": "Task IDs that must complete before this task is ready."},
+                "priority":    {"type": "integer", "description": "Priority (higher = more urgent, default 0)."},
+                "due_at":      {"type": "string",  "description": "ISO 8601 due date (optional)."},
+                "metadata":    {"type": "object",  "description": "Arbitrary metadata (e.g. assignee, tags)."},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "plan_get_task",
+        "description": "Get the status and details of a task by its ID.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Task ID returned by plan_create_task."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "plan_complete_task",
+        "description": "Mark a task as done. Unlocks any tasks that depend on this one.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Task ID to mark as done."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "plan_fail_task",
+        "description": "Mark a task as failed with an optional reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id":     {"type": "string", "description": "Task ID to mark as failed."},
+                "detail": {"type": "string", "description": "Failure reason or error message."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "plan_list_tasks",
+        "description": (
+            "List tasks in the planner. Filter by status or leave blank for all tasks. "
+            "Use status='ready' to find tasks that can be started now (all dependencies satisfied)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string",
+                           "description": "Filter: pending | ready | in_progress | done | failed | cancelled. Omit for all."},
+                "limit":  {"type": "integer", "description": "Max results (default 50)."},
+            },
+        },
+    },
+    {
+        "name": "plan_delete_task",
+        "description": "Delete a task from the planner.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Task ID to delete."},
+            },
+            "required": ["id"],
         },
     },
     {
@@ -4910,6 +5264,516 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except ValueError as exc:
                     return _text(f"orchestrate: workflow error — {exc}")
                 return _text(WorkflowExecutor._format_report(results))
+
+            # ----------------------------------------------------------------
+            # Graph tools
+            # ----------------------------------------------------------------
+            if name == "graph_add_node":
+                node_id    = str(args.get("id", "")).strip()
+                labels     = list(args.get("labels", []))
+                properties = dict(args.get("properties", {}))
+                if not node_id:
+                    return _text("graph_add_node: 'id' is required")
+                r = await c.post(f"{GRAPH_URL}/nodes/add",
+                                 json={"id": node_id, "labels": labels, "properties": properties},
+                                 timeout=10)
+                d = r.json()
+                return _text(f"Node added: {d.get('added')} (labels={d.get('labels')})")
+
+            if name == "graph_add_edge":
+                from_id    = str(args.get("from_id", "")).strip()
+                to_id      = str(args.get("to_id",   "")).strip()
+                etype      = str(args.get("type", "related")).strip() or "related"
+                properties = dict(args.get("properties", {}))
+                if not from_id or not to_id:
+                    return _text("graph_add_edge: 'from_id' and 'to_id' are required")
+                r = await c.post(f"{GRAPH_URL}/edges/add",
+                                 json={"from_id": from_id, "to_id": to_id,
+                                       "type": etype, "properties": properties},
+                                 timeout=10)
+                d = r.json()
+                return _text(f"Edge added: {d.get('from_id')} -[{etype}]-> {d.get('to_id')} (id={d.get('added')})")
+
+            if name == "graph_query":
+                node_id = str(args.get("id", "")).strip()
+                if not node_id:
+                    return _text("graph_query: 'id' is required")
+                r = await c.get(f"{GRAPH_URL}/nodes/{node_id}/neighbors", timeout=10)
+                if r.status_code == 404:
+                    return _text(f"graph_query: node '{node_id}' not found")
+                d = r.json()
+                neighbors = d.get("neighbors", [])
+                if not neighbors:
+                    return _text(f"Node '{node_id}' has no outgoing neighbors.")
+                lines = [f"Neighbors of '{node_id}' ({len(neighbors)}):"]
+                for nb in neighbors:
+                    props = nb.get("properties", {})
+                    lines.append(f"  → {nb['id']} [{nb.get('edge_type','')}]"
+                                 + (f" {props}" if props else ""))
+                return _text("\n".join(lines))
+
+            if name == "graph_path":
+                from_id = str(args.get("from_id", "")).strip()
+                to_id   = str(args.get("to_id",   "")).strip()
+                if not from_id or not to_id:
+                    return _text("graph_path: 'from_id' and 'to_id' are required")
+                r = await c.post(f"{GRAPH_URL}/path",
+                                 json={"from_id": from_id, "to_id": to_id}, timeout=15)
+                d = r.json()
+                path = d.get("path")
+                if not path:
+                    return _text(f"No path found from '{from_id}' to '{to_id}'.")
+                length = d.get("length", len(path) - 1)
+                return _text(f"Path ({length} hops): {' → '.join(path)}")
+
+            if name == "graph_search":
+                label      = str(args.get("label", "")).strip()
+                properties = dict(args.get("properties", {}))
+                limit_g    = int(args.get("limit", 50))
+                r = await c.post(f"{GRAPH_URL}/search",
+                                 json={"label": label, "properties": properties, "limit": limit_g},
+                                 timeout=10)
+                d = r.json()
+                results_g = d.get("results", [])
+                if not results_g:
+                    return _text(f"graph_search: no nodes found (label={label!r})")
+                lines = [f"Found {len(results_g)} node(s):"]
+                for node in results_g:
+                    lbl = ",".join(node.get("labels", []))
+                    props = node.get("properties", {})
+                    lines.append(f"  {node['id']} [{lbl}] {props}")
+                return _text("\n".join(lines))
+
+            # ----------------------------------------------------------------
+            # Vector tools (Qdrant)
+            # ----------------------------------------------------------------
+            if name == "vector_store":
+                text_v      = str(args.get("text", "")).strip()
+                vid         = str(args.get("id", "")).strip()
+                collection  = str(args.get("collection", "default")).strip() or "default"
+                metadata_v  = dict(args.get("metadata", {}))
+                if not text_v:
+                    return _text("vector_store: 'text' is required")
+                # Qdrant requires UUID or unsigned integer point IDs
+                # Use a deterministic UUID v5 from the user-supplied id string
+                import uuid as _uuid_v
+                if not vid:
+                    vid_key = _uuid_v.uuid4().hex
+                else:
+                    vid_key = vid
+                # Convert to UUID (v5, namespace=DNS) for Qdrant compatibility
+                qdrant_id = str(_uuid_v.uuid5(_uuid_v.NAMESPACE_DNS, vid_key))
+                # Step 1: embed via LM Studio
+                try:
+                    embed_payload = {"input": text_v}
+                    if IMAGE_GEN_MODEL:
+                        embed_payload["model"] = IMAGE_GEN_MODEL
+                    async with httpx.AsyncClient(timeout=30) as hc_v:
+                        r_embed = await hc_v.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=embed_payload
+                        )
+                        r_embed.raise_for_status()
+                        embed_data = r_embed.json().get("data", [])
+                        if not embed_data:
+                            return _text("vector_store: LM Studio returned no embeddings")
+                        vector = embed_data[0]["embedding"]
+                        dim    = len(vector)
+                except Exception as exc:
+                    return _text(f"vector_store: embedding failed — {exc}")
+                # Step 2: ensure collection exists
+                try:
+                    rc = await c.get(f"{VECTOR_URL}/collections/{collection}", timeout=5)
+                    if rc.status_code == 404:
+                        await c.put(
+                            f"{VECTOR_URL}/collections/{collection}",
+                            json={"vectors": {"size": dim, "distance": "Cosine"}},
+                            timeout=10,
+                        )
+                except Exception:
+                    pass  # best-effort collection creation
+                # Step 3: upsert point (store user id in payload for delete by id_key)
+                payload_meta = {"text": text_v[:500], "id_key": vid_key, **metadata_v}
+                try:
+                    ru = await c.put(
+                        f"{VECTOR_URL}/collections/{collection}/points",
+                        json={"points": [{"id": qdrant_id, "vector": vector, "payload": payload_meta}]},
+                        timeout=15,
+                    )
+                    ru.raise_for_status()
+                except Exception as exc:
+                    return _text(f"vector_store: Qdrant upsert failed — {exc}")
+                return _text(f"Stored vector: id={vid_key} (qdrant_id={qdrant_id}) collection={collection} dim={dim}")
+
+            if name == "vector_search":
+                query_v    = str(args.get("query", "")).strip()
+                collection = str(args.get("collection", "default")).strip() or "default"
+                top_k      = max(1, int(args.get("top_k", 5)))
+                filter_v   = args.get("filter")
+                if not query_v:
+                    return _text("vector_search: 'query' is required")
+                # Embed query
+                try:
+                    ep = {"input": query_v}
+                    if IMAGE_GEN_MODEL:
+                        ep["model"] = IMAGE_GEN_MODEL
+                    async with httpx.AsyncClient(timeout=30) as hc_vs:
+                        re = await hc_vs.post(f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=ep)
+                        re.raise_for_status()
+                        ed = re.json().get("data", [])
+                        if not ed:
+                            return _text("vector_search: embedding returned empty")
+                        qvec = ed[0]["embedding"]
+                except Exception as exc:
+                    return _text(f"vector_search: embedding failed — {exc}")
+                # Search Qdrant
+                search_body: dict = {"vector": qvec, "limit": top_k, "with_payload": True}
+                if filter_v:
+                    search_body["filter"] = filter_v
+                try:
+                    rs = await c.post(
+                        f"{VECTOR_URL}/collections/{collection}/points/search",
+                        json=search_body, timeout=10,
+                    )
+                    rs.raise_for_status()
+                    hits = rs.json().get("result", [])
+                except Exception as exc:
+                    return _text(f"vector_search: Qdrant search failed — {exc}")
+                if not hits:
+                    return _text(f"vector_search: no results in collection '{collection}'")
+                lines = [f"Top {len(hits)} results from '{collection}':"]
+                for h in hits:
+                    score   = round(h.get("score", 0), 4)
+                    payload = h.get("payload", {})
+                    text_preview = str(payload.get("text", ""))[:120]
+                    lines.append(f"  [{score}] id={h.get('id')} — {text_preview}")
+                return _text("\n".join(lines))
+
+            if name == "vector_delete":
+                vid_d      = str(args.get("id", "")).strip()
+                collection = str(args.get("collection", "default")).strip() or "default"
+                if not vid_d:
+                    return _text("vector_delete: 'id' is required")
+                # Delete by payload id_key filter (since Qdrant IDs are UUIDs internally)
+                import uuid as _uuid_d
+                qdrant_id_d = str(_uuid_d.uuid5(_uuid_d.NAMESPACE_DNS, vid_d))
+                try:
+                    rd = await c.post(
+                        f"{VECTOR_URL}/collections/{collection}/points/delete",
+                        json={"points": [qdrant_id_d]}, timeout=10,
+                    )
+                    rd.raise_for_status()
+                except Exception as exc:
+                    return _text(f"vector_delete: failed — {exc}")
+                return _text(f"Deleted vector id={vid_d} from collection '{collection}'")
+
+            if name == "vector_collections":
+                try:
+                    rc = await c.get(f"{VECTOR_URL}/collections", timeout=10)
+                    rc.raise_for_status()
+                    colls = rc.json().get("result", {}).get("collections", [])
+                except Exception as exc:
+                    return _text(f"vector_collections: failed — {exc}")
+                if not colls:
+                    return _text("No Qdrant collections found. Use vector_store to create one.")
+                lines = ["Qdrant collections:"]
+                for col in colls:
+                    lines.append(f"  {col.get('name')} — vectors: {col.get('vectors_count', '?')}")
+                return _text("\n".join(lines))
+
+            # ----------------------------------------------------------------
+            # Video tools
+            # ----------------------------------------------------------------
+            if name == "video_info":
+                url_vi = str(args.get("url", "")).strip()
+                if not url_vi:
+                    return _text("video_info: 'url' is required")
+                try:
+                    r_vi = await c.post(f"{VIDEO_URL}/info", json={"url": url_vi}, timeout=90)
+                    r_vi.raise_for_status()
+                    d_vi = r_vi.json()
+                except Exception as exc:
+                    return _text(f"video_info: failed — {exc}")
+                return _text(
+                    f"Video info for {url_vi}:\n"
+                    f"  Duration: {d_vi.get('duration_s')}s  FPS: {d_vi.get('fps')}\n"
+                    f"  Resolution: {d_vi.get('width')}×{d_vi.get('height')}  Codec: {d_vi.get('codec')}\n"
+                    f"  Format: {d_vi.get('format')}  Size: {d_vi.get('size_mb')} MB"
+                )
+
+            if name == "video_frames":
+                url_vf       = str(args.get("url", "")).strip()
+                interval_vf  = float(args.get("interval_sec", 5.0))
+                max_frames_vf = int(args.get("max_frames", 20))
+                if not url_vf:
+                    return _text("video_frames: 'url' is required")
+                try:
+                    r_vf = await c.post(
+                        f"{VIDEO_URL}/frames",
+                        json={"url": url_vf, "interval_sec": interval_vf,
+                              "max_frames": max_frames_vf},
+                        timeout=180,
+                    )
+                    r_vf.raise_for_status()
+                    d_vf = r_vf.json()
+                except Exception as exc:
+                    return _text(f"video_frames: failed — {exc}")
+                frames = d_vf.get("frames", [])
+                lines = [f"Extracted {len(frames)} frames from {url_vf}:"]
+                for fr in frames:
+                    lines.append(f"  [{fr.get('timestamp_s')}s] {fr.get('path')}")
+                return _text("\n".join(lines))
+
+            if name == "video_thumbnail":
+                url_vt  = str(args.get("url", "")).strip()
+                ts_vt   = float(args.get("timestamp_sec", 0.0))
+                if not url_vt:
+                    return _text("video_thumbnail: 'url' is required")
+                try:
+                    r_vt = await c.post(
+                        f"{VIDEO_URL}/thumbnail",
+                        json={"url": url_vt, "timestamp_sec": ts_vt},
+                        timeout=90,
+                    )
+                    r_vt.raise_for_status()
+                    d_vt = r_vt.json()
+                except Exception as exc:
+                    return _text(f"video_thumbnail: failed — {exc}")
+                b64_vt = d_vt.get("b64", "")
+                if not b64_vt:
+                    return _text(f"video_thumbnail: no image returned")
+                import base64 as _b64_vt_mod
+                raw_vt = _b64_vt_mod.b64decode(b64_vt)
+                summary_vt = (f"Video thumbnail at {ts_vt}s — "
+                              f"{d_vt.get('width')}×{d_vt.get('height')} from {url_vt}")
+                return _renderer.encode_url_bytes(raw_vt, "image/png", summary_vt)
+
+            # ----------------------------------------------------------------
+            # OCR tools
+            # ----------------------------------------------------------------
+            if name == "ocr_image":
+                path_oi = str(args.get("path", "")).strip()
+                lang_oi = str(args.get("lang", "eng")).strip() or "eng"
+                if not path_oi:
+                    return _text("ocr_image: 'path' is required")
+                local_oi = _resolve_image_path(path_oi)
+                if not local_oi:
+                    return _text(f"ocr_image: file not found — {path_oi}")
+                import base64 as _b64_oi
+                b64_oi = _b64_oi.standard_b64encode(
+                    open(local_oi, "rb").read()
+                ).decode("ascii")
+                try:
+                    r_oi = await c.post(
+                        f"{OCR_URL}/ocr",
+                        json={"b64": b64_oi, "lang": lang_oi},
+                        timeout=60,
+                    )
+                    r_oi.raise_for_status()
+                    d_oi = r_oi.json()
+                except Exception as exc:
+                    return _text(f"ocr_image: OCR service failed — {exc}")
+                text_oi = d_oi.get("text", "")
+                words_oi = d_oi.get("word_count", 0)
+                return _text(f"OCR result ({words_oi} words):\n\n{text_oi}")
+
+            if name == "ocr_pdf":
+                path_op = str(args.get("path", "")).strip()
+                lang_op = str(args.get("lang", "eng")).strip() or "eng"
+                pages_op = list(args.get("pages", []))
+                if not path_op:
+                    return _text("ocr_pdf: 'path' is required")
+                local_op = _resolve_image_path(path_op)
+                if not local_op:
+                    return _text(f"ocr_pdf: file not found — {path_op}")
+                import base64 as _b64_op
+                b64_op = _b64_op.standard_b64encode(
+                    open(local_op, "rb").read()
+                ).decode("ascii")
+                try:
+                    r_op = await c.post(
+                        f"{OCR_URL}/ocr/pdf",
+                        json={"b64_pdf": b64_op, "lang": lang_op, "pages": pages_op or None},
+                        timeout=120,
+                    )
+                    r_op.raise_for_status()
+                    d_op = r_op.json()
+                except Exception as exc:
+                    return _text(f"ocr_pdf: OCR service failed — {exc}")
+                total_w = d_op.get("word_count", 0)
+                page_count = d_op.get("page_count", 0)
+                full_text = d_op.get("full_text", "")
+                return _text(f"PDF OCR: {page_count} pages, {total_w} words\n\n{full_text}")
+
+            # ----------------------------------------------------------------
+            # Docs tools
+            # ----------------------------------------------------------------
+            if name in ("docs_ingest", "docs_extract_tables"):
+                url_di   = str(args.get("url",  "")).strip()
+                path_di  = str(args.get("path", "")).strip()
+                fname_di = str(args.get("filename", "")).strip()
+
+                if url_di:
+                    # Service fetches URL directly
+                    try:
+                        if name == "docs_ingest":
+                            r_di = await c.post(f"{DOCS_URL}/ingest/url",
+                                                json={"url": url_di}, timeout=60)
+                        else:
+                            # For tables from URL: ingest first then return tables
+                            r_di = await c.post(f"{DOCS_URL}/ingest/url",
+                                                json={"url": url_di}, timeout=60)
+                        r_di.raise_for_status()
+                        d_di = r_di.json()
+                    except Exception as exc:
+                        return _text(f"{name}: docs service failed — {exc}")
+                elif path_di:
+                    local_di = _resolve_image_path(path_di)
+                    if not local_di:
+                        return _text(f"{name}: file not found — {path_di}")
+                    if not fname_di:
+                        fname_di = os.path.basename(local_di)
+                    import base64 as _b64_di
+                    b64_di = _b64_di.standard_b64encode(
+                        open(local_di, "rb").read()
+                    ).decode("ascii")
+                    try:
+                        endpoint_di = "/ingest" if name == "docs_ingest" else "/tables"
+                        r_di = await c.post(
+                            f"{DOCS_URL}{endpoint_di}",
+                            json={"b64": b64_di, "filename": fname_di},
+                            timeout=60,
+                        )
+                        r_di.raise_for_status()
+                        d_di = r_di.json()
+                    except Exception as exc:
+                        return _text(f"{name}: docs service failed — {exc}")
+                else:
+                    return _text(f"{name}: 'url' or 'path' is required")
+
+                if name == "docs_ingest":
+                    md_di  = d_di.get("markdown", "")
+                    title  = d_di.get("title", "")
+                    words  = d_di.get("word_count", 0)
+                    tables = d_di.get("tables_found", 0)
+                    return _text(f"# {title}\n\n_{words} words, {tables} tables_\n\n{md_di}")
+                else:
+                    tables_di = d_di.get("tables", [])
+                    if not tables_di:
+                        return _text("No tables found in document.")
+                    import json as _jdi
+                    return _text(_jdi.dumps(tables_di, indent=2))
+
+            # ----------------------------------------------------------------
+            # Planner tools
+            # ----------------------------------------------------------------
+            if name == "plan_create_task":
+                title_pt = str(args.get("title", "")).strip()
+                if not title_pt:
+                    return _text("plan_create_task: 'title' is required")
+                body_pt = {
+                    "title":       title_pt,
+                    "description": str(args.get("description", "")),
+                    "depends_on":  list(args.get("depends_on", [])),
+                    "priority":    int(args.get("priority", 0)),
+                    "metadata":    dict(args.get("metadata", {})),
+                }
+                if args.get("due_at"):
+                    body_pt["due_at"] = str(args["due_at"])
+                try:
+                    r_pt = await c.post(f"{PLANNER_URL}/tasks", json=body_pt, timeout=10)
+                    r_pt.raise_for_status()
+                    d_pt = r_pt.json()
+                except Exception as exc:
+                    return _text(f"plan_create_task: failed — {exc}")
+                return _text(
+                    f"Task created: id={d_pt.get('id')} title={d_pt.get('title')!r} "
+                    f"status={d_pt.get('status')} priority={d_pt.get('priority')} "
+                    f"depends_on={d_pt.get('depends_on')}"
+                )
+
+            if name == "plan_get_task":
+                tid_pg = str(args.get("id", "")).strip()
+                if not tid_pg:
+                    return _text("plan_get_task: 'id' is required")
+                try:
+                    r_pg = await c.get(f"{PLANNER_URL}/tasks/{tid_pg}", timeout=10)
+                    if r_pg.status_code == 404:
+                        return _text(f"plan_get_task: task '{tid_pg}' not found")
+                    r_pg.raise_for_status()
+                    d_pg = r_pg.json()
+                except Exception as exc:
+                    return _text(f"plan_get_task: failed — {exc}")
+                return _text(
+                    f"Task {d_pg['id']}: {d_pg['title']!r}\n"
+                    f"  Status: {d_pg['status']}  Priority: {d_pg['priority']}\n"
+                    f"  Description: {d_pg.get('description','')}\n"
+                    f"  Depends on: {d_pg.get('depends_on',[])}\n"
+                    f"  Created: {d_pg.get('created_at','')}  Updated: {d_pg.get('updated_at','')}"
+                )
+
+            if name == "plan_complete_task":
+                tid_pc = str(args.get("id", "")).strip()
+                if not tid_pc:
+                    return _text("plan_complete_task: 'id' is required")
+                try:
+                    r_pc = await c.post(f"{PLANNER_URL}/tasks/{tid_pc}/complete", timeout=10)
+                    if r_pc.status_code == 404:
+                        return _text(f"plan_complete_task: task '{tid_pc}' not found")
+                    r_pc.raise_for_status()
+                except Exception as exc:
+                    return _text(f"plan_complete_task: failed — {exc}")
+                return _text(f"Task {tid_pc} marked as done.")
+
+            if name == "plan_fail_task":
+                tid_pf = str(args.get("id", "")).strip()
+                detail_pf = str(args.get("detail", "")).strip()
+                if not tid_pf:
+                    return _text("plan_fail_task: 'id' is required")
+                try:
+                    r_pf = await c.post(f"{PLANNER_URL}/tasks/{tid_pf}/fail",
+                                        json={"detail": detail_pf}, timeout=10)
+                    if r_pf.status_code == 404:
+                        return _text(f"plan_fail_task: task '{tid_pf}' not found")
+                    r_pf.raise_for_status()
+                except Exception as exc:
+                    return _text(f"plan_fail_task: failed — {exc}")
+                return _text(f"Task {tid_pf} marked as failed. Reason: {detail_pf or '(none)'}")
+
+            if name == "plan_list_tasks":
+                status_pl = str(args.get("status", "")).strip()
+                limit_pl  = max(1, int(args.get("limit", 50)))
+                try:
+                    params_pl: dict = {"limit": limit_pl}
+                    if status_pl:
+                        params_pl["status"] = status_pl
+                    r_pl = await c.get(f"{PLANNER_URL}/tasks", params=params_pl, timeout=10)
+                    r_pl.raise_for_status()
+                    d_pl = r_pl.json()
+                except Exception as exc:
+                    return _text(f"plan_list_tasks: failed — {exc}")
+                tasks_pl = d_pl.get("tasks", [])
+                total_pl = d_pl.get("total", len(tasks_pl))
+                if not tasks_pl:
+                    return _text(f"No tasks found" + (f" with status='{status_pl}'" if status_pl else "") + ".")
+                lines_pl = [f"Tasks ({len(tasks_pl)}/{total_pl}" +
+                            (f", status={status_pl}" if status_pl else "") + "):"]
+                for t_pl in tasks_pl:
+                    dep_pl = f" [deps: {t_pl['depends_on']}]" if t_pl.get("depends_on") else ""
+                    lines_pl.append(f"  [{t_pl['status']}] {t_pl['id']}: {t_pl['title']!r}{dep_pl}")
+                return _text("\n".join(lines_pl))
+
+            if name == "plan_delete_task":
+                tid_pd = str(args.get("id", "")).strip()
+                if not tid_pd:
+                    return _text("plan_delete_task: 'id' is required")
+                try:
+                    r_pd = await c.delete(f"{PLANNER_URL}/tasks/{tid_pd}", timeout=10)
+                    if r_pd.status_code == 404:
+                        return _text(f"plan_delete_task: task '{tid_pd}' not found")
+                    r_pd.raise_for_status()
+                except Exception as exc:
+                    return _text(f"plan_delete_task: failed — {exc}")
+                return _text(f"Task {tid_pd} deleted.")
 
             return _text(f"Unknown tool: {name}")
 

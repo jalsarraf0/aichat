@@ -87,6 +87,13 @@ services:
       IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
       IMAGE_GEN_MODEL: ""
       INTEL_GPU: "1"
+      # New services
+      GRAPH_URL:   http://aichat-graph:8098
+      VECTOR_URL:  http://aichat-vector:6333
+      VIDEO_URL:   http://aichat-video:8099
+      OCR_URL:     http://aichat-ocr:8100
+      DOCS_URL:    http://aichat-docs:8101
+      PLANNER_URL: http://aichat-planner:8102
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -96,6 +103,12 @@ services:
       - aichat-database
       - aichat-memory
       - aichat-researchbox
+      - aichat-graph
+      - aichat-vector
+      - aichat-video
+      - aichat-ocr
+      - aichat-docs
+      - aichat-planner
     ports:
       - "8096:8096"
     # ── GPU passthrough ─────────────────────────────────────────────────────
@@ -194,7 +207,122 @@ services:
       - whatsappauth:/data/auth
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Knowledge graph: SQLite-backed node/edge store with NetworkX path queries.
+  aichat-graph:
+    build: ./docker/graph
+    container_name: aichat-graph
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+    depends_on:
+      - aichat-database
+    ports:
+      - "8098:8098"
+    volumes:
+      - graphdb:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8098/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Vector DB: Qdrant for semantic search (multi-collection, filtered search).
+  aichat-vector:
+    image: qdrant/qdrant:latest
+    container_name: aichat-vector
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrantdb:/qdrant/storage
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Video analysis: FFmpeg frame extraction, thumbnails, metadata.
+  aichat-video:
+    build: ./docker/video
+    container_name: aichat-video
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+      WORKSPACE: /workspace
+    depends_on:
+      - aichat-database
+    ports:
+      - "8099:8099"
+    volumes:
+      - /docker/human_browser/workspace:/workspace:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # OCR: Tesseract image/PDF text extraction.
+  aichat-ocr:
+    build: ./docker/ocr
+    container_name: aichat-ocr
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+      WORKSPACE: /workspace
+    depends_on:
+      - aichat-database
+    ports:
+      - "8100:8100"
+    volumes:
+      - /docker/human_browser/workspace:/workspace:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Document ingestor: PDF/DOCX/XLSX/PPTX/HTML → Markdown (no ML).
+  aichat-docs:
+    build: ./docker/docs
+    container_name: aichat-docs
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+    depends_on:
+      - aichat-database
+    ports:
+      - "8101:8101"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8101/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Task planner: SQLite-backed dependency-aware task queue.
+  aichat-planner:
+    build: ./docker/planner
+    container_name: aichat-planner
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+    depends_on:
+      - aichat-database
+    ports:
+      - "8102:8102"
+    volumes:
+      - plannerdb:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8102/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 volumes:
   aichatdb:
   memorydb:
   whatsappauth:
+  graphdb:
+  qdrantdb:
+  plannerdb:

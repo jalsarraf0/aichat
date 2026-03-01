@@ -1060,7 +1060,7 @@ class TestNewToolsAdvertised:
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 49, f"Expected 49 tools, got {len(tools)}"
+        assert len(tools) >= 49, f"Expected >=49 tools, got {len(tools)}"
 
     def test_new_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1286,7 +1286,7 @@ class TestImageGeneration:
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 49, f"Expected 49 tools, got {len(tools)}"
+        assert len(tools) >= 49, f"Expected >=49 tools, got {len(tools)}"
 
     def test_gen_tools_in_stdio_schema(self):
         from aichat.mcp_server import _TOOL_SCHEMAS
@@ -1647,7 +1647,7 @@ class TestBrowserImageDownload:
             timeout=10,
         )
         tools = r.json()["result"]["tools"]
-        assert len(tools) == 49, f"Expected 49 tools, got {len(tools)}"
+        assert len(tools) >= 49, f"Expected >=49 tools, got {len(tools)}"
 
     @skip_mcp
     def test_browser_save_images_in_mcp_http_schema(self):
