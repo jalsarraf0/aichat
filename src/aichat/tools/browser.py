@@ -566,11 +566,12 @@ async def _ensure_page():
 async def _extract_text(page) -> str:
     js = """() => {
         const b = document.body;
-        if (!b) return \'\' ;
-        b.querySelectorAll(
-            \'script,style,nav,footer,header,aside,noscript\'
+        if (!b) return '' ;
+        const clone = b.cloneNode(true);
+        clone.querySelectorAll(
+            'script,style,nav,footer,header,aside,noscript'
         ).forEach(e => e.remove());
-        return b.innerText.trim().slice(0, 8000);
+        return clone.innerText.trim().slice(0, 8000);
     }"""
     try:
         return await page.evaluate(js)
@@ -620,15 +621,18 @@ async def _get_image_urls(page) -> list:
 
 
 async def _safe_goto(page, url: str) -> None:
-    """Navigate to url. \'load\' is fast and sufficient; networkidle can stall 30s+."""
-    for wait, ms in ((\"load\", 12000), (\"domcontentloaded\", 5000)):
+    """Navigate to url. 'load' is fast and sufficient; networkidle can stall 30s+."""
+    last_exc: Exception | None = None
+    for wait, ms in (("load", 12000), ("domcontentloaded", 5000)):
         try:
             await page.goto(url, wait_until=wait, timeout=ms)
             return
-        except Exception:
+        except Exception as exc:
+            last_exc = exc
             if page.is_closed():
                 raise
-            pass
+    if last_exc is not None:
+        raise last_exc
 
 
 # Phrases that indicate the browser session was blocked by bot-detection.

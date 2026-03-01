@@ -102,7 +102,7 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
-        if max_tokens:
+        if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         response = await self._request("POST", "/v1/chat/completions", json=payload)
         try:
@@ -184,7 +184,7 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
-        if max_tokens:
+        if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
         events_yielded = 0

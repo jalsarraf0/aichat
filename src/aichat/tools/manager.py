@@ -618,8 +618,8 @@ class ToolManager:
                 t1_urls = [u for u in t1_urls if not any(d in u for d in _SKIP_T1)]
                 for page_url in t1_urls[:5]:
                     try:
-                        pi = await self.run_page_images(
-                            page_url, mode, confirmer, scroll=True, max_scrolls=1
+                        pi = await self.browser.page_images(
+                            url=page_url, scroll=True, max_scrolls=1
                         )
                         page_imgs = pi.get("images", [])
                         if len(page_imgs) < 3:   # auth wall / stub — skip
@@ -633,8 +633,8 @@ class ToolManager:
         # Tier 2: DDG image-search page → decode proxy URLs
         try:
             t2_url = f"https://duckduckgo.com/?q={_qp(query)}&iax=images&ia=images&kp=-2"
-            pi2 = await self.run_page_images(
-                t2_url, mode, confirmer, scroll=True, max_scrolls=3
+            pi2 = await self.browser.page_images(
+                url=t2_url, scroll=True, max_scrolls=3
             )
             for img2 in pi2.get("images", []):
                 u2 = img2.get("url", "")
@@ -654,8 +654,8 @@ class ToolManager:
         # Tier 3: Bing Images — different corpus from DDG, different CDNs
         try:
             bing_url = f"https://www.bing.com/images/search?q={_qp(query)}&form=HDRSC2&first=1"
-            pi3 = await self.run_page_images(
-                bing_url, mode, confirmer, scroll=True, max_scrolls=2
+            pi3 = await self.browser.page_images(
+                url=bing_url, scroll=True, max_scrolls=2
             )
             for img3 in pi3.get("images", []):
                 u3 = img3.get("url", "")
@@ -1140,7 +1140,10 @@ class ToolManager:
                 async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
                     r = await c.get(url, headers=_IMG_FETCH_HEADERS)
                     if r.status_code == 429 and attempt == 0:
-                        retry_after = min(int(r.headers.get("retry-after", "15")), 30)
+                        try:
+                            retry_after = min(int(r.headers.get("retry-after", "15")), 30)
+                        except (ValueError, TypeError):
+                            retry_after = 15
                         await asyncio.sleep(retry_after)
                         continue
                     r.raise_for_status()

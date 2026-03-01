@@ -2569,9 +2569,7 @@ class GpuImageProcessor:
             arr = cls._to_np(img)
             resized = _cv2.resize(arr, (w, h), interpolation=_cv2.INTER_LANCZOS4)  # type: ignore[union-attr]
             return cls._to_pil(resized)
-        copy = img.copy()
-        copy.thumbnail((w, h), _PilImage.LANCZOS)
-        return copy
+        return img.resize((w, h), _PilImage.LANCZOS)
 
     @classmethod
     def sharpen(
@@ -3795,7 +3793,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         box_colors.append((255, 51, 51))
                 # Use the first box color for all (GpuImageProcessor uses a single color param)
                 # For multi-color support, fall back to PIL draw loop
-                if len(set(str(c) for c in box_colors)) == 1 or _HAS_CV2:
+                if len(set(str(c) for c in box_colors)) == 1:
                     primary_color = box_colors[0] if box_colors else (255, 51, 51)
                     img = _GpuImg.annotate(img, box_tuples, box_labels,
                                            color=primary_color, thickness=outline_width)
@@ -4851,17 +4849,23 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     is_match, desc, conf = await _vision_confirm(img_b64, query, c, phash=img_hash)
                     if not is_match:
                         return None
-                    # Fire-and-forget: persist confirmed image to DB
+                    # Fire-and-forget: persist confirmed image to DB (own client to avoid closed-client bug)
+                    _store_url = url
+                    _store_subj = _norm_subject
+                    _store_desc = desc
+                    _store_hash = img_hash
+                    _store_conf = conf
                     async def _store_img():
                         try:
-                            await c.post(
-                                f"{DATABASE_URL}/images/store",
-                                json={
-                                    "url": url, "subject": _norm_subject,
-                                    "description": desc, "phash": img_hash,
-                                    "quality_score": conf,
-                                },
-                            )
+                            async with httpx.AsyncClient(timeout=10) as _sc:
+                                await _sc.post(
+                                    f"{DATABASE_URL}/images/store",
+                                    json={
+                                        "url": _store_url, "subject": _store_subj,
+                                        "description": _store_desc, "phash": _store_hash,
+                                        "quality_score": _store_conf,
+                                    },
+                                )
                         except Exception:
                             pass
                     asyncio.create_task(_store_img())
@@ -5260,7 +5264,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         )
 
             # ----------------------------------------------------------------
-            elif name == "orchestrate":
+            if name == "orchestrate":
                 raw_steps = args.get("steps", [])
                 stop_on_error = bool(args.get("stop_on_error", False))
                 if not isinstance(raw_steps, list) or not raw_steps:
@@ -5589,9 +5593,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if not local_oi:
                     return _text(f"ocr_image: file not found — {path_oi}")
                 import base64 as _b64_oi
-                b64_oi = _b64_oi.standard_b64encode(
-                    open(local_oi, "rb").read()
-                ).decode("ascii")
+                with open(local_oi, "rb") as _f_oi:
+                    b64_oi = _b64_oi.standard_b64encode(_f_oi.read()).decode("ascii")
                 try:
                     r_oi = await c.post(
                         f"{OCR_URL}/ocr",
@@ -5616,9 +5619,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 if not local_op:
                     return _text(f"ocr_pdf: file not found — {path_op}")
                 import base64 as _b64_op
-                b64_op = _b64_op.standard_b64encode(
-                    open(local_op, "rb").read()
-                ).decode("ascii")
+                with open(local_op, "rb") as _f_op:
+                    b64_op = _b64_op.standard_b64encode(_f_op.read()).decode("ascii")
                 try:
                     r_op = await c.post(
                         f"{OCR_URL}/ocr/pdf",
