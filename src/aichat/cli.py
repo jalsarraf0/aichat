@@ -72,6 +72,7 @@ def main() -> None:
     if hasattr(args, "func"):
         sys.exit(args.func(args))
     parser.print_help()
+    sys.exit(2)
 
 
 if __name__ == "__main__":
