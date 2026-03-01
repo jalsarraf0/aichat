@@ -1465,12 +1465,12 @@ class TestBrowserImageDownload:
 
     # -- browser server version check (updated with each server bump) ---------
 
-    def test_browser_server_version_is_17(self):
+    def test_browser_server_version_is_18(self):
         from aichat.tools.browser import _REQUIRED_SERVER_VERSION, _SERVER_SRC
-        assert _REQUIRED_SERVER_VERSION == "17", \
-            f"Expected _REQUIRED_SERVER_VERSION='17', got '{_REQUIRED_SERVER_VERSION}'"
-        assert '_VERSION = "17"' in _SERVER_SRC, \
-            "_VERSION = '17' not found in _SERVER_SRC"
+        assert _REQUIRED_SERVER_VERSION == "18", \
+            f"Expected _REQUIRED_SERVER_VERSION='18', got '{_REQUIRED_SERVER_VERSION}'"
+        assert '_VERSION = "18"' in _SERVER_SRC, \
+            "_VERSION = '18' not found in _SERVER_SRC"
 
     def test_browser_server_v14_has_crash_recovery(self):
         from aichat.tools.browser import _SERVER_SRC
@@ -1554,10 +1554,10 @@ class TestBrowserImageDownload:
 
     # -- page_scrape checks --------------------------------------------------
 
-    def test_browser_server_v17_has_scrape_endpoint(self):
+    def test_browser_server_v18_has_scrape_endpoint(self):
         from aichat.tools.browser import _SERVER_SRC, _REQUIRED_SERVER_VERSION
-        assert _REQUIRED_SERVER_VERSION == "17", \
-            f"Expected v17, got {_REQUIRED_SERVER_VERSION}"
+        assert _REQUIRED_SERVER_VERSION == "18", \
+            f"Expected v18, got {_REQUIRED_SERVER_VERSION}"
         assert "/scrape" in _SERVER_SRC, "/scrape endpoint missing from _SERVER_SRC"
         assert "_scroll_full_page" in _SERVER_SRC, "_scroll_full_page missing"
         assert "_extract_text_long" in _SERVER_SRC, "_extract_text_long missing"
