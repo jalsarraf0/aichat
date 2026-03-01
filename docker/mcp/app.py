@@ -5417,9 +5417,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     if IMAGE_GEN_MODEL:
                         ep["model"] = IMAGE_GEN_MODEL
                     async with httpx.AsyncClient(timeout=30) as hc_vs:
-                        re = await hc_vs.post(f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=ep)
-                        re.raise_for_status()
-                        ed = re.json().get("data", [])
+                        r_vs = await hc_vs.post(f"{IMAGE_GEN_BASE_URL}/v1/embeddings", json=ep)
+                        r_vs.raise_for_status()
+                        ed = r_vs.json().get("data", [])
                         if not ed:
                             return _text("vector_search: embedding returned empty")
                         qvec = ed[0]["embedding"]
