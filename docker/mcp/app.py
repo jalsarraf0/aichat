@@ -74,6 +74,56 @@ except ImportError:
 import textwrap as _textwrap
 import time as _time
 
+
+def _init_cv2_acceleration() -> dict[str, Any]:
+    """Best-effort OpenCV acceleration bootstrap (CUDA/OpenCL/optimized kernels)."""
+    status: dict[str, Any] = {
+        "cv2": bool(_HAS_CV2 and _cv2 is not None),
+        "cv2_version": "",
+        "optimized": False,
+        "cuda_devices": 0,
+        "opencl_have": False,
+        "opencl_use": False,
+        "backend": "none",
+    }
+    if not _HAS_CV2 or _cv2 is None:
+        return status
+    try:
+        status["cv2_version"] = str(getattr(_cv2, "__version__", ""))
+    except Exception:
+        pass
+    try:
+        _cv2.setUseOptimized(True)  # type: ignore[union-attr]
+        status["optimized"] = bool(_cv2.useOptimized())  # type: ignore[union-attr]
+    except Exception:
+        pass
+    try:
+        status["opencl_have"] = bool(_cv2.ocl.haveOpenCL())  # type: ignore[union-attr]
+        # Enable OpenCL aggressively when Intel GPU passthrough is expected.
+        wants_opencl = (
+            os.environ.get("INTEL_GPU", "").strip() == "1"
+            or os.path.isdir("/dev/dri")
+        )
+        if status["opencl_have"] and wants_opencl:
+            _cv2.ocl.setUseOpenCL(True)  # type: ignore[union-attr]
+        status["opencl_use"] = bool(_cv2.ocl.useOpenCL())  # type: ignore[union-attr]
+    except Exception:
+        pass
+    try:
+        status["cuda_devices"] = int(_cv2.cuda.getCudaEnabledDeviceCount())  # type: ignore[union-attr]
+    except Exception:
+        status["cuda_devices"] = 0
+    if status["cuda_devices"] > 0:
+        status["backend"] = "opencv-cuda"
+    elif status["opencl_use"]:
+        status["backend"] = "opencv-opencl"
+    else:
+        status["backend"] = "opencv-cpu"
+    return status
+
+
+_CV2_ACCEL_STATUS = _init_cv2_acceleration()
+
 # ---------------------------------------------------------------------------
 # Perceptual hash helpers — pure PIL, no extra packages
 # ---------------------------------------------------------------------------
@@ -2192,8 +2242,19 @@ def _detect_faces(
     if not _HAS_CV2 or _cv2 is None or _np is None:
         return []
     arr = _np.array(img.convert("RGB"))
-    gray = _cv2.cvtColor(arr, _cv2.COLOR_RGB2GRAY)  # type: ignore[union-attr]
-    gray = _cv2.equalizeHist(gray)  # type: ignore[union-attr]
+    gray: Any
+    try:
+        if bool(_CV2_ACCEL_STATUS.get("opencl_use", False)):
+            umat = _cv2.UMat(arr)  # type: ignore[union-attr]
+            gray_u = _cv2.cvtColor(umat, _cv2.COLOR_RGB2GRAY)  # type: ignore[union-attr]
+            gray_u = _cv2.equalizeHist(gray_u)  # type: ignore[union-attr]
+            gray = gray_u.get()  # type: ignore[assignment]
+        else:
+            gray = _cv2.cvtColor(arr, _cv2.COLOR_RGB2GRAY)  # type: ignore[union-attr]
+            gray = _cv2.equalizeHist(gray)  # type: ignore[union-attr]
+    except Exception:
+        gray = _cv2.cvtColor(arr, _cv2.COLOR_RGB2GRAY)  # type: ignore[union-attr]
+        gray = _cv2.equalizeHist(gray)  # type: ignore[union-attr]
     cascade_path = os.path.join(
         getattr(_cv2.data, "haarcascades", ""),
         "haarcascade_frontalface_default.xml",
@@ -2230,7 +2291,14 @@ def _face_embedding(
     face = gray[y1:y2, x1:x2]
     if face.size == 0:
         return None
-    face = _cv2.resize(face, (64, 64), interpolation=_cv2.INTER_AREA)  # type: ignore[union-attr]
+    try:
+        if bool(_CV2_ACCEL_STATUS.get("opencl_use", False)):
+            face_u = _cv2.UMat(face)  # type: ignore[union-attr]
+            face = _cv2.resize(face_u, (64, 64), interpolation=_cv2.INTER_AREA).get()  # type: ignore[union-attr]
+        else:
+            face = _cv2.resize(face, (64, 64), interpolation=_cv2.INTER_AREA)  # type: ignore[union-attr]
+    except Exception:
+        face = _cv2.resize(face, (64, 64), interpolation=_cv2.INTER_AREA)  # type: ignore[union-attr]
     vec = face.astype("float32").reshape(-1)  # type: ignore[union-attr]
     vec -= float(vec.mean())
     norm = float(_np.linalg.norm(vec))
@@ -2683,14 +2751,9 @@ class GpuImageProcessor:
     """
 
     # Class-level engine detection (set once at class definition time)
-    _CUDA_OK: bool = False   # cv2 built with CUDA and a GPU is present
+    _CUDA_OK: bool = bool(_CV2_ACCEL_STATUS.get("cuda_devices", 0) > 0)
+    _OPENCL_OK: bool = bool(_CV2_ACCEL_STATUS.get("opencl_use", False))
     _CV2_OK:  bool = _HAS_CV2
-
-    if _HAS_CV2:
-        try:
-            _CUDA_OK = _cv2.cuda.getCudaEnabledDeviceCount() > 0  # type: ignore[union-attr]
-        except Exception:
-            _CUDA_OK = False
 
     # ── internal conversion helpers ─────────────────────────────────────────
 
@@ -2706,6 +2769,28 @@ class GpuImageProcessor:
         rgb = _cv2.cvtColor(arr, _cv2.COLOR_BGR2RGB)  # type: ignore[union-attr]
         return _PilImage.fromarray(rgb)
 
+    @classmethod
+    def _to_cv_input(cls, img: "_PilImage.Image") -> "Any":
+        """Return ndarray or UMat input depending on active OpenCL mode."""
+        arr = cls._to_np(img)
+        if cls._OPENCL_OK and _cv2 is not None:
+            try:
+                return _cv2.UMat(arr)  # type: ignore[union-attr]
+            except Exception:
+                pass
+        return arr
+
+    @classmethod
+    def _materialize(cls, arr: "Any") -> "_np.ndarray":
+        """Materialize OpenCV output to ndarray (handles UMat safely)."""
+        if _cv2 is not None:
+            try:
+                if isinstance(arr, _cv2.UMat):  # type: ignore[union-attr]
+                    return arr.get()  # type: ignore[no-any-return]
+            except Exception:
+                pass
+        return arr
+
     # ── public API ───────────────────────────────────────────────────────────
 
     @classmethod
@@ -2713,6 +2798,8 @@ class GpuImageProcessor:
         """Return the active image processing engine name."""
         if cls._CUDA_OK:
             return "opencv-cuda"
+        if cls._OPENCL_OK:
+            return "opencv-opencl"
         if cls._CV2_OK:
             return "opencv-cpu"
         return "pillow"
@@ -2726,9 +2813,9 @@ class GpuImageProcessor:
     ) -> "_PilImage.Image":
         """High-quality resize to w×h.  LANCZOS4 via cv2, LANCZOS via PIL."""
         if cls._CV2_OK:
-            arr = cls._to_np(img)
-            resized = _cv2.resize(arr, (w, h), interpolation=_cv2.INTER_LANCZOS4)  # type: ignore[union-attr]
-            return cls._to_pil(resized)
+            src = cls._to_cv_input(img)
+            resized = _cv2.resize(src, (w, h), interpolation=_cv2.INTER_LANCZOS4)  # type: ignore[union-attr]
+            return cls._to_pil(cls._materialize(resized))
         return img.resize((w, h), _PilImage.LANCZOS)
 
     @classmethod
@@ -2741,11 +2828,11 @@ class GpuImageProcessor:
     ) -> "_PilImage.Image":
         """Unsharp-mask sharpening.  cv2 GaussianBlur kernel, PIL UnsharpMask fallback."""
         if cls._CV2_OK:
-            arr = cls._to_np(img)
+            arr = cls._to_cv_input(img)
             blur = _cv2.GaussianBlur(arr, (0, 0), max(0.1, radius * 4))  # type: ignore[union-attr]
             amount = percent / 100.0
             sharpened = _cv2.addWeighted(arr, 1.0 + amount, blur, -amount, 0)  # type: ignore[union-attr]
-            return cls._to_pil(sharpened)
+            return cls._to_pil(cls._materialize(sharpened))
         return img.filter(_ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
 
     @classmethod
@@ -2756,11 +2843,11 @@ class GpuImageProcessor:
     ) -> "_PilImage.Image":
         """Contrast enhancement.  cv2 convertScaleAbs, PIL ImageEnhance fallback."""
         if cls._CV2_OK:
-            arr = cls._to_np(img)
+            arr = cls._to_cv_input(img)
             # Linear contrast stretch: new = clip(alpha*old + beta)
             alpha = max(0.5, min(factor, 5.0))
             enhanced = _cv2.convertScaleAbs(arr, alpha=alpha, beta=0)  # type: ignore[union-attr]
-            return cls._to_pil(enhanced)
+            return cls._to_pil(cls._materialize(enhanced))
         return _ImageEnhance.Contrast(img).enhance(factor)
 
     @classmethod
@@ -2771,12 +2858,12 @@ class GpuImageProcessor:
     ) -> "_PilImage.Image":
         """Sharpness enhancement.  cv2 Laplacian kernel, PIL ImageEnhance fallback."""
         if cls._CV2_OK:
-            arr = cls._to_np(img)
+            arr = cls._to_cv_input(img)
             # Scale kernel weight by sharpness factor
             k = max(0.0, factor - 1.0)
             kernel = _np.array([[0, -k, 0], [-k, 1 + 4 * k, -k], [0, -k, 0]], dtype=_np.float32)  # type: ignore[union-attr]
             sharpened = _cv2.filter2D(arr, -1, kernel)  # type: ignore[union-attr]
-            return cls._to_pil(sharpened)
+            return cls._to_pil(cls._materialize(sharpened))
         return _ImageEnhance.Sharpness(img).enhance(factor)
 
     @classmethod
@@ -2802,9 +2889,9 @@ class GpuImageProcessor:
     def to_grayscale(cls, img: "_PilImage.Image") -> "_PilImage.Image":
         """Convert to grayscale.  cv2.cvtColor or PIL convert('L')."""
         if cls._CV2_OK:
-            arr = cls._to_np(img)
+            arr = cls._to_cv_input(img)
             gray = _cv2.cvtColor(arr, _cv2.COLOR_BGR2GRAY)  # type: ignore[union-attr]
-            return _PilImage.fromarray(gray)
+            return _PilImage.fromarray(cls._materialize(gray))
         return img.convert("L")
 
     @classmethod
@@ -4144,7 +4231,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 out_img = img.copy()
                 lines = [
                     f"Detected {len(faces)} face(s) in {os.path.basename(path)} "
-                    f"(min_face_size={min_face_size}px)."
+                    f"(min_face_size={min_face_size}px).",
+                    (
+                        f"Vision backend: {_GpuImg.backend()}  "
+                        f"(OpenCL={'on' if _CV2_ACCEL_STATUS.get('opencl_use') else 'off'}, "
+                        f"CUDA devices={int(_CV2_ACCEL_STATUS.get('cuda_devices', 0))})"
+                    ),
                 ]
 
                 ref_path = str(args.get("reference_path", "")).strip()
@@ -4823,13 +4915,13 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 else:
                     capped = False
                 nw, nh = int(ow * scale), int(oh * scale)
-                upscaled = img.resize((nw, nh), _PilImage.LANCZOS)
+                upscaled = _GpuImg.resize(img, nw, nh)
                 if sharpen:
-                    upscaled = _ImageEnhance.Sharpness(upscaled).enhance(1.4)
-                    upscaled = upscaled.filter(_ImageFilter.UnsharpMask(radius=0.5, percent=80, threshold=2))
+                    upscaled = _GpuImg.enhance_sharpness(upscaled, factor=1.4)
+                    upscaled = _GpuImg.sharpen(upscaled, radius=0.5, percent=80, threshold=2)
                 summary = (
                     cpu_note
-                    + f"CPU LANCZOS upscale {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
+                    + f"{_GpuImg.backend()} upscale {scale:.2f}×  {ow}×{oh} → {nw}×{nh}"
                     + (" + sharpen" if sharpen else "")
                     + (" [scale capped to 8192px]" if capped else "")
                     + f"\nSource: {os.path.basename(path)}"
@@ -6451,9 +6543,22 @@ async def messages(request: Request, sessionId: str = "") -> Response:
 
 @app.get("/health")
 async def health() -> dict:
+    gpu = GpuDetector.detect()
     return {
         "ok": True,
         "sessions": len(_sessions),
         "tools": len(_TOOLS),
         "transports": ["POST /mcp (streamable-http)", "GET /sse (sse)", "GET /mcp (sse-alias)"],
+        "gpu": {
+            "vendor": gpu.get("vendor", "none"),
+            "name": gpu.get("name", "unknown"),
+        },
+        "cv2_accel": {
+            "cv2": bool(_CV2_ACCEL_STATUS.get("cv2", False)),
+            "cv2_version": _CV2_ACCEL_STATUS.get("cv2_version", ""),
+            "backend": _GpuImg.backend(),
+            "opencl_have": bool(_CV2_ACCEL_STATUS.get("opencl_have", False)),
+            "opencl_use": bool(_CV2_ACCEL_STATUS.get("opencl_use", False)),
+            "cuda_devices": int(_CV2_ACCEL_STATUS.get("cuda_devices", 0)),
+        },
     }

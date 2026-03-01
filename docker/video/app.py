@@ -39,6 +39,8 @@ log = logging.getLogger("aichat-video")
 WORKSPACE = Path(os.environ.get("WORKSPACE", "/workspace"))
 DB_API    = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 _SERVICE  = "aichat-video"
+_INTEL_GPU = os.environ.get("INTEL_GPU", "").strip() == "1"
+_VAAPI_DEVICE = os.environ.get("INTEL_VAAPI_DEVICE", "/dev/dri/renderD128")
 
 app = FastAPI()
 
@@ -78,6 +80,20 @@ def _ffmpeg_version() -> str:
         return first.replace("ffmpeg version ", "").split(" ")[0]
     except Exception:
         return "unknown"
+
+
+def _gpu_mode() -> str:
+    if _INTEL_GPU and os.path.exists(_VAAPI_DEVICE):
+        return "intel-vaapi"
+    return "cpu"
+
+
+def _ffmpeg_hwaccel_args() -> list[str]:
+    # Keep this conservative and portable: ffmpeg auto-selects a supported HW
+    # decoder when available, and falls back to software for unsupported codecs.
+    if _gpu_mode() == "intel-vaapi":
+        return ["-hwaccel", "auto"]
+    return []
 
 
 def _ffprobe(url_or_path: str) -> dict:
@@ -162,7 +178,12 @@ def _is_remote(url: str) -> bool:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "ffmpeg_version": _ffmpeg_version()}
+    return {
+        "status": "ok",
+        "ffmpeg_version": _ffmpeg_version(),
+        "gpu_mode": _gpu_mode(),
+        "vaapi_device": _VAAPI_DEVICE if _gpu_mode() == "intel-vaapi" else "",
+    }
 
 
 @app.post("/info")
@@ -216,7 +237,7 @@ async def extract_frames(payload: dict) -> dict:
 
         out_pattern = str(out_dir / "frame_%04d.png")
         cmd = [
-            "ffmpeg", "-i", target,
+            "ffmpeg", *_ffmpeg_hwaccel_args(), "-i", target,
             "-vf", f"fps=1/{interval_sec}",
             "-frames:v", str(max_frames),
             "-q:v", "2",
@@ -227,6 +248,21 @@ async def extract_frames(payload: dict) -> dict:
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
         )
+        if r.returncode != 0 and _ffmpeg_hwaccel_args():
+            # Retry once on CPU path if the selected hardware decoder rejects
+            # this codec/container combination.
+            cpu_cmd = [
+                "ffmpeg", "-i", target,
+                "-vf", f"fps=1/{interval_sec}",
+                "-frames:v", str(max_frames),
+                "-q:v", "2",
+                out_pattern,
+                "-y",
+            ]
+            r = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(cpu_cmd, capture_output=True, text=True, timeout=120),
+            )
         if r.returncode != 0 and not list(out_dir.iterdir()):
             raise RuntimeError(f"ffmpeg failed: {r.stderr[:400]}")
 
@@ -276,6 +312,7 @@ async def get_thumbnail(payload: dict) -> dict:
         cmd = [
             "ffmpeg",
             "-ss", str(timestamp_sec),
+            *_ffmpeg_hwaccel_args(),
             "-i", target,
             "-vframes", "1",
             "-q:v", "2",
@@ -286,6 +323,20 @@ async def get_thumbnail(payload: dict) -> dict:
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=30),
         )
+        if (r.returncode != 0 or not os.path.getsize(thumb_tmp.name)) and _ffmpeg_hwaccel_args():
+            cpu_cmd = [
+                "ffmpeg",
+                "-ss", str(timestamp_sec),
+                "-i", target,
+                "-vframes", "1",
+                "-q:v", "2",
+                thumb_tmp.name,
+                "-y",
+            ]
+            r = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(cpu_cmd, capture_output=True, text=True, timeout=30),
+            )
         if r.returncode != 0 or not os.path.getsize(thumb_tmp.name):
             raise RuntimeError(f"ffmpeg thumbnail failed: {r.stderr[:300]}")
 

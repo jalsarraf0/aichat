@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git jq bash \
-        ocl-icd-libopencl1 libdrm2 && \
+        ocl-icd-libopencl1 mesa-opencl-icd libdrm2 && \
     rm -rf /var/lib/apt/lists/* && \
     update-ca-certificates && \
     git config --global --add safe.directory '*'

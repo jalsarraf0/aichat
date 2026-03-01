@@ -34,10 +34,10 @@ services:
     # Intel Arc A380: expose DRI devices for OpenCL/VA-API in image ops (phash, PIL).
     # group_add uses host GIDs: 39=video (card1), 105=render (renderD128).
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=3)\""]
@@ -53,16 +53,17 @@ services:
     environment:
       DATABASE_URL: http://aichat-database:8091
       INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
     volumes:
       - /tmp/research:/tmp/research
     ports:
       - "8092:8092"
     # Intel Arc A380: Playwright/Chromium benefits from GPU-accelerated rendering.
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=3)\""]
@@ -87,6 +88,7 @@ services:
       IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
       IMAGE_GEN_MODEL: ""
       INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
       # New services
       GRAPH_URL:   http://aichat-graph:8098
       VECTOR_URL:  http://aichat-vector:6333
@@ -116,10 +118,10 @@ services:
     # group_add uses host GIDs: 39=video, 105=render.  Numeric GIDs are used
     # because container images may not define these group names in /etc/group.
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     # NVIDIA: uncomment the two blocks below (requires nvidia-container-toolkit on host)
     # runtime: nvidia
     # deploy:
@@ -170,10 +172,10 @@ services:
     # Intel Arc A380: gives custom tools access to numpy/cv2 with OpenCL acceleration.
     # group_add uses host GIDs: 39=video, 105=render.
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
@@ -248,6 +250,7 @@ services:
       DATABASE_URL: http://aichat-database:8091
       WORKSPACE: /workspace
       INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
     depends_on:
       - aichat-database
     ports:
@@ -258,10 +261,10 @@ services:
     # Intel Arc A380: FFmpeg hardware video encode/decode via VA-API + OpenCL.
     # group_add uses host GIDs: 39=video, 105=render.
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc VA-API/OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc VA-API/OpenCL)
     # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
@@ -279,6 +282,7 @@ services:
       DATABASE_URL: http://aichat-database:8091
       WORKSPACE: /workspace
       INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
     depends_on:
       - aichat-database
     ports:
@@ -289,10 +293,10 @@ services:
     # Intel Arc A380: Tesseract + PDF2Image can use OpenCL for image preprocessing.
     # group_add uses host GIDs: 39=video, 105=render.
     devices:
-      - /dev/dri:/dev/dri
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
-      - "39"    # host video GID  — DRI card1
-      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
