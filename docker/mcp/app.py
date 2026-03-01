@@ -1826,6 +1826,9 @@ class ImageRenderer:
             else:
                 with open(local_path, "rb") as fh:
                     raw = fh.read()
+                # Cap payload: LM Studio silently drops images that exceed the limit.
+                if len(raw) > self.MAX_BYTES:
+                    raw = raw[: self.MAX_BYTES]  # truncate as last resort
                 b64 = base64.standard_b64encode(raw).decode("ascii")
                 blocks.append({"type": "image", "data": b64, "mimeType": "image/png"})
         except Exception:
@@ -1862,6 +1865,112 @@ class ImageRenderer:
 
 
 _renderer = ImageRenderer()   # module-level singleton used by all tool handlers
+
+
+# ---------------------------------------------------------------------------
+# ImageRenderingPolicy — guarantees every image tool produces an image block
+# ---------------------------------------------------------------------------
+
+class ImageRenderingPolicy:
+    """Guarantees every image-returning MCP tool produces at least one image block.
+
+    LM Studio silently shows 'external image' when a tool response contains only
+    text blocks where an inline image was expected.  Call ``enforce()`` on any
+    content-block list from an image-producing tool to guarantee rendering.
+
+    Usage
+    -----
+    content = await _call_tool(name, args)
+    if ImageRenderingPolicy.is_image_tool(name):
+        content = ImageRenderingPolicy.enforce(content)
+
+    Three-step escalation inside enforce():
+    1. Image block already present  → return unchanged.
+    2. ``fallback_bytes`` provided  → compress via _renderer and embed.
+    3. Still missing                → append a small dark JPEG placeholder so
+                                      LM Studio always renders something visual.
+    """
+
+    # Tools that MUST always return at least one inline image block when called
+    # from LM Studio (i.e. via _handle_rpc → tools/call).
+    IMAGE_TOOLS: frozenset[str] = frozenset({
+        "screenshot", "fetch_image",
+        "image_generate", "image_edit", "image_remix",
+        "image_crop", "image_zoom", "image_scan", "image_enhance",
+        "image_stitch", "image_diff", "image_annotate", "image_upscale",
+        "bulk_screenshot", "scroll_screenshot", "screenshot_search",
+        "browser_save_images", "browser_download_page_images",
+        "image_search", "db_list_images",
+    })
+
+    @staticmethod
+    def has_image(blocks: list[dict[str, Any]]) -> bool:
+        """Return True if any block in blocks is an image block."""
+        return any(b.get("type") == "image" for b in blocks)
+
+    @classmethod
+    def is_image_tool(cls, name: str) -> bool:
+        """Return True if this tool is expected to always return an image block."""
+        return name in cls.IMAGE_TOOLS
+
+    @classmethod
+    def enforce(
+        cls,
+        blocks: list[dict[str, Any]],
+        fallback_bytes: bytes = b"",
+        content_type: str = "image/jpeg",
+    ) -> list[dict[str, Any]]:
+        """Ensure ``blocks`` contains at least one image block.
+
+        Parameters
+        ----------
+        blocks:
+            Content blocks returned by a tool handler.
+        fallback_bytes:
+            Optional raw image bytes (e.g. downloaded from the web) to use
+            as a last-chance source if no image block is present.
+        content_type:
+            MIME type of ``fallback_bytes`` (default ``image/jpeg``).
+        """
+        if cls.has_image(blocks):
+            return blocks
+
+        # Step 2 — try to produce an image from raw bytes via _renderer
+        if fallback_bytes:
+            summary = cls._first_text(blocks)
+            extra = _renderer.encode_url_bytes(fallback_bytes, content_type, summary)
+            if cls.has_image(extra):
+                text_blocks = [b for b in blocks if b.get("type") == "text"]
+                img_blocks  = [b for b in extra  if b.get("type") == "image"]
+                return text_blocks + img_blocks
+
+        # Step 3 — placeholder image so LM Studio never shows 'external image'
+        ph = cls._placeholder()
+        if ph is not None:
+            return blocks + [ph]
+        return blocks  # PIL unavailable; best-effort text-only
+
+    @staticmethod
+    def _first_text(blocks: list[dict[str, Any]]) -> str:
+        """Return text from the first text block, or empty string."""
+        return next((b["text"] for b in blocks if b.get("type") == "text"), "")
+
+    @staticmethod
+    def _placeholder() -> dict[str, str] | None:
+        """Generate a minimal dark-grey JPEG indicating image was unavailable.
+
+        Returns None if PIL is not available (caller handles gracefully).
+        """
+        if not _HAS_PIL:
+            return None
+        buf = _io.BytesIO()
+        img = _PilImage.new("RGB", (400, 100), color=(28, 28, 28))
+        img.save(buf, "JPEG", quality=60)
+        return {
+            "type":     "image",
+            "data":     base64.standard_b64encode(buf.getvalue()).decode("ascii"),
+            "mimeType": "image/jpeg",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -2470,16 +2579,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                                          follow_redirects=True, timeout=15)
                         if ir.status_code == 200:
                             ct = ir.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-                            b64 = base64.standard_b64encode(ir.content).decode("ascii")
                             fallback_summary = (
                                 f"Screenshot of: {page_title}\n"
                                 f"URL: {url}\n"
                                 f"(screenshot blocked — showing page image)"
                             )
-                            return [
-                                {"type": "text", "text": fallback_summary},
-                                {"type": "image", "data": b64, "mimeType": ct},
-                            ]
+                            return _renderer.encode_url_bytes(ir.content, ct, fallback_summary)
                     except Exception:
                         continue
                 return _text(f"Screenshot failed: {error or 'unknown error'}. URL: {url}")
@@ -4752,6 +4857,8 @@ async def _handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
         tool_name  = params.get("name", "")
         arguments  = params.get("arguments") or {}
         content_blocks = await _call_tool(tool_name, arguments)
+        if ImageRenderingPolicy.is_image_tool(tool_name):
+            content_blocks = ImageRenderingPolicy.enforce(content_blocks)
         return ok({
             "content": content_blocks,
             "isError": False,
