@@ -247,12 +247,22 @@ services:
     environment:
       DATABASE_URL: http://aichat-database:8091
       WORKSPACE: /workspace
+      INTEL_GPU: "1"
     depends_on:
       - aichat-database
     ports:
       - "8099:8099"
     volumes:
       - /docker/human_browser/workspace:/workspace:rw
+    # ── GPU passthrough ─────────────────────────────────────────────────────
+    # Intel Arc A380: FFmpeg hardware video encode/decode via VA-API + OpenCL.
+    # group_add uses host GIDs: 39=video, 105=render.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc VA-API/OpenCL)
+    # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)\""]
@@ -268,12 +278,22 @@ services:
     environment:
       DATABASE_URL: http://aichat-database:8091
       WORKSPACE: /workspace
+      INTEL_GPU: "1"
     depends_on:
       - aichat-database
     ports:
       - "8100:8100"
     volumes:
       - /docker/human_browser/workspace:/workspace:ro
+    # ── GPU passthrough ─────────────────────────────────────────────────────
+    # Intel Arc A380: Tesseract + PDF2Image can use OpenCL for image preprocessing.
+    # group_add uses host GIDs: 39=video, 105=render.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "39"    # host video GID  — DRI card1
+      - "105"   # host render GID — DRI renderD128 (Intel Arc OpenCL)
+    # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=3)\""]
