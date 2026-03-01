@@ -69,6 +69,11 @@ def test_main_fallthrough_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None
     assert dummy.print_help_called is True
 
 
+def test_face_recognize_exists_in_stdio_schema() -> None:
+    names = {tool["name"] for tool in mcp_server._TOOL_SCHEMAS}
+    assert "face_recognize" in names
+
+
 async def _run_handle(
     monkeypatch: pytest.MonkeyPatch,
     req: dict,
@@ -145,6 +150,23 @@ async def test_browser_screenshot_enforces_inline_image_block(monkeypatch: pytes
         tool_blocks=[{"type": "text", "text": "Screenshot failed: browser offline"}],
     )
     payload = writes[0]["result"]
+    assert any(block.get("type") == "image" for block in payload["content"])
+
+
+@pytest.mark.asyncio
+async def test_face_recognize_enforces_inline_image_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes = await _run_handle(
+        monkeypatch,
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "face_recognize", "arguments": {"path": "missing.png"}},
+        },
+        tool_blocks=[{"type": "text", "text": "face_recognize: image not found"}],
+    )
+    payload = writes[0]["result"]
+    assert payload["isError"] is True
     assert any(block.get("type") == "image" for block in payload["content"])
 
 
