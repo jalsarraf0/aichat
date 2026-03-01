@@ -64,26 +64,81 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "browser",
         "description": (
             "Control a real Chromium browser in the human_browser Docker container "
-            "(ID a12fdfeaaf78). Actions: navigate, read, screenshot, click, fill, eval, "
-            "screenshot_element, list_images_detail. "
+            "(ID a12fdfeaaf78). Actions: navigate, read, screenshot, click, left_click, "
+            "right_click, scroll, fill, eval, screenshot_element, list_images_detail, "
+            "save_images, download_page_images. "
             "The browser keeps state between calls so you can navigate, click, fill, and read "
             "in sequence. Use 'find_text' with screenshot to zoom into a specific page section. "
             "Use screenshot_element to precisely crop a single element. "
-            "Use list_images_detail to see all images with src, alt, dimensions, and viewport info."
+            "Use list_images_detail to see all images with src, alt, dimensions, and viewport info. "
+            "Use save_images/download_page_images to persist images from authenticated browser sessions."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["navigate", "read", "screenshot", "click", "fill", "eval",
-                             "screenshot_element", "list_images_detail"],
+                    "enum": [
+                        "navigate",
+                        "read",
+                        "screenshot",
+                        "click",
+                        "left_click",
+                        "right_click",
+                        "scroll",
+                        "fill",
+                        "eval",
+                        "screenshot_element",
+                        "list_images_detail",
+                        "save_images",
+                        "download_page_images",
+                    ],
                     "description": "Which browser action to perform.",
                 },
                 "url":       {"type": "string", "description": "URL for navigate/screenshot."},
                 "selector":  {"type": "string", "description": "CSS selector for click/fill/screenshot_element."},
                 "value":     {"type": "string", "description": "Text to type (fill only)."},
                 "code":      {"type": "string", "description": "JavaScript to evaluate (eval only)."},
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle"],
+                    "description": "Mouse button for click action only (default left).",
+                },
+                "click_count": {
+                    "type": "integer",
+                    "description": "Number of clicks for click action (default 1).",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                    "description": "Scroll direction for scroll action.",
+                },
+                "amount": {
+                    "type": "integer",
+                    "description": "Pixels to scroll for scroll action (default 800).",
+                },
+                "behavior": {
+                    "type": "string",
+                    "enum": ["instant", "smooth"],
+                    "description": "Scroll behavior for scroll action (default instant).",
+                },
+                "urls": {
+                    "description": (
+                        "Image URLs to download for save_images (list of strings or comma-separated string)."
+                    ),
+                },
+                "prefix": {
+                    "type": "string",
+                    "description": "Filename prefix for save_images/download_page_images (default 'image').",
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Max images for save_images/download_page_images (default 20).",
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "Optional src/alt substring filter for download_page_images.",
+                },
                 "find_text": {
                     "type": "string",
                     "description": (
@@ -1008,7 +1063,7 @@ def _is_image_tool_call(name: str, arguments: dict[str, Any]) -> bool:
         return True
     if name == "browser":
         action = str(arguments.get("action", "")).strip().lower()
-        return action in {"screenshot", "screenshot_element"}
+        return action in {"screenshot", "screenshot_element", "save_images", "download_page_images"}
     return False
 
 
@@ -1051,6 +1106,26 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
             find_text  = str(arguments["find_text"]).strip()  if arguments.get("find_text")  else None
             find_image = str(arguments["find_image"]).strip() if arguments.get("find_image") else None
             pad = int(arguments.get("pad", 20))
+            raw_urls = arguments.get("urls", [])
+            if isinstance(raw_urls, str):
+                raw_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
+            button = str(arguments.get("button", "left")).strip().lower() or "left"
+            try:
+                click_count = int(arguments.get("click_count", 1))
+            except (ValueError, TypeError):
+                click_count = 1
+            direction = str(arguments.get("direction", "down")).strip().lower() or "down"
+            try:
+                amount = int(arguments.get("amount", 800))
+            except (ValueError, TypeError):
+                amount = 800
+            behavior = str(arguments.get("behavior", "instant")).strip().lower() or "instant"
+            prefix = str(arguments.get("prefix", "image")).strip() or "image"
+            try:
+                max_imgs = int(arguments.get("max", 20))
+            except (ValueError, TypeError):
+                max_imgs = 20
+            filter_query = str(arguments.get("filter", "")).strip() or None
             result = await mgr.run_browser(
                 action=action,
                 mode=_APPROVAL,
@@ -1062,6 +1137,15 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                 find_text=find_text,
                 find_image=find_image,
                 pad=pad,
+                image_urls=raw_urls if isinstance(raw_urls, list) else None,
+                filter_query=filter_query,
+                image_prefix=prefix,
+                max_images=max_imgs,
+                button=button,
+                click_count=click_count,
+                direction=direction,
+                amount=amount,
+                behavior=behavior,
             )
             if action == "screenshot":
                 host_path = result.get("host_path", "")
@@ -1122,6 +1206,61 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[dict[str, Any
                         f"       alt: {alt[:80]}"
                     )
                 return _text("\n".join(lines))
+            if action == "scroll":
+                error = result.get("error", "")
+                if error:
+                    return _text(f"browser scroll failed: {error}")
+                return _text(
+                    "Scrolled page.\n"
+                    f"Direction: {result.get('direction', direction)}  "
+                    f"Amount: {result.get('amount', amount)}  "
+                    f"Behavior: {result.get('behavior', behavior)}\n"
+                    f"Position: x={result.get('scroll_x', 0)} y={result.get('scroll_y', 0)}"
+                )
+            if action == "save_images":
+                error = result.get("error", "")
+                if error:
+                    return _text(f"browser save_images failed: {error}")
+                saved = result.get("saved", [])
+                errors = result.get("errors", [])
+                if not saved and errors:
+                    errs = "; ".join(e.get("error", "?") for e in errors[:3])
+                    return _text(f"browser save_images: all downloads failed — {errs}")
+                blocks: list = []
+                lines = [f"Downloaded {len(saved)} image(s)" + (f"  ({len(errors)} failed)" if errors else "")]
+                for item in saved:
+                    hp = item.get("host_path", "")
+                    size_kb = item.get("size", 0) // 1024
+                    lines.append(f"  [{item.get('index','?')}] {os.path.basename(hp)}  {size_kb} KB")
+                    if hp and os.path.isfile(hp) and len(blocks) < 10:
+                        blocks.extend(_image_content_blocks(hp, os.path.basename(hp)))
+                blocks.insert(0, _text("\n".join(lines))[0])
+                return blocks
+            if action == "download_page_images":
+                error = result.get("error", "")
+                if error:
+                    return _text(f"browser download_page_images failed: {error}")
+                saved = result.get("saved", [])
+                errors = result.get("errors", [])
+                applied_filter = result.get("filter")
+                filter_note = f" (filter: '{applied_filter}')" if applied_filter else ""
+                if not saved:
+                    msg = f"No images downloaded{filter_note}"
+                    if errors:
+                        errs = "; ".join(e.get("error", "?") for e in errors[:3])
+                        msg += f" — {errs}"
+                    return _text(msg)
+                blocks: list = []
+                lines = [f"Downloaded {len(saved)} image(s){filter_note}" +
+                         (f"  ({len(errors)} failed)" if errors else "")]
+                for item in saved:
+                    hp = item.get("host_path", "")
+                    size_kb = item.get("size", 0) // 1024
+                    lines.append(f"  [{item.get('index','?')}] {os.path.basename(hp)}  {size_kb} KB")
+                    if hp and os.path.isfile(hp) and len(blocks) < 10:
+                        blocks.extend(_image_content_blocks(hp, os.path.basename(hp)))
+                blocks.insert(0, _text("\n".join(lines))[0])
+                return blocks
             return _text(json.dumps(result, ensure_ascii=False))
 
         if name == "screenshot":

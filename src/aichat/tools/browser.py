@@ -31,7 +31,7 @@ _STARTUP_TIMEOUT = 35  # seconds to wait for uvicorn to come up
 
 # When _ensure_server() finds a running server whose /health returns a
 # different version it kills it and redeploys the current _SERVER_SRC.
-_REQUIRED_SERVER_VERSION = "18"
+_REQUIRED_SERVER_VERSION = "19"
 
 
 class BrowserGpuConfig:
@@ -109,7 +109,7 @@ class BrowserGpuConfig:
 # contain anything that would break when piped through docker cp.
 
 _SERVER_SRC = '''\
-"""Browser automation server — auto-deployed by aichat BrowserTool. v18"""
+"""Browser automation server — auto-deployed by aichat BrowserTool. v19"""
 from __future__ import annotations
 
 import asyncio
@@ -123,7 +123,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
-_VERSION = "18"
+_VERSION = "19"
 
 
 class BrowserGpuConfig:
@@ -813,18 +813,34 @@ async def navigate(req: NavReq):
 
 class ClickReq(BaseModel):
     selector: str
+    button: str = "left"
+    click_count: int = 1
 
 
 @app.post("/click")
 async def click(req: ClickReq):
     try:
+        button = (req.button or "left").strip().lower()
+        if button not in {"left", "right", "middle"}:
+            return {"error": f"invalid click button: {button}", "content": "", "url": ""}
+        click_count = max(1, min(int(req.click_count), 3))
         page = await _ensure_page()
-        await page.click(req.selector, timeout=10000)
+        await page.click(
+            req.selector,
+            timeout=10000,
+            button=button,
+            click_count=click_count,
+        )
         try:
             await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
-        return {"url": page.url, "content": await _extract_text(page)}
+        return {
+            "url": page.url,
+            "content": await _extract_text(page),
+            "button": button,
+            "click_count": click_count,
+        }
     except Exception as exc:
         return {"error": str(exc), "content": "", "url": ""}
 
@@ -842,6 +858,61 @@ async def fill(req: FillReq):
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+class ScrollReq(BaseModel):
+    direction: str = "down"
+    amount: int = 800
+    behavior: str = "instant"
+
+
+@app.post("/scroll")
+async def scroll(req: ScrollReq):
+    try:
+        page = await _ensure_page()
+        direction = (req.direction or "down").strip().lower()
+        amount = max(1, min(int(req.amount), 20000))
+        dx = 0
+        dy = 0
+        if direction == "down":
+            dy = amount
+        elif direction == "up":
+            dy = -amount
+        elif direction == "right":
+            dx = amount
+        elif direction == "left":
+            dx = -amount
+        else:
+            return {"error": f"invalid scroll direction: {direction}", "url": page.url}
+        behavior = (req.behavior or "instant").strip().lower()
+        if behavior not in {"instant", "smooth"}:
+            behavior = "instant"
+        await page.evaluate(
+            """(p) => {
+                window.scrollBy({left: p.dx, top: p.dy, behavior: p.behavior});
+                return {
+                    x: window.scrollX || window.pageXOffset || 0,
+                    y: window.scrollY || window.pageYOffset || 0
+                };
+            }""",
+            {"dx": dx, "dy": dy, "behavior": behavior},
+        )
+        await asyncio.sleep(0.2)
+        pos = await page.evaluate(
+            "() => ({x: window.scrollX || window.pageXOffset || 0, y: window.scrollY || window.pageYOffset || 0})"
+        )
+        return {
+            "ok": True,
+            "direction": direction,
+            "amount": amount,
+            "behavior": behavior,
+            "scroll_x": int(pos.get("x", 0)),
+            "scroll_y": int(pos.get("y", 0)),
+            "url": page.url,
+            "content": await _extract_text(page),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "content": "", "url": ""}
 
 
 @app.get("/read")
@@ -1797,10 +1868,41 @@ class BrowserTool:
         r.raise_for_status()
         return r.json()
 
-    async def click(self, selector: str) -> dict:
+    async def click(
+        self,
+        selector: str,
+        button: str = "left",
+        click_count: int = 1,
+    ) -> dict:
         base = await self._ensure_server()
         async with httpx.AsyncClient(timeout=20.0) as c:
-            r = await c.post(f"{base}/click", json={"selector": selector})
+            r = await c.post(
+                f"{base}/click",
+                json={
+                    "selector": selector,
+                    "button": button,
+                    "click_count": click_count,
+                },
+            )
+        r.raise_for_status()
+        return r.json()
+
+    async def scroll(
+        self,
+        direction: str = "down",
+        amount: int = 800,
+        behavior: str = "instant",
+    ) -> dict:
+        base = await self._ensure_server()
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(
+                f"{base}/scroll",
+                json={
+                    "direction": direction,
+                    "amount": amount,
+                    "behavior": behavior,
+                },
+            )
         r.raise_for_status()
         return r.json()
 

@@ -991,6 +991,33 @@ class AIChatApp(App):
             action = str(args.get("action", "")).strip()
             if not action:
                 return "browser: missing 'action'"
+            raw_image_urls = args.get("image_urls", args.get("urls"))
+            image_urls: list[str] | None = None
+            if isinstance(raw_image_urls, list):
+                image_urls = [str(u).strip() for u in raw_image_urls if str(u).strip()]
+            elif isinstance(raw_image_urls, str):
+                image_urls = [u.strip() for u in raw_image_urls.split(",") if u.strip()]
+            try:
+                click_count = int(args.get("click_count", 1))
+            except (TypeError, ValueError):
+                click_count = 1
+            try:
+                pad = int(args.get("pad", 20))
+            except (TypeError, ValueError):
+                pad = 20
+            try:
+                amount = int(args.get("amount", 800))
+            except (TypeError, ValueError):
+                amount = 800
+            try:
+                max_images = int(args.get("max_images", 20))
+            except (TypeError, ValueError):
+                max_images = 20
+            if args.get("max_images") is None and args.get("max") is not None:
+                try:
+                    max_images = int(args.get("max"))
+                except (TypeError, ValueError):
+                    max_images = 20
             payload = await self.tools.run_browser(
                 action,
                 self.state.approval,
@@ -1000,6 +1027,25 @@ class AIChatApp(App):
                 value=str(args["value"]) if args.get("value") is not None else None,
                 code=str(args["code"]).strip() if args.get("code") else None,
                 find_text=str(args["find_text"]).strip() if args.get("find_text") else None,
+                find_image=str(args["find_image"]).strip() if args.get("find_image") else None,
+                pad=pad,
+                image_urls=image_urls,
+                filter_query=(
+                    str(args["filter_query"]).strip()
+                    if args.get("filter_query")
+                    else (str(args["filter"]).strip() if args.get("filter") else None)
+                ),
+                image_prefix=(
+                    str(args["image_prefix"]).strip()
+                    if args.get("image_prefix")
+                    else (str(args["prefix"]).strip() if args.get("prefix") else "image")
+                ),
+                max_images=max_images,
+                button=str(args["button"]).strip().lower() if args.get("button") else "left",
+                click_count=click_count,
+                direction=str(args["direction"]).strip().lower() if args.get("direction") else "down",
+                amount=amount,
+                behavior=str(args["behavior"]).strip().lower() if args.get("behavior") else "instant",
             )
             if action == "screenshot":
                 return self._format_screenshot_result(payload)

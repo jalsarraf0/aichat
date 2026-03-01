@@ -27,7 +27,7 @@ import pytest
 MCP_URL    = "http://localhost:8096"
 DB_URL     = "http://localhost:8091"
 MEMORY_URL = "http://localhost:8094"
-LM_URL     = "http://192.168.50.2:1234"
+LM_URL     = os.environ.get("LM_STUDIO_URL", os.environ.get("LM_URL", "http://192.168.50.2:1234"))
 WORKSPACE  = "/docker/human_browser/workspace"
 
 

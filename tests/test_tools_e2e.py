@@ -770,6 +770,29 @@ class TestBrowserToolUnit:
         assert "url" in result
 
     @pytest.mark.asyncio
+    async def test_run_browser_right_click_routes_button(self):
+        mgr = ToolManager()
+        with patch.object(mgr.browser, "click", new=AsyncMock(return_value={"ok": True})) as mocked_click:
+            result = await mgr.run_browser("right_click", ApprovalMode.AUTO, None, selector="#btn")
+        assert result.get("ok") is True
+        mocked_click.assert_awaited_once_with(selector="#btn", button="right", click_count=1)
+
+    @pytest.mark.asyncio
+    async def test_run_browser_scroll_routes_direction(self):
+        mgr = ToolManager()
+        with patch.object(mgr.browser, "scroll", new=AsyncMock(return_value={"ok": True, "direction": "down"})) as mocked_scroll:
+            result = await mgr.run_browser(
+                "scroll",
+                ApprovalMode.AUTO,
+                None,
+                direction="down",
+                amount=640,
+                behavior="smooth",
+            )
+        assert result.get("ok") is True
+        mocked_scroll.assert_awaited_once_with(direction="down", amount=640, behavior="smooth")
+
+    @pytest.mark.asyncio
     async def test_run_browser_fill_mocked(self):
         mgr = ToolManager()
         with patch.object(mgr.browser, "fill", new=AsyncMock(return_value={"ok": True})):
@@ -1109,6 +1132,85 @@ class TestBrowserTUIDispatch:
                         break
                 bubbles = list(app.query(".chat-msg"))
                 assert len(bubbles) >= 1
+
+
+class TestBrowserAppDispatch:
+    """Unit tests for browser argument forwarding in AIChatApp dispatcher."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_browser_forwards_extended_args(self):
+        app = _make_app()
+        captured: dict = {}
+
+        async def _fake_run_browser(action, mode, confirmer, **kwargs):
+            captured["action"] = action
+            captured.update(kwargs)
+            return {"ok": True}
+
+        with patch.object(app.tools, "run_browser", side_effect=_fake_run_browser):
+            result = await app._execute_tool_call(
+                "browser",
+                {
+                    "action": "click",
+                    "url": "https://example.com",
+                    "selector": "#submit",
+                    "button": "right",
+                    "click_count": "2",
+                    "direction": "down",
+                    "amount": "1200",
+                    "behavior": "smooth",
+                    "find_text": "Login",
+                    "find_image": "logo.png",
+                    "pad": "30",
+                    "image_urls": "https://x/a.png, https://x/b.png",
+                    "filter_query": "hero",
+                    "image_prefix": "grab",
+                    "max_images": "7",
+                },
+            )
+        payload = json.loads(result)
+        assert payload.get("ok") is True
+        assert captured["action"] == "click"
+        assert captured["button"] == "right"
+        assert captured["click_count"] == 2
+        assert captured["direction"] == "down"
+        assert captured["amount"] == 1200
+        assert captured["behavior"] == "smooth"
+        assert captured["find_image"] == "logo.png"
+        assert captured["pad"] == 30
+        assert captured["image_urls"] == ["https://x/a.png", "https://x/b.png"]
+        assert captured["filter_query"] == "hero"
+        assert captured["image_prefix"] == "grab"
+        assert captured["max_images"] == 7
+
+    @pytest.mark.asyncio
+    async def test_dispatch_browser_accepts_mcp_style_aliases(self):
+        app = _make_app()
+        captured: dict = {}
+
+        async def _fake_run_browser(action, mode, confirmer, **kwargs):
+            captured["action"] = action
+            captured.update(kwargs)
+            return {"ok": True}
+
+        with patch.object(app.tools, "run_browser", side_effect=_fake_run_browser):
+            result = await app._execute_tool_call(
+                "browser",
+                {
+                    "action": "save_images",
+                    "urls": "https://x/a.png, https://x/b.png",
+                    "prefix": "mcp",
+                    "max": "4",
+                    "filter": "logo",
+                },
+            )
+        payload = json.loads(result)
+        assert payload.get("ok") is True
+        assert captured["action"] == "save_images"
+        assert captured["image_urls"] == ["https://x/a.png", "https://x/b.png"]
+        assert captured["image_prefix"] == "mcp"
+        assert captured["max_images"] == 4
+        assert captured["filter_query"] == "logo"
 
 
 # ---------------------------------------------------------------------------
@@ -1551,6 +1653,35 @@ class TestMCPScreenshot:
             blocks = await mcp._call_tool("db_list_images", {})
         assert blocks[0]["type"] == "text"
         assert "no screenshots" in blocks[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_browser_save_images_surfaces_error(self):
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        with patch.object(
+            mgr,
+            "run_browser",
+            new=AsyncMock(return_value={"error": "image_urls required for save_images"}),
+        ):
+            blocks = await mcp._call_tool("browser", {"action": "save_images", "urls": []})
+        assert blocks[0]["type"] == "text"
+        assert "save_images failed" in blocks[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_browser_download_page_images_surfaces_error(self):
+        import aichat.mcp_server as mcp
+        mgr = mcp._get_manager()
+        with patch.object(
+            mgr,
+            "run_browser",
+            new=AsyncMock(return_value={"error": "navigate failed before download_page_images: timeout"}),
+        ):
+            blocks = await mcp._call_tool(
+                "browser",
+                {"action": "download_page_images", "url": "https://example.com"},
+            )
+        assert blocks[0]["type"] == "text"
+        assert "download_page_images failed" in blocks[0]["text"].lower()
 
     @pytest.mark.asyncio
     async def test_mcp_db_store_image(self):

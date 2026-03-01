@@ -17,6 +17,7 @@ TestPlannerE2E          — live MCP planner tools (full lifecycle)
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -61,7 +62,7 @@ VIDEO_URL   = "http://localhost:8099"
 OCR_URL     = "http://localhost:8100"
 DOCS_URL    = "http://localhost:8101"
 PLANNER_URL = "http://localhost:8102"
-LM_URL      = "http://192.168.50.2:1234"
+LM_URL      = os.environ.get("LM_STUDIO_URL", os.environ.get("LM_URL", "http://192.168.50.2:1234"))
 
 
 def _up(url: str, path: str = "/health") -> bool:
