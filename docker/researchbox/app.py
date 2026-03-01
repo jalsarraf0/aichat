@@ -104,7 +104,7 @@ async def push_feed(payload: dict) -> dict:
             "title": e.get("title", "untitled"),
             "url": e.get("link", feed_url),
         }
-        for e in parsed.entries[:20]
+        for e in getattr(parsed, "entries", [])[:20]
     ]
 
     stored = 0

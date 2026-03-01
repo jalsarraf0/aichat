@@ -1868,7 +1868,7 @@ class ImageRenderer:
         if _HAS_PIL:
             try:
                 with _PilImage.open(_io.BytesIO(raw)) as img:
-                    return self.encode(img.convert("RGB"), summary)
+                    return self.encode(_ImageOps.exif_transpose(img).convert("RGB"), summary)
             except Exception:
                 pass  # corrupt / unrecognised format — try raw fallback below
         # PIL unavailable or image unreadable — send raw only if it fits
@@ -3199,7 +3199,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 for e in errors:
                     ts = str(e.get("logged_at", ""))[:19].replace("T", " ")
                     lines.append(
-                        f"  [{ts}] [{e['level']}] {e['service']}: {e['message']}"
+                        f"  [{ts}] [{e.get('level', '?')}] {e.get('service', '?')}: {e.get('message', '')}"
                         + (f"\n    detail: {e['detail']}" if e.get("detail") else "")
                     )
                 return _text("\n".join(lines))
@@ -3711,7 +3711,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         lp    = os.path.join(BROWSER_WORKSPACE, fname)
                         if os.path.isfile(lp):
                             with _PilImage.open(lp) as fr:
-                                frames.append(fr.convert("RGB").copy())
+                                frames.append(_ImageOps.exif_transpose(fr).convert("RGB").copy())
                     except Exception:
                         break
                 if not frames:
@@ -4201,8 +4201,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         timeout=5.0,
                     )
                     rdata = mem_r.json()
-                    if rdata.get("found"):
-                        _seen_urls = set(_js2.loads(rdata["entries"][0]["value"]))
+                    entries = rdata.get("entries") or []
+                    if rdata.get("found") and entries:
+                        _seen_urls = set(_js2.loads(entries[0]["value"]))
                 except Exception:
                     pass
 
