@@ -440,6 +440,180 @@ class TestOOPUnits:
 
 
 # ===========================================================================
+# 2b. ConversationSearcher OOP unit tests (no services, importlib load)
+# ===========================================================================
+
+def _load_db_app():
+    """Load docker/database/app.py via importlib (no Docker deps at import time)."""
+    import importlib.util, pathlib, sys, unittest.mock as um
+    spec = importlib.util.spec_from_file_location(
+        "db_app_conv_searcher",
+        pathlib.Path(__file__).parent.parent / "docker" / "database" / "app.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["db_app_conv_searcher"] = mod
+    # Stub psycopg and FastAPI so the module loads without a real DB.
+    with um.patch.dict("sys.modules", {
+        "psycopg":            um.MagicMock(),
+        "psycopg.rows":       um.MagicMock(),
+        "fastapi":            um.MagicMock(),
+        "fastapi.responses":  um.MagicMock(),
+        "pydantic":           um.MagicMock(),
+    }):
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+try:
+    _db_mod = _load_db_app()
+    ConversationSearcher = _db_mod.ConversationSearcher
+    _db_cosine_sim       = _db_mod._cosine_sim
+    _DB_MOD_OK           = True
+except Exception as _db_load_err:
+    _DB_MOD_OK           = False
+    _db_load_err_str     = str(_db_load_err)
+
+_skip_db_mod = pytest.mark.skipif(not _DB_MOD_OK, reason="docker/database/app.py load failed")
+
+
+def _make_row(turn_id: int, session_id: str, role: str, content: str,
+              embedding: list, timestamp=None):
+    """Return a tuple matching the SELECT column order used by conv_search_turns."""
+    import json
+    return (turn_id, session_id, role, content, json.dumps(embedding), timestamp)
+
+
+class TestConversationSearcher:
+    """Pure unit tests for ConversationSearcher — no Docker, no network."""
+
+    @pytest.fixture
+    def rows_ab(self):
+        """Two rows from different sessions, each with a distinct embedding."""
+        e_a = [1.0] + [0.0] * 63
+        e_b = [0.0] + [1.0] + [0.0] * 62
+        return [
+            _make_row(1, "session-A", "user", "Hello from A", e_a),
+            _make_row(2, "session-B", "user", "Hello from B", e_b),
+        ]
+
+    # ── scoring ──────────────────────────────────────────────────────────────
+
+    @_skip_db_mod
+    def test_scores_all_rows(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).top(10)
+        assert len(results) == 2
+
+    @_skip_db_mod
+    def test_highest_similarity_ranked_first(self, rows_ab):
+        query = [1.0] + [0.0] * 63  # matches session-A perfectly
+        results = ConversationSearcher(rows_ab, query).top(10)
+        assert results[0]["session_id"] == "session-A"
+        assert results[0]["similarity"] == pytest.approx(1.0)
+
+    @_skip_db_mod
+    def test_result_dict_has_required_keys(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        result = ConversationSearcher(rows_ab, query).top(10)[0]
+        for key in ("turn_id", "session_id", "role", "content", "similarity", "timestamp"):
+            assert key in result, f"Missing key: {key}"
+
+    @_skip_db_mod
+    def test_similarity_is_rounded(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        result = ConversationSearcher(rows_ab, query).top(10)[0]
+        # similarity must be a float rounded to ≤ 6 decimal places
+        assert isinstance(result["similarity"], float)
+        assert result["similarity"] == round(result["similarity"], 6)
+
+    @_skip_db_mod
+    def test_empty_rows_returns_empty_list(self):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher([], query).top(10)
+        assert results == []
+
+    @_skip_db_mod
+    def test_corrupt_row_is_skipped(self):
+        """A row with invalid embedding JSON must not raise — it's silently skipped."""
+        import json
+        bad_row = (99, "session-X", "user", "Bad row", "NOT_JSON", None)
+        good_emb = [1.0] + [0.0] * 63
+        good_row = _make_row(1, "session-A", "user", "Good", good_emb)
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher([bad_row, good_row], query).top(10)
+        assert len(results) == 1
+        assert results[0]["session_id"] == "session-A"
+
+    # ── top(n) ───────────────────────────────────────────────────────────────
+
+    @_skip_db_mod
+    def test_top_respects_limit(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).top(1)
+        assert len(results) == 1
+
+    @_skip_db_mod
+    def test_top_larger_than_rows_returns_all(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).top(1000)
+        assert len(results) == 2
+
+    # ── exclude ──────────────────────────────────────────────────────────────
+
+    @_skip_db_mod
+    def test_exclude_removes_matching_session(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).exclude("session-A").top(10)
+        session_ids = [r["session_id"] for r in results]
+        assert "session-A" not in session_ids
+        assert "session-B" in session_ids
+
+    @_skip_db_mod
+    def test_exclude_none_returns_all(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).exclude(None).top(10)
+        assert len(results) == 2
+
+    @_skip_db_mod
+    def test_exclude_unknown_session_returns_all(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = ConversationSearcher(rows_ab, query).exclude("session-Z").top(10)
+        assert len(results) == 2
+
+    @_skip_db_mod
+    def test_exclude_returns_new_instance(self, rows_ab):
+        """exclude() must return a new ConversationSearcher (immutable chaining)."""
+        query = [1.0] + [0.0] * 63
+        searcher = ConversationSearcher(rows_ab, query)
+        filtered = searcher.exclude("session-A")
+        assert filtered is not searcher
+        # Original must be untouched
+        assert len(searcher.top(10)) == 2
+        assert len(filtered.top(10)) == 1
+
+    @_skip_db_mod
+    def test_exclude_both_sessions_returns_empty(self, rows_ab):
+        query = [1.0] + [0.0] * 63
+        results = (
+            ConversationSearcher(rows_ab, query)
+            .exclude("session-A")
+            .exclude("session-B")
+            .top(10)
+        )
+        assert results == []
+
+    # ── source-level assertion ────────────────────────────────────────────────
+
+    def test_conversation_searcher_in_database_source(self):
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent / "docker" / "database" / "app.py").read_text()
+        assert "class ConversationSearcher" in src, \
+            "ConversationSearcher class not found in docker/database/app.py"
+        assert ".exclude(" in src, "ConversationSearcher.exclude() method not found"
+        assert ".top(" in src,    "ConversationSearcher.top() method not found"
+
+
+# ===========================================================================
 # 3. DB integration tests (require live aichat-database service)
 # ===========================================================================
 
@@ -526,9 +700,16 @@ class TestConversationDBIntegration:
         sid_other = f"test-{uuid.uuid4()}"
         self._post("/conversations/sessions", json={"session_id": sid_current})
         self._post("/conversations/sessions", json={"session_id": sid_other})
-        emb = [1.0] + [0.0] * 63
+
+        # Use an embedding that is ORTHOGONAL to the generic [1.0, 0.0, ...] that all
+        # historic test entries use.  Cosine similarity of [0,…,0,1] vs [1,0,…,0] = 0.0,
+        # so when we query with this vector our new entries score 1.0 and every old
+        # accumulated entry scores 0.0 — they always rank first regardless of the
+        # service's hard limit cap.
+        emb = [0.0] * 63 + [1.0]   # 64-dimensional; last component = 1.0
         content_current = f"Current-{marker}"
-        content_other = f"Other-{marker}"
+        content_other   = f"Other-{marker}"
+
         # Store in current session (should be excluded)
         self._post("/conversations/turns",
                    json={"session_id": sid_current, "role": "user",
@@ -537,15 +718,30 @@ class TestConversationDBIntegration:
         self._post("/conversations/turns",
                    json={"session_id": sid_other, "role": "user",
                          "content": content_other, "turn_index": 0, "embedding": emb})
+
+        # Confirm the turn was stored in sid_other via the session detail endpoint.
+        other_detail = self._get(f"/conversations/sessions/{sid_other}")
+        stored_contents = [t["content"] for t in other_detail.get("turns", [])]
+        assert content_other in stored_contents, (
+            f"content_other not stored in sid_other via session detail: {stored_contents}"
+        )
+
+        # Search with the same orthogonal embedding.  Our two new entries score 1.0;
+        # all old entries score 0.0, so new entries always appear first within any limit.
         result = self._post("/conversations/search",
-                            json={"embedding": emb, "limit": 100,
+                            json={"embedding": emb, "limit": 2000,
                                   "exclude_session": sid_current})
-        contents = [r["content"] for r in result["results"]]
-        # Other session turn must appear; current session turn must NOT appear
-        assert content_other in contents, f"Expected '{content_other}' in results: {contents}"
-        # Verify that turns with sid_current are excluded from results
         session_ids = [r["session_id"] for r in result["results"]]
-        assert sid_current not in session_ids, f"sid_current should be excluded but found in: {session_ids}"
+        contents    = [r["content"]    for r in result["results"]]
+
+        # sid_other's entry must appear in search (unique embedding guarantees top rank)
+        assert content_other in contents, (
+            f"Expected '{content_other}' in search results (top-ranked): {contents[:5]}"
+        )
+        # sid_current must be completely absent (verifies exclusion)
+        assert sid_current not in session_ids, (
+            f"sid_current should be excluded but found in: {session_ids}"
+        )
 
     def test_list_sessions(self):
         sid = f"test-{uuid.uuid4()}"
