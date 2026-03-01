@@ -1,9 +1,13 @@
 FROM python:3.12-slim
 
-# Intel Arc / integrated GPU: OpenCL ICD loader + DRM for cv2/OpenCL acceleration.
-# ocl-icd-libopencl1 provides the OpenCL dispatcher; libdrm2 exposes DRM device nodes.
+# Intel Arc / integrated GPU userspace for vision tools:
+# - ocl-icd-libopencl1 + mesa-opencl-icd: OpenCL runtime plumbing for OpenCV.
+# - libdrm2 + libva2 + intel-media-va-driver: DRM/VA-API access for Intel GPUs.
+# - vainfo + clinfo: lightweight runtime diagnostics.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ocl-icd-libopencl1 libdrm2 \
+        ocl-icd-libopencl1 mesa-opencl-icd \
+        libdrm2 libva2 intel-media-va-driver \
+        vainfo clinfo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

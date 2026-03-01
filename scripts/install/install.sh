@@ -58,12 +58,34 @@ mkdir -p "${HOME}/.config/aichat/tools"
 mkdir -p "${HOME}/git"
 
 if command -v docker >/dev/null 2>&1; then
+  INTEL_VIDEO_GID="$(getent group video 2>/dev/null | cut -d: -f3 || true)"
+  INTEL_RENDER_GID="$(getent group render 2>/dev/null | cut -d: -f3 || true)"
+  INTEL_DRI_DEVICE="/dev/dri"
+  [[ -n "$INTEL_VIDEO_GID" ]] || INTEL_VIDEO_GID="39"
+  [[ -n "$INTEL_RENDER_GID" ]] || INTEL_RENDER_GID="105"
+  INTEL_GPU_LINE=""
+  if command -v lspci >/dev/null 2>&1; then
+    INTEL_GPU_LINE="$(lspci -nn 2>/dev/null | grep -Ei 'VGA|3D|Display' | grep -Ei 'Intel|Arc|DG2' | head -1 || true)"
+  fi
+  if [[ -n "$INTEL_GPU_LINE" ]]; then
+    log "Detected Intel GPU: $INTEL_GPU_LINE"
+  else
+    warn "No Intel GPU line found via lspci. Continuing with generic defaults."
+  fi
+  if [[ ! -d "$INTEL_DRI_DEVICE" ]]; then
+    warn "$INTEL_DRI_DEVICE is missing; GPU acceleration inside containers will be unavailable."
+  else
+    log "Using DRI path: $INTEL_DRI_DEVICE (video GID=$INTEL_VIDEO_GID, render GID=$INTEL_RENDER_GID)"
+  fi
   if ! groups | tr ' ' '\n' | grep -qx docker; then
     warn "Docker is installed, but your user may not be in the 'docker' group."
   fi
   if docker compose version >/dev/null 2>&1; then
     log "Starting docker-backed tools (docker compose up -d --build)."
-    if ! docker compose up -d --build; then
+    if ! INTEL_VIDEO_GID="$INTEL_VIDEO_GID" \
+         INTEL_RENDER_GID="$INTEL_RENDER_GID" \
+         INTEL_DRI_DEVICE="$INTEL_DRI_DEVICE" \
+         docker compose up -d --build; then
       warn "Docker compose failed to start containers. Check docker permissions and that the daemon is running."
     fi
     # Connect human_browser to the aichat compose network so the MCP container
@@ -100,6 +122,27 @@ except OSError:
       fi
     else
       warn "human_browser container not found — screenshot tool will be unavailable until it is running."
+    fi
+
+    # Best-effort GPU diagnostics for the MCP container. This confirms whether
+    # /dev/dri is visible and whether OpenCV reports OpenCL availability.
+    MCP_CID="$(docker compose ps -q aichat-mcp 2>/dev/null || true)"
+    if [[ -n "$MCP_CID" ]]; then
+      if ! docker exec "$MCP_CID" python3 - <<'PY' 2>/dev/null; then
+import os
+try:
+    import cv2
+    have = bool(cv2.ocl.haveOpenCL())
+    use_before = bool(cv2.ocl.useOpenCL())
+    cv2.ocl.setUseOpenCL(True)
+    use_after = bool(cv2.ocl.useOpenCL())
+    print(f"[aichat-install] MCP cv2={cv2.__version__} opencl_have={have} opencl_use_before={use_before} opencl_use_after={use_after}")
+except Exception as exc:
+    print(f"[aichat-install][warn] MCP OpenCV/OpenCL check failed: {exc}")
+print(f"[aichat-install] MCP /dev/dri present={os.path.isdir('/dev/dri')}")
+PY
+        warn "MCP GPU diagnostics could not be completed."
+      fi
     fi
   else
     warn "Docker is installed, but the 'docker compose' plugin is unavailable or permission was denied."
