@@ -568,7 +568,7 @@ All services start automatically with `docker compose up -d --build`.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `aichat-db` | 5432 | PostgreSQL 16 — articles, images, web cache, conversations |
+| `aichat-db` | 5432 | PostgreSQL 16 — articles, images, web cache, conversations (binds to `127.0.0.1` by default; set `AICHAT_DB_BIND=0.0.0.0` to expose) |
 | `aichat-database` | 8091 | FastAPI REST wrapper for PostgreSQL |
 | `aichat-researchbox` | 8092 | RSS/feed discovery service |
 | `aichat-memory` | 8094 | Persistent key-value + embedding store (SQLite) |

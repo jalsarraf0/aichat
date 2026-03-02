@@ -429,7 +429,9 @@ class TestOcrE2E:
         assert "required" in text.lower() or "error" in text.lower()
 
     def test_ocr_nonexistent_file(self):
-        text = _mcp_text("ocr_image", {"path": "/workspace/does_not_exist_xyz.png"})
+        # Use an absolute, non-workspace path so resolver fallback cannot map to
+        # a recent screenshot and accidentally pass OCR on an unrelated image.
+        text = _mcp_text("ocr_image", {"path": f"/definitely-missing-{uuid.uuid4().hex}.png"})
         assert "not found" in text.lower() or "error" in text.lower()
 
 
