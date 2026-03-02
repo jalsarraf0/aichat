@@ -218,8 +218,8 @@ class TestBrowserGpuConfig:
 class TestBrowserServerVersion:
     """Verify the browser server version was bumped and GPU class is embedded."""
 
-    def test_required_version_is_18(self):
-        assert _REQ_VER == "18", f"Expected '18', got {_REQ_VER!r}"
+    def test_required_version_is_19(self):
+        assert _REQ_VER == "19", f"Expected '19', got {_REQ_VER!r}"
 
     def test_server_src_contains_gpu_class(self):
         assert "BrowserGpuConfig" in _SERVER_SRC, (
@@ -231,9 +231,9 @@ class TestBrowserServerVersion:
             "_LAUNCH_ARGS = BrowserGpuConfig.launch_args() not found in _SERVER_SRC"
         )
 
-    def test_server_src_version_is_18(self):
-        assert '_VERSION = "18"' in _SERVER_SRC, (
-            "_VERSION inside _SERVER_SRC was not bumped to '18'"
+    def test_server_src_version_is_19(self):
+        assert '_VERSION = "19"' in _SERVER_SRC, (
+            "_VERSION inside _SERVER_SRC was not bumped to '19'"
         )
 
     def test_server_src_health_includes_gpu(self):

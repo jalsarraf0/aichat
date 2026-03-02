@@ -12,7 +12,9 @@ services:
     volumes:
       - aichatdb:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Bind to localhost by default to avoid exposing Postgres to the public internet.
+      # Override with AICHAT_DB_BIND=0.0.0.0 if remote access is intentionally required.
+      - "${AICHAT_DB_BIND:-127.0.0.1}:5432:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aichat -d aichat"]

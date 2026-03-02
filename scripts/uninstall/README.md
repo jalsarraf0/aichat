@@ -4,10 +4,10 @@
 
 `scripts/uninstall/uninstall.sh` removes local AIChat traces:
 
-- Stops/removes Docker stack, volumes, and local images.
-- Deletes project `.venv`.
-- Removes launcher scripts from `$HOME/.local/bin`.
-- Removes config/data/cache directories under `$HOME`.
+- Stops/removes the AIChat Docker stack (`docker compose down --remove-orphans`).
+- Preserves named volumes (including `aichatdb`) so data survives reinstall.
+- Removes launcher script from `$HOME/.local/bin/aichat`.
+- Removes installed venv at `$HOME/.local/share/aichat/venv`.
 
 ## Usage
 

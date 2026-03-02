@@ -4,10 +4,11 @@
 
 `scripts/install/install.sh` performs a full user-friendly install:
 
-- Detects/installs Python (best effort via distro package manager).
-- Creates project `.venv` and installs AIChat.
-- Creates `$HOME/.local/bin/aichat` launcher so command works without activating venv.
-- Starts Docker services with `docker compose up -d --build`.
+- Requires Python 3.12+ and uses it to create/update `$HOME/.local/share/aichat/venv`.
+- Installs AIChat in editable mode into that venv.
+- Creates `$HOME/.local/bin/aichat` launcher so command works without activating a venv.
+- Creates `~/.config/aichat/tools` and `~/git` directories if missing.
+- Starts Docker services with `docker compose up -d --build` (best effort).
 
 ## Usage
 
