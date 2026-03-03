@@ -254,24 +254,32 @@ def update_task(task_id: str, payload: dict) -> dict:
         row = c.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
-        updates = {}
+        status = row["status"]
+        metadata = row["metadata"]
+        priority = row["priority"]
+        description = row["description"]
+        changed = False
         if "status" in payload:
             s = payload["status"]
             if s not in VALID_STATUSES:
                 raise HTTPException(status_code=422, detail=f"Invalid status: {s}")
-            updates["status"] = s
+            status = s
+            changed = True
         if "metadata" in payload:
-            updates["metadata"] = json.dumps(dict(payload["metadata"]))
+            metadata = json.dumps(dict(payload["metadata"]))
+            changed = True
         if "priority" in payload:
-            updates["priority"] = int(payload["priority"])
+            priority = int(payload["priority"])
+            changed = True
         if "description" in payload:
-            updates["description"] = str(payload["description"])
-        if not updates:
+            description = str(payload["description"])
+            changed = True
+        if not changed:
             return _task_row(row)
-        updates["updated_at"] = _now()
-        set_clause = ", ".join(f"{k}=?" for k in updates)
-        c.execute(f"UPDATE tasks SET {set_clause} WHERE id=?",
-                  (*updates.values(), task_id))
+        c.execute(
+            "UPDATE tasks SET status=?, metadata=?, priority=?, description=?, updated_at=? WHERE id=?",
+            (status, metadata, priority, description, _now(), task_id),
+        )
     return get_task(task_id)
 
 
