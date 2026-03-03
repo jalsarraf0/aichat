@@ -143,7 +143,8 @@ def _dhash(img: "_PilImage.Image") -> str:
         return ""
     try:
         gray = img.convert("L").resize((9, 8), _PilImage.LANCZOS)
-        px   = list(gray.getdata())
+        # Pillow deprecates Image.getdata(); tobytes() is stable and faster here.
+        px = gray.tobytes()
         bits = sum(
             1 << i for i in range(64)
             if px[i % 8 + (i // 8) * 9] > px[i % 8 + (i // 8) * 9 + 1]
