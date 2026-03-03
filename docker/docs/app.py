@@ -17,6 +17,7 @@ import io
 import logging
 import os
 import re
+import ssl
 from pathlib import Path
 
 import httpx
@@ -41,6 +42,7 @@ DB_API   = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
 _SERVICE = "aichat-docs"
 
 SUPPORTED = ["pdf", "docx", "xlsx", "xls", "pptx", "html", "htm", "md", "txt"]
+SYSTEM_SSL_CONTEXT = ssl.create_default_context()
 
 app = FastAPI()
 
@@ -268,7 +270,13 @@ async def ingest_url(payload: dict) -> dict:
     if not url:
         raise HTTPException(status_code=422, detail="'url' is required")
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # Use the system trust store here because some environments have
+        # TLS roots that are not present in certifi's static bundle.
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            verify=SYSTEM_SSL_CONTEXT,
+        ) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.content
