@@ -885,3 +885,12 @@ pytest -m smoke -v
 ## Disclaimer
 
 The author is not responsible for how users use this program. Use at your own risk.
+
+## Validation Status (2026-03-03)
+
+- Regression status: PASS (targeted local batches + latest CI success).
+- Commands validated:
+  - `pytest -q -m "not smoke" tests/test_tool_args.py tests/test_tool_scheduler.py tests/test_toolkit.py`
+  - `pytest -vv tests/test_compaction.py::TestCompactionTUI::test_compact_command_on_enables`
+- CI/CD status: latest `Regression CI/CD` and `Release` workflows completed successfully on `main`/tag runs.
+- Security hygiene: PASS (no hardcoded secrets or private keys detected in tracked files).
