@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 import time
 import uuid as _uuid
 from collections.abc import Callable
@@ -1448,7 +1449,8 @@ class AIChatApp(App):
             return None
 
     def _start_new_chat(self, initial: bool = False) -> None:
-        archived = self.transcript_store.archive_to(Path("/tmp/context"))
+        archive_dir = Path(tempfile.gettempdir()) / "context"
+        archived = self.transcript_store.archive_to(archive_dir)
         if archived:
             self._log_session(f"Archived chat to {archived}")
         self.transcript_store.clear()

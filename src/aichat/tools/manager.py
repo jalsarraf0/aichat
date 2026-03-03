@@ -178,14 +178,14 @@ class ToolManager:
         """Return cached tool result for *name*+*args*, or ``None`` if not cached."""
         import hashlib
         import json as _j
-        key = f"{name}:{hashlib.md5(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
+        key = f"{name}:{hashlib.sha256(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
         return self._tool_result_cache.get(key)
 
     def store_cache(self, name: str, args: dict, result: str) -> None:
         """Cache *result* for *name*+*args* for the current turn."""
         import hashlib
         import json as _j
-        key = f"{name}:{hashlib.md5(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
+        key = f"{name}:{hashlib.sha256(_j.dumps(args, sort_keys=True, default=str).encode()).hexdigest()}"
         self._tool_result_cache[key] = result
 
     async def run_think(
@@ -503,7 +503,7 @@ class ToolManager:
         )
 
         # ── Seen-URL dedup via memory service (TTL 3600 s) ───────────────────
-        _qhash        = _hl.md5(query.lower().encode()).hexdigest()[:16]
+        _qhash        = _hl.sha256(query.lower().encode()).hexdigest()[:16]
         _mem_key      = f"imgsr:{_qhash}"
         _seen_urls:   set[str]  = set()
         _seen_hashes: list[str] = []   # intra-call phash dedup

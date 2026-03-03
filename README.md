@@ -1,5 +1,11 @@
 # AIChat
 
+[![Regression CI/CD](https://github.com/jalsarraf0/aichat/actions/workflows/ci.yml/badge.svg)](https://github.com/jalsarraf0/aichat/actions/workflows/ci.yml)
+[![Security CI](https://github.com/jalsarraf0/aichat/actions/workflows/security.yml/badge.svg)](https://github.com/jalsarraf0/aichat/actions/workflows/security.yml)
+[![Release](https://github.com/jalsarraf0/aichat/actions/workflows/release.yml/badge.svg)](https://github.com/jalsarraf0/aichat/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/jalsarraf0/aichat?display_name=tag)](https://github.com/jalsarraf0/aichat/releases)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational)
+
 A local-first AI chat TUI (Terminal User Interface) built with [Textual](https://github.com/Textualize/textual). Connects to a local LLM via [LM Studio](https://lmstudio.ai) with a full suite of Docker-backed tools: real Chromium browsing (Playwright), image search and generation pipeline, GPU-accelerated image processing, shell execution, RSS/research, persistent memory, parallel thinking, conversation history, and a WhatsApp bot — all accessible through the Model Context Protocol (MCP).
 
 ---
