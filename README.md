@@ -892,5 +892,5 @@ The author is not responsible for how users use this program. Use at your own ri
 - Commands validated:
   - `pytest -q -m "not smoke" tests/test_tool_args.py tests/test_tool_scheduler.py tests/test_toolkit.py`
   - `pytest -vv tests/test_compaction.py::TestCompactionTUI::test_compact_command_on_enables`
-- CI/CD status: latest `Regression CI/CD` and `Release` workflows completed successfully on `main`/tag runs.
+- CI/CD status: all tests passed on `main` (`Regression CI/CD` run `22642910504`, `Security CI` run `22642910518`).
 - Security hygiene: PASS (no hardcoded secrets or private keys detected in tracked files).
