@@ -1,9 +1,6 @@
 name: Regression CI (Batched)
 
 on:
-  pull_request:
-  push:
-    branches: ["main", "dev"]
   workflow_dispatch:
 
 concurrency:
