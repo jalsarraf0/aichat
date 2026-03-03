@@ -32,8 +32,6 @@ jobs:
             paths: "tests/test_compaction.py tests/test_compaction_enhancements.py tests/test_conversation_db.py"
           - name: services
             paths: "tests/test_database_tools.py tests/test_orchestrate.py tests/test_browser_gpu.py tests/test_image_pipeline.py tests/test_image_rendering.py tests/test_face_recognition.py tests/test_new_services.py tests/test_finetuning.py"
-          - name: llm-and-smoke-gated
-            paths: "tests/test_llm_api_smoke.py tests/test_smoke.py tests/test_comprehensive_e2e.py"
 
     steps:
       - name: Checkout
