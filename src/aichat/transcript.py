@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -8,10 +10,31 @@ import shutil
 from .state import Message
 
 
+def _default_transcript_path() -> Path:
+    configured = os.environ.get("AICHAT_TRANSCRIPT_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".local" / "share" / "aichat" / "transcript.jsonl"
+
+
+def _ensure_writable_transcript_path(path: Path) -> Path:
+    candidate = path.expanduser()
+    try:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.touch(exist_ok=True)
+        with candidate.open("a", encoding="utf-8"):
+            pass
+        return candidate
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "aichat" / "transcript.jsonl"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        fallback.touch(exist_ok=True)
+        return fallback
+
+
 class TranscriptStore:
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or (Path.home() / ".local" / "share" / "aichat" / "transcript.jsonl")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = _ensure_writable_transcript_path(path or _default_transcript_path())
 
     def append(self, message: Message) -> None:
         row = {
