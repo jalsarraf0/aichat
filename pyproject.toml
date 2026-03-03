@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aichat"
-version = "0.1.1"
+version = "0.1.2"
 description = "Codex-like Textual TUI with research and operator tooling"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,8 @@ aichat = "aichat.cli:main"
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
+  "Pillow>=12.1.1",
+  "fastapi>=0.116.0",
 ]
 
 [tool.setuptools.packages.find]
