@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.12"]
     timeout-minutes: 45
 
@@ -49,14 +49,8 @@ jobs:
       - name: Build standalone binary
         run: pyinstaller --onefile --name aichat src/aichat/__main__.py
 
-      - name: Bundle artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Bundle artifact
         run: tar -czf "aichat-${RELEASE_TAG}-${{ runner.os }}-x64.tar.gz" -C dist aichat
-
-      - name: Bundle artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist/aichat.exe -DestinationPath "aichat-$env:RELEASE_TAG-${{ runner.os }}-x64.zip"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -64,7 +58,6 @@ jobs:
           name: binary-${{ runner.os }}
           path: |
             *.tar.gz
-            *.zip
 
   build-python-dist:
     name: Build Python Dist
@@ -107,7 +100,7 @@ jobs:
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
           ## Release Assets
-          - Standalone binaries for Linux, macOS, and Windows
+          - Standalone binaries for Linux and macOS
           - Python source distribution (`sdist`)
           - Python wheel (`.whl`)
           EOF
