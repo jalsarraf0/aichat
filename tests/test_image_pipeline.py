@@ -1945,8 +1945,9 @@ class TestImageRecognition:
         base = Image.new("RGB", (200, 200), (100, 150, 200))
         # Add a noise pattern so there's actual gradient information
         import random
-        pixels = [(random.randint(90, 110), random.randint(140, 160),
-                   random.randint(190, 210)) for _ in range(200 * 200)]
+        rng = random.Random(0)
+        pixels = [(rng.randint(90, 110), rng.randint(140, 160),
+                   rng.randint(190, 210)) for _ in range(200 * 200)]
         base.putdata(pixels)
         tweaked = ImageEnhance.Brightness(base).enhance(1.02)  # 2% brighter
         h1 = _dhash(base)
