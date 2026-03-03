@@ -88,7 +88,8 @@ def _dhash(img: object) -> str:
     """64-bit difference hash of a PIL Image → 16-char hex string (pure PIL, no extra packages)."""
     try:
         gray = img.convert("L").resize((9, 8), 3)   # 3 = BICUBIC (int; avoids Resampling enum)
-        px   = list(gray.getdata())
+        # Pillow deprecates Image.getdata(); tobytes() is stable and faster here.
+        px = gray.tobytes()
         bits = sum(
             1 << i for i in range(64)
             if px[i % 8 + (i // 8) * 9] > px[i % 8 + (i // 8) * 9 + 1]
