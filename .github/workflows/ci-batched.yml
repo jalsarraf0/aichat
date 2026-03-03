@@ -16,7 +16,7 @@ permissions:
 jobs:
   regression:
     name: Regression (${{ matrix.batch.name }})
-    runs-on: [self-hosted, linux, x64, docker]
+    runs-on: [self-hosted, Linux, X64, docker]
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
