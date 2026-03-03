@@ -20,7 +20,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      AICHAT_TRANSCRIPT_PATH: ${{ runner.temp }}/aichat/transcript-${{ matrix.batch.name }}.jsonl
+      AICHAT_TRANSCRIPT_PATH: ${{ github.workspace }}/.tmp/transcript-${{ matrix.batch.name }}.jsonl
     strategy:
       fail-fast: false
       max-parallel: 4
