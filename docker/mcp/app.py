@@ -2134,14 +2134,14 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "pdf_read",
         "description": (
-            "Read a PDF from the workspace with high accuracy. "
-            "Modes: text (embedded text only), ocr (force OCR), auto (text + OCR fallback). "
+            "Read a PDF or image from the workspace with high accuracy. "
+            "Modes: text (embedded text for PDFs), ocr (force OCR), auto (text + OCR fallback). "
             "Returns per-page text and combined text."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace path to the PDF (required)."},
+                "path": {"type": "string", "description": "Workspace path to the source PDF or image (required)."},
                 "mode": {
                     "type": "string",
                     "enum": ["text", "ocr", "auto"],
@@ -2153,7 +2153,7 @@ _TOOLS: list[dict[str, Any]] = [
                     "description": "Optional 1-based pages to read (omit for all pages).",
                 },
                 "lang": {"type": "string", "description": "OCR language for ocr/auto mode (default 'eng')."},
-                "password": {"type": "string", "description": "Password for encrypted PDFs."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs (PDF inputs only)."},
             },
             "required": ["path"],
         },
@@ -2161,18 +2161,19 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "pdf_edit",
         "description": (
-            "Precisely edit a PDF and save output to the workspace. "
+            "Precisely edit a PDF or image and save output to the workspace. "
             "Supports deterministic text replacement (redact + overlay), redaction, annotation, "
-            "text insertion, page rotation/reorder/delete. "
+            "text insertion, and rotation. "
+            "Page reorder/delete are PDF-only operations. "
             "Pass one or more operations in sequence."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace path to source PDF."},
+                "path": {"type": "string", "description": "Workspace path to source PDF or image."},
                 "output_path": {"type": "string", "description": "Optional output path in workspace."},
                 "verify": {"type": "boolean", "description": "Run post-edit verification checks (default true)."},
-                "password": {"type": "string", "description": "Password for encrypted PDFs."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs (PDF inputs only)."},
                 "operations": {
                     "type": "array",
                     "description": (
@@ -7003,8 +7004,10 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     if len(text_pr) > 14000:
                         text_pr = text_pr[:14000] + "\n\n...[truncated]..."
                         truncated = True
+                    input_kind = str(d_pr.get("input_kind", "pdf")).strip().lower() or "pdf"
+                    label = "Image" if input_kind == "image" else "PDF"
                     return _text(
-                        f"PDF read: {d_pr.get('page_count', 0)} page(s) | "
+                        f"{label} read: {d_pr.get('page_count', 0)} page(s) | "
                         f"mode={d_pr.get('mode', mode_pr)} | ocr_used={d_pr.get('ocr_used', False)}\n"
                         f"File: {d_pr.get('host_path', '')}\n"
                         f"{'Output truncated for MCP transport size limits.' if truncated else ''}\n\n"
@@ -7042,8 +7045,10 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     verify_obj = d_pe.get("verification", {})
                     verify_ok = bool(verify_obj.get("ok", False))
                     ops_applied = d_pe.get("operations_applied", [])
+                    input_kind = str(d_pe.get("input_kind", "pdf")).strip().lower() or "pdf"
+                    label = "Image" if input_kind == "image" else "PDF"
                     return _text(
-                        f"PDF edited successfully.\n"
+                        f"{label} edited successfully.\n"
                         f"Output: {d_pe.get('host_path', '')}\n"
                         f"Verification: {'PASS' if verify_ok else 'WARN/FAIL'}\n"
                         f"Operations applied: {json.dumps(ops_applied, ensure_ascii=False)}\n"

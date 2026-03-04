@@ -302,6 +302,14 @@ class TestPdfSchema:
         req = _tool("pdf_fill_form")["inputSchema"]["required"]
         assert "path" in req and "fields" in req
 
+    def test_pdf_read_mentions_image_support(self):
+        desc = str(_tool("pdf_read").get("description", "")).lower()
+        assert "image" in desc
+
+    def test_pdf_edit_mentions_image_support(self):
+        desc = str(_tool("pdf_edit").get("description", "")).lower()
+        assert "image" in desc
+
 
 @skip_load
 class TestPlannerSchema:
@@ -551,6 +559,22 @@ class TestPdfE2E:
         _write_simple_pdf(self._WS / name, text=text)
         return f"/workspace/{name}"
 
+    def _img_name(self, prefix: str, ext: str = ".png") -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:8]}{ext}"
+
+    def _mk_image(self, text: str, prefix: str, ext: str = ".png") -> str:
+        from PIL import Image, ImageDraw
+
+        name = self._img_name(prefix, ext=ext)
+        out = self._WS / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (960, 240), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        # Render repeated tokens to improve OCR confidence in CI.
+        draw.text((40, 90), f"{text}   {text}", fill=(0, 0, 0))
+        img.save(out)
+        return f"/workspace/{name}"
+
     def test_pdf_read(self):
         p = self._mk_pdf("Hello PDF Read", "pdfread")
         text = _mcp_text("pdf_read", {"path": p, "mode": "text"}, timeout=60)
@@ -594,6 +618,40 @@ class TestPdfE2E:
         p = self._mk_pdf("No form fields here", "pdfform")
         text = _mcp_text("pdf_fill_form", {"path": p, "fields": {}}, timeout=60)
         assert "fields" in text.lower() or "required" in text.lower() or "error" in text.lower()
+
+    def test_pdf_read_image_input(self):
+        p = self._mk_image("Image Read Token", "imgread", ext=".png")
+        text = _mcp_text("pdf_read", {"path": p, "mode": "ocr"}, timeout=90)
+        assert "image read:" in text.lower() or "input_kind" in text.lower()
+
+    def test_pdf_edit_image_insert_text(self):
+        src = self._mk_image("Canvas", "imgedit_src", ext=".jpeg")
+        out = f"/workspace/{self._img_name('imgedit_out', ext='.jpeg')}"
+        edit_text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "output_path": out,
+                "operations": [
+                    {"op": "insert_text", "text": "WorldClass", "rect": [40, 40, 560, 160]},
+                ],
+                "verify": True,
+            },
+            timeout=120,
+        )
+        assert "image edited successfully" in edit_text.lower() or "output:" in edit_text.lower()
+
+    def test_pdf_edit_image_rejects_pdf_only_operation(self):
+        src = self._mk_image("PDF-only-op", "imgedit_pdf_only", ext=".png")
+        text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "operations": [{"op": "reorder_pages", "order": [1]}],
+            },
+            timeout=90,
+        )
+        assert "pdf-only" in text.lower() or "unsupported" in text.lower() or "failed" in text.lower()
 
 
 @skip_mcp
