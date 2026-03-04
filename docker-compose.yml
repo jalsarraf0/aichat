@@ -98,6 +98,7 @@ services:
       OCR_URL:     http://aichat-ocr:8100
       DOCS_URL:    http://aichat-docs:8101
       PLANNER_URL: http://aichat-planner:8102
+      PDF_URL:     http://aichat-pdf:8103
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -113,6 +114,7 @@ services:
       - aichat-ocr
       - aichat-docs
       - aichat-planner
+      - aichat-pdf
     ports:
       - "8096:8096"
     # ── GPU passthrough ─────────────────────────────────────────────────────
@@ -321,6 +323,36 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8101/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # PDF service: precise read/edit/form/merge/split operations.
+  aichat-pdf:
+    build: ./docker/pdf
+    container_name: aichat-pdf
+    environment:
+      DATABASE_URL: http://aichat-database:8091
+      OCR_URL: http://aichat-ocr:8100
+      WORKSPACE: /workspace
+      INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
+    depends_on:
+      - aichat-database
+      - aichat-ocr
+    ports:
+      - "8103:8103"
+    volumes:
+      - /docker/human_browser/workspace:/workspace:rw
+    devices:
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
+    group_add:
+      - "${INTEL_VIDEO_GID:-39}"
+      - "${INTEL_RENDER_GID:-105}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8103/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
