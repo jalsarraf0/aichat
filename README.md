@@ -251,7 +251,7 @@ LM_STUDIO_URL=http://localhost:1234 aichat
 
 ---
 
-## MCP Tool Inventory (49 tools)
+## MCP Tool Inventory (70+ tools)
 
 All tools are exposed via both the MCP HTTP server (`aichat-mcp` at port 8096) and the stdio MCP server (`aichat mcp`).
 
@@ -579,8 +579,9 @@ All services start automatically with `docker compose up -d --build`.
 | `aichat-researchbox` | 8092 | RSS/feed discovery service |
 | `aichat-memory` | 8094 | Persistent key-value + embedding store (SQLite) |
 | `aichat-toolkit` | 8095 | Dynamic custom tool execution sandbox (GPU-enabled) |
-| `aichat-mcp` | 8096 | MCP HTTP/SSE server — 49 tools |
+| `aichat-mcp` | 8096 | MCP HTTP/SSE server — 70+ tools (including PDF/image read/edit + PDF form/merge/split) |
 | `aichat-whatsapp` | 8097 | WhatsApp bot (Baileys + LM Studio + full MCP tool access) |
+| `aichat-pdf` | 8103 | Precision document service (PDF + common image read/edit; PDF form/merge/split) |
 | `human_browser` | 7081 (API), 36411 (noVNC) | Chromium + Playwright — all web/screenshot ops |
 
 ```bash
@@ -594,7 +595,7 @@ docker logs human_browser
 
 ## MCP Server (LM Studio / Claude Desktop)
 
-`aichat-mcp` exposes all 49 tools over the network via the Model Context Protocol. It supports both SSE (legacy 2024-11-05) and Streamable HTTP (2025-03-26) transports. Tool calls are **non-blocking** — the server returns immediately and delivers results asynchronously, preventing LM Studio timeouts on slow tools.
+`aichat-mcp` exposes 70+ tools over the network via the Model Context Protocol, including a precision PDF/image suite (`pdf_read`, `pdf_edit`, `pdf_fill_form`, `pdf_merge`, `pdf_split`). It supports both SSE (legacy 2024-11-05) and Streamable HTTP (2025-03-26) transports. Tool calls are **non-blocking** — the server returns immediately and delivers results asynchronously, preventing LM Studio timeouts on slow tools.
 
 **LM Studio `mcp_servers.json` entry (Streamable HTTP, recommended):**
 ```json
@@ -621,7 +622,7 @@ docker logs human_browser
 **Health check:**
 ```bash
 curl http://localhost:8096/health
-# {"ok": true, "sessions": 0, "tools": 49, "transports": [...]}
+# {"ok": true, "sessions": 0, "tools": <70+>, "transports": [...]}
 ```
 
 ---

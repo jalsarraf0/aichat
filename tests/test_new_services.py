@@ -6,12 +6,14 @@ TestVectorSchema        — schema validation (no Docker)
 TestVideoSchema         — schema validation (no Docker)
 TestOcrSchema           — schema validation (no Docker)
 TestDocsSchema          — schema validation (no Docker)
+TestPdfSchema           — schema validation (no Docker)
 TestPlannerSchema       — schema validation (no Docker)
 TestGraphE2E            — live MCP graph tools
 TestVectorE2E           — live MCP vector tools (requires LM Studio for embeddings)
 TestVideoE2E            — live MCP video tools
 TestOcrE2E              — live MCP ocr tools
 TestDocsE2E             — live MCP docs tools
+TestPdfE2E              — live MCP pdf tools
 TestPlannerE2E          — live MCP planner tools (full lifecycle)
 """
 from __future__ import annotations
@@ -61,6 +63,7 @@ VECTOR_URL  = "http://localhost:6333"
 VIDEO_URL   = "http://localhost:8099"
 OCR_URL     = "http://localhost:8100"
 DOCS_URL    = "http://localhost:8101"
+PDF_URL     = "http://localhost:8103"
 PLANNER_URL = "http://localhost:8102"
 LM_URL      = os.environ.get("LM_STUDIO_URL", os.environ.get("LM_URL", "http://192.168.50.2:1234"))
 
@@ -78,6 +81,7 @@ _VECTOR_UP  = _up(VECTOR_URL)  # Qdrant health endpoint
 _VIDEO_UP   = _up(VIDEO_URL)
 _OCR_UP     = _up(OCR_URL)
 _DOCS_UP    = _up(DOCS_URL)
+_PDF_UP     = _up(PDF_URL)
 _PLANNER_UP = _up(PLANNER_URL)
 _LM_UP      = _up(LM_URL, "/v1/models")
 
@@ -87,6 +91,7 @@ skip_vector  = pytest.mark.skipif(not _VECTOR_UP,  reason="aichat-vector (Qdrant
 skip_video   = pytest.mark.skipif(not _VIDEO_UP,   reason="aichat-video not running")
 skip_ocr     = pytest.mark.skipif(not _OCR_UP,     reason="aichat-ocr not running")
 skip_docs    = pytest.mark.skipif(not _DOCS_UP,    reason="aichat-docs not running")
+skip_pdf     = pytest.mark.skipif(not _PDF_UP,     reason="aichat-pdf not running")
 skip_planner = pytest.mark.skipif(not _PLANNER_UP, reason="aichat-planner not running")
 skip_lm      = pytest.mark.skipif(not _LM_UP,      reason="LM Studio not running")
 
@@ -120,6 +125,47 @@ def _tool(name: str) -> dict:
         if t["name"] == name:
             return t
     return {}
+
+
+def _write_simple_pdf(path: Path, text: str = "Hello PDF") -> None:
+    """Write a tiny valid one-page PDF with embedded text, no external deps."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_text = (text or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    content = f"BT /F1 18 Tf 50 100 Td ({safe_text}) Tj ET".encode("ascii", errors="replace")
+    obj1 = b"<< /Type /Catalog /Pages 2 0 R >>"
+    obj2 = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+    obj3 = (
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+    )
+    obj4 = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content)
+    obj5 = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    objects = [obj1, obj2, obj3, obj4, obj5]
+
+    parts = [b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"]
+    offsets = [0]
+    cur = len(parts[0])
+    for i, obj in enumerate(objects, start=1):
+        blob = f"{i} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
+        offsets.append(cur)
+        parts.append(blob)
+        cur += len(blob)
+
+    xref_pos = cur
+    xref = [f"xref\n0 {len(objects) + 1}\n".encode("ascii"), b"0000000000 65535 f \n"]
+    for off in offsets[1:]:
+        xref.append(f"{off:010d} 00000 n \n".encode("ascii"))
+    trailer = (
+        b"trailer\n"
+        + f"<< /Size {len(objects) + 1} /Root 1 0 R >>\n".encode("ascii")
+        + b"startxref\n"
+        + f"{xref_pos}\n".encode("ascii")
+        + b"%%EOF\n"
+    )
+    parts.extend(xref)
+    parts.append(trailer)
+    path.write_bytes(b"".join(parts))
 
 
 # ===========================================================================
@@ -225,6 +271,44 @@ class TestDocsSchema:
     def test_docs_ingest_has_path_property(self):
         props = _tool("docs_ingest")["inputSchema"]["properties"]
         assert "path" in props
+
+
+@skip_load
+class TestPdfSchema:
+    def test_pdf_read_in_tools(self):
+        assert "pdf_read" in _tool_names()
+
+    def test_pdf_edit_in_tools(self):
+        assert "pdf_edit" in _tool_names()
+
+    def test_pdf_fill_form_in_tools(self):
+        assert "pdf_fill_form" in _tool_names()
+
+    def test_pdf_merge_in_tools(self):
+        assert "pdf_merge" in _tool_names()
+
+    def test_pdf_split_in_tools(self):
+        assert "pdf_split" in _tool_names()
+
+    def test_pdf_read_required_path(self):
+        req = _tool("pdf_read")["inputSchema"]["required"]
+        assert "path" in req
+
+    def test_pdf_edit_required_fields(self):
+        req = _tool("pdf_edit")["inputSchema"]["required"]
+        assert "path" in req and "operations" in req
+
+    def test_pdf_fill_form_required_fields(self):
+        req = _tool("pdf_fill_form")["inputSchema"]["required"]
+        assert "path" in req and "fields" in req
+
+    def test_pdf_read_mentions_image_support(self):
+        desc = str(_tool("pdf_read").get("description", "")).lower()
+        assert "image" in desc
+
+    def test_pdf_edit_mentions_image_support(self):
+        desc = str(_tool("pdf_edit").get("description", "")).lower()
+        assert "image" in desc
 
 
 @skip_load
@@ -458,6 +542,116 @@ class TestDocsE2E:
         assert r.status_code == 200
         fmts = r.json().get("formats", [])
         assert "pdf" in fmts and "docx" in fmts
+
+
+@skip_mcp
+@skip_pdf
+class TestPdfE2E:
+    """PDF read/edit/merge/split through MCP."""
+
+    _WS = Path("/docker/human_browser/workspace")
+
+    def _pdf_name(self, prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:8]}.pdf"
+
+    def _mk_pdf(self, text: str, prefix: str) -> str:
+        name = self._pdf_name(prefix)
+        _write_simple_pdf(self._WS / name, text=text)
+        return f"/workspace/{name}"
+
+    def _img_name(self, prefix: str, ext: str = ".png") -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:8]}{ext}"
+
+    def _mk_image(self, text: str, prefix: str, ext: str = ".png") -> str:
+        from PIL import Image, ImageDraw
+
+        name = self._img_name(prefix, ext=ext)
+        out = self._WS / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (960, 240), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        # Render repeated tokens to improve OCR confidence in CI.
+        draw.text((40, 90), f"{text}   {text}", fill=(0, 0, 0))
+        img.save(out)
+        return f"/workspace/{name}"
+
+    def test_pdf_read(self):
+        p = self._mk_pdf("Hello PDF Read", "pdfread")
+        text = _mcp_text("pdf_read", {"path": p, "mode": "text"}, timeout=60)
+        assert "hello pdf read" in text.lower() or "pdf read" in text.lower()
+
+    def test_pdf_edit_replace_text(self):
+        src = self._mk_pdf("Alpha Token", "pdfedit")
+        out = f"/workspace/{self._pdf_name('pdfedit_out')}"
+        edit_text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "output_path": out,
+                "operations": [
+                    {"op": "replace_text", "find": "Alpha", "replace": "Omega"},
+                ],
+                "verify": True,
+            },
+            timeout=90,
+        )
+        assert "pdf edited successfully" in edit_text.lower() or "output:" in edit_text.lower()
+
+        read_text = _mcp_text("pdf_read", {"path": out, "mode": "text"}, timeout=60)
+        assert "omega" in read_text.lower()
+
+    def test_pdf_merge_and_split(self):
+        p1 = self._mk_pdf("Merge One", "pdfmerge")
+        p2 = self._mk_pdf("Merge Two", "pdfmerge")
+        merged = f"/workspace/{self._pdf_name('pdfmerged')}"
+        merge_text = _mcp_text("pdf_merge", {"paths": [p1, p2], "output_path": merged}, timeout=120)
+        assert "merged" in merge_text.lower() and "output:" in merge_text.lower()
+
+        split_text = _mcp_text(
+            "pdf_split",
+            {"path": merged, "ranges": [[1, 1], [2, 2]], "prefix": f"split_{uuid.uuid4().hex[:6]}"},
+            timeout=120,
+        )
+        assert "split into" in split_text.lower()
+
+    def test_pdf_fill_form_requires_fields(self):
+        p = self._mk_pdf("No form fields here", "pdfform")
+        text = _mcp_text("pdf_fill_form", {"path": p, "fields": {}}, timeout=60)
+        assert "fields" in text.lower() or "required" in text.lower() or "error" in text.lower()
+
+    def test_pdf_read_image_input(self):
+        p = self._mk_image("Image Read Token", "imgread", ext=".png")
+        text = _mcp_text("pdf_read", {"path": p, "mode": "ocr"}, timeout=90)
+        assert "image read:" in text.lower() or "input_kind" in text.lower()
+
+    def test_pdf_edit_image_insert_text(self):
+        src = self._mk_image("Canvas", "imgedit_src", ext=".jpeg")
+        out = f"/workspace/{self._img_name('imgedit_out', ext='.jpeg')}"
+        edit_text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "output_path": out,
+                "operations": [
+                    {"op": "insert_text", "text": "WorldClass", "rect": [40, 40, 560, 160]},
+                ],
+                "verify": True,
+            },
+            timeout=120,
+        )
+        assert "image edited successfully" in edit_text.lower() or "output:" in edit_text.lower()
+
+    def test_pdf_edit_image_rejects_pdf_only_operation(self):
+        src = self._mk_image("PDF-only-op", "imgedit_pdf_only", ext=".png")
+        text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "operations": [{"op": "reorder_pages", "order": [1]}],
+            },
+            timeout=90,
+        )
+        assert "pdf-only" in text.lower() or "unsupported" in text.lower() or "failed" in text.lower()
 
 
 @skip_mcp

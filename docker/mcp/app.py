@@ -493,6 +493,7 @@ VIDEO_URL     = os.environ.get("VIDEO_URL",   "http://aichat-video:8099")
 OCR_URL       = os.environ.get("OCR_URL",     "http://aichat-ocr:8100")
 DOCS_URL      = os.environ.get("DOCS_URL",    "http://aichat-docs:8101")
 PLANNER_URL   = os.environ.get("PLANNER_URL", "http://aichat-planner:8102")
+PDF_URL       = os.environ.get("PDF_URL", "http://aichat-pdf:8103")
 # human_browser browser-server API — reachable after install connects it to this network.
 BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
 # Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
@@ -2127,6 +2128,123 @@ _TOOLS: list[dict[str, Any]] = [
                 "path":     {"type": "string", "description": "Workspace file path."},
                 "filename": {"type": "string", "description": "Filename with extension."},
             },
+        },
+    },
+    # ── PDF Editing ─────────────────────────────────────────────────────────
+    {
+        "name": "pdf_read",
+        "description": (
+            "Read a PDF or image from the workspace with high accuracy. "
+            "Modes: text (embedded text for PDFs), ocr (force OCR), auto (text + OCR fallback). "
+            "Returns per-page text and combined text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace path to the source PDF or image (required)."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["text", "ocr", "auto"],
+                    "description": "Extraction mode (default auto).",
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional 1-based pages to read (omit for all pages).",
+                },
+                "lang": {"type": "string", "description": "OCR language for ocr/auto mode (default 'eng')."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs (PDF inputs only)."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "pdf_edit",
+        "description": (
+            "Precisely edit a PDF or image and save output to the workspace. "
+            "Supports deterministic text replacement (redact + overlay), redaction, annotation, "
+            "text insertion, and rotation. "
+            "Page reorder/delete are PDF-only operations. "
+            "Pass one or more operations in sequence."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace path to source PDF or image."},
+                "output_path": {"type": "string", "description": "Optional output path in workspace."},
+                "verify": {"type": "boolean", "description": "Run post-edit verification checks (default true)."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs (PDF inputs only)."},
+                "operations": {
+                    "type": "array",
+                    "description": (
+                        "Ordered edit operations. Each object must include 'op'. "
+                        "Ops: replace_text, redact_text, annotate, insert_text, rotate_page, reorder_pages, delete_pages."
+                    ),
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["path", "operations"],
+        },
+    },
+    {
+        "name": "pdf_fill_form",
+        "description": (
+            "Fill AcroForm fields in a PDF by name and save the result. "
+            "Optionally flatten filled widgets into static page content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace path to source PDF."},
+                "fields": {"type": "object", "description": "Map of field_name -> value."},
+                "flatten": {"type": "boolean", "description": "If true, flatten filled widgets (default false)."},
+                "output_path": {"type": "string", "description": "Optional output path in workspace."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs."},
+            },
+            "required": ["path", "fields"],
+        },
+    },
+    {
+        "name": "pdf_merge",
+        "description": (
+            "Merge multiple PDFs from the workspace into one output PDF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of PDF paths to merge (2+).",
+                },
+                "output_path": {"type": "string", "description": "Optional output path in workspace."},
+                "passwords": {
+                    "type": "object",
+                    "description": "Optional password map keyed by input path.",
+                },
+            },
+            "required": ["paths"],
+        },
+    },
+    {
+        "name": "pdf_split",
+        "description": (
+            "Split a PDF into multiple files by page ranges."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace path to source PDF."},
+                "ranges": {
+                    "type": "array",
+                    "description": "Page ranges as '1-3', [1,3], or {start,end}.",
+                    "items": {},
+                },
+                "prefix": {"type": "string", "description": "Optional output filename prefix."},
+                "output_dir": {"type": "string", "description": "Optional output directory in workspace."},
+                "password": {"type": "string", "description": "Password for encrypted PDFs."},
+            },
+            "required": ["path", "ranges"],
         },
     },
     # ── Task Planner ─────────────────────────────────────────────────────────
@@ -6789,6 +6907,258 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         return _text("No tables found in document.")
                     import json as _jdi
                     return _text(_jdi.dumps(tables_di, indent=2))
+
+            # ----------------------------------------------------------------
+            # PDF tools
+            # ----------------------------------------------------------------
+            if name in ("pdf_read", "pdf_edit", "pdf_fill_form", "pdf_merge", "pdf_split"):
+                def _workspace_file_for_pdf(raw_path: str) -> tuple[str | None, str | None]:
+                    rp = str(raw_path or "").strip()
+                    if not rp:
+                        return None, None
+
+                    rel = ""
+                    if rp.startswith("/workspace/"):
+                        rel = rp[len("/workspace/") :].lstrip("/")
+                    elif rp.startswith("/docker/human_browser/workspace/"):
+                        rel = rp[len("/docker/human_browser/workspace/") :].lstrip("/")
+                    elif rp.startswith(BROWSER_WORKSPACE + "/"):
+                        rel = rp[len(BROWSER_WORKSPACE) + 1 :].lstrip("/")
+                    elif os.path.isabs(rp):
+                        try:
+                            rel_guess = os.path.relpath(rp, BROWSER_WORKSPACE)
+                        except Exception:
+                            return None, None
+                        if rel_guess.startswith(".."):
+                            return None, None
+                        rel = rel_guess.replace("\\", "/").lstrip("/")
+                    else:
+                        rel = rp.lstrip("/")
+
+                    local = os.path.normpath(os.path.join(BROWSER_WORKSPACE, rel))
+                    ws_root = os.path.normpath(BROWSER_WORKSPACE)
+                    if not (local == ws_root or local.startswith(ws_root + os.sep)):
+                        return None, None
+                    if os.path.isfile(local):
+                        return local, f"/workspace/{rel}".replace("//", "/")
+
+                    # Fallback to basename for callers that pass odd prefixes.
+                    base = os.path.basename(rel)
+                    if not base:
+                        return None, None
+                    alt_local = os.path.join(BROWSER_WORKSPACE, base)
+                    if os.path.isfile(alt_local):
+                        return alt_local, f"/workspace/{base}"
+                    return None, None
+
+                def _workspace_target_for_pdf(raw_path: str) -> str:
+                    rp = str(raw_path or "").strip()
+                    if not rp:
+                        return ""
+                    if rp.startswith("/workspace/"):
+                        return rp
+                    if rp.startswith("/docker/human_browser/workspace/"):
+                        return f"/workspace/{rp[len('/docker/human_browser/workspace/'):]}"
+                    if rp.startswith(BROWSER_WORKSPACE + "/"):
+                        return f"/workspace/{rp[len(BROWSER_WORKSPACE) + 1:]}"
+                    if os.path.isabs(rp):
+                        try:
+                            rel_guess = os.path.relpath(rp, BROWSER_WORKSPACE)
+                        except Exception:
+                            return ""
+                        if rel_guess.startswith(".."):
+                            return ""
+                        return f"/workspace/{rel_guess}".replace("\\", "/")
+                    return f"/workspace/{rp.lstrip('/')}"
+
+                if name == "pdf_read":
+                    path_pr = str(args.get("path", "")).strip()
+                    mode_pr = str(args.get("mode", "auto")).strip() or "auto"
+                    pages_pr = list(args.get("pages", []))
+                    lang_pr = str(args.get("lang", "eng")).strip() or "eng"
+                    password_pr = str(args.get("password", "")).strip()
+                    if not path_pr:
+                        return _text("pdf_read: 'path' is required")
+                    local_pr, ws_path_pr = _workspace_file_for_pdf(path_pr)
+                    if not local_pr or not ws_path_pr:
+                        return _text(f"pdf_read: file not found in workspace — {path_pr}")
+
+                    body_pr: dict[str, Any] = {
+                        "path": ws_path_pr,
+                        "mode": mode_pr,
+                        "lang": lang_pr,
+                    }
+                    if pages_pr:
+                        body_pr["pages"] = pages_pr
+                    if password_pr:
+                        body_pr["password"] = password_pr
+                    try:
+                        r_pr = await c.post(f"{PDF_URL}/read", json=body_pr, timeout=240)
+                        r_pr.raise_for_status()
+                        d_pr = r_pr.json()
+                    except Exception as exc:
+                        return _text(f"pdf_read: failed — {exc}")
+
+                    text_pr = str(d_pr.get("text", ""))
+                    truncated = False
+                    if len(text_pr) > 14000:
+                        text_pr = text_pr[:14000] + "\n\n...[truncated]..."
+                        truncated = True
+                    input_kind = str(d_pr.get("input_kind", "pdf")).strip().lower() or "pdf"
+                    label = "Image" if input_kind == "image" else "PDF"
+                    return _text(
+                        f"{label} read: {d_pr.get('page_count', 0)} page(s) | "
+                        f"mode={d_pr.get('mode', mode_pr)} | ocr_used={d_pr.get('ocr_used', False)}\n"
+                        f"File: {d_pr.get('host_path', '')}\n"
+                        f"{'Output truncated for MCP transport size limits.' if truncated else ''}\n\n"
+                        f"{text_pr}"
+                    )
+
+                if name == "pdf_edit":
+                    path_pe = str(args.get("path", "")).strip()
+                    ops_pe = args.get("operations", [])
+                    out_pe = _workspace_target_for_pdf(str(args.get("output_path", "")).strip())
+                    verify_pe = bool(args.get("verify", True))
+                    password_pe = str(args.get("password", "")).strip()
+                    if not path_pe:
+                        return _text("pdf_edit: 'path' is required")
+                    if not isinstance(ops_pe, list) or not ops_pe:
+                        return _text("pdf_edit: 'operations' must be a non-empty list")
+                    local_pe, ws_path_pe = _workspace_file_for_pdf(path_pe)
+                    if not local_pe or not ws_path_pe:
+                        return _text(f"pdf_edit: file not found in workspace — {path_pe}")
+                    body_pe: dict[str, Any] = {
+                        "path": ws_path_pe,
+                        "operations": ops_pe,
+                        "verify": verify_pe,
+                    }
+                    if out_pe:
+                        body_pe["output_path"] = out_pe
+                    if password_pe:
+                        body_pe["password"] = password_pe
+                    try:
+                        r_pe = await c.post(f"{PDF_URL}/edit", json=body_pe, timeout=240)
+                        r_pe.raise_for_status()
+                        d_pe = r_pe.json()
+                    except Exception as exc:
+                        return _text(f"pdf_edit: failed — {exc}")
+                    verify_obj = d_pe.get("verification", {})
+                    verify_ok = bool(verify_obj.get("ok", False))
+                    ops_applied = d_pe.get("operations_applied", [])
+                    input_kind = str(d_pe.get("input_kind", "pdf")).strip().lower() or "pdf"
+                    label = "Image" if input_kind == "image" else "PDF"
+                    return _text(
+                        f"{label} edited successfully.\n"
+                        f"Output: {d_pe.get('host_path', '')}\n"
+                        f"Verification: {'PASS' if verify_ok else 'WARN/FAIL'}\n"
+                        f"Operations applied: {json.dumps(ops_applied, ensure_ascii=False)}\n"
+                        f"Checks: {json.dumps(verify_obj.get('checks', []), ensure_ascii=False)}"
+                    )
+
+                if name == "pdf_fill_form":
+                    path_pf = str(args.get("path", "")).strip()
+                    fields_pf = args.get("fields", {})
+                    flatten_pf = bool(args.get("flatten", False))
+                    out_pf = _workspace_target_for_pdf(str(args.get("output_path", "")).strip())
+                    password_pf = str(args.get("password", "")).strip()
+                    if not path_pf:
+                        return _text("pdf_fill_form: 'path' is required")
+                    if not isinstance(fields_pf, dict) or not fields_pf:
+                        return _text("pdf_fill_form: 'fields' must be a non-empty object")
+                    local_pf, ws_path_pf = _workspace_file_for_pdf(path_pf)
+                    if not local_pf or not ws_path_pf:
+                        return _text(f"pdf_fill_form: file not found in workspace — {path_pf}")
+                    body_pf: dict[str, Any] = {
+                        "path": ws_path_pf,
+                        "fields": fields_pf,
+                        "flatten": flatten_pf,
+                    }
+                    if out_pf:
+                        body_pf["output_path"] = out_pf
+                    if password_pf:
+                        body_pf["password"] = password_pf
+                    try:
+                        r_pf = await c.post(f"{PDF_URL}/fill-form", json=body_pf, timeout=180)
+                        r_pf.raise_for_status()
+                        d_pf = r_pf.json()
+                    except Exception as exc:
+                        return _text(f"pdf_fill_form: failed — {exc}")
+                    return _text(
+                        f"PDF form filled.\n"
+                        f"Output: {d_pf.get('host_path', '')}\n"
+                        f"Flattened: {d_pf.get('flattened', False)}\n"
+                        f"Fields written: {d_pf.get('fields_written', [])}\n"
+                        f"Warnings: {d_pf.get('warnings', [])}"
+                    )
+
+                if name == "pdf_merge":
+                    paths_pm = args.get("paths", [])
+                    out_pm = _workspace_target_for_pdf(str(args.get("output_path", "")).strip())
+                    passwords_pm = args.get("passwords", {})
+                    if not isinstance(paths_pm, list) or len(paths_pm) < 2:
+                        return _text("pdf_merge: 'paths' must be a list with at least 2 items")
+
+                    ws_paths_pm: list[str] = []
+                    for rp in paths_pm:
+                        local_pm, ws_path_pm = _workspace_file_for_pdf(str(rp))
+                        if not local_pm or not ws_path_pm:
+                            return _text(f"pdf_merge: file not found in workspace — {rp}")
+                        ws_paths_pm.append(ws_path_pm)
+
+                    body_pm: dict[str, Any] = {"paths": ws_paths_pm}
+                    if out_pm:
+                        body_pm["output_path"] = out_pm
+                    if isinstance(passwords_pm, dict) and passwords_pm:
+                        body_pm["passwords"] = passwords_pm
+                    try:
+                        r_pm = await c.post(f"{PDF_URL}/merge", json=body_pm, timeout=240)
+                        r_pm.raise_for_status()
+                        d_pm = r_pm.json()
+                    except Exception as exc:
+                        return _text(f"pdf_merge: failed — {exc}")
+                    return _text(
+                        f"Merged {len(d_pm.get('inputs', []))} PDF(s) into one file.\n"
+                        f"Output: {d_pm.get('host_path', '')}\n"
+                        f"Page count: {d_pm.get('page_count', '?')}"
+                    )
+
+                if name == "pdf_split":
+                    path_ps = str(args.get("path", "")).strip()
+                    ranges_ps = args.get("ranges", [])
+                    prefix_ps = str(args.get("prefix", "")).strip()
+                    output_dir_ps = _workspace_target_for_pdf(str(args.get("output_dir", "")).strip())
+                    password_ps = str(args.get("password", "")).strip()
+                    if not path_ps:
+                        return _text("pdf_split: 'path' is required")
+                    if not isinstance(ranges_ps, list) or not ranges_ps:
+                        return _text("pdf_split: 'ranges' must be a non-empty list")
+                    local_ps, ws_path_ps = _workspace_file_for_pdf(path_ps)
+                    if not local_ps or not ws_path_ps:
+                        return _text(f"pdf_split: file not found in workspace — {path_ps}")
+                    body_ps: dict[str, Any] = {
+                        "path": ws_path_ps,
+                        "ranges": ranges_ps,
+                    }
+                    if prefix_ps:
+                        body_ps["prefix"] = prefix_ps
+                    if output_dir_ps:
+                        body_ps["output_dir"] = output_dir_ps
+                    if password_ps:
+                        body_ps["password"] = password_ps
+                    try:
+                        r_ps = await c.post(f"{PDF_URL}/split", json=body_ps, timeout=240)
+                        r_ps.raise_for_status()
+                        d_ps = r_ps.json()
+                    except Exception as exc:
+                        return _text(f"pdf_split: failed — {exc}")
+
+                    outputs_ps = d_ps.get("outputs", [])
+                    if not outputs_ps:
+                        return _text("pdf_split: no files were produced")
+                    lines_ps = [f"Split into {len(outputs_ps)} PDF(s):"]
+                    for it in outputs_ps:
+                        lines_ps.append(f"  {it.get('host_path', '')}  pages={it.get('range', [])}")
+                    return _text("\\n".join(lines_ps))
 
             # ----------------------------------------------------------------
             # Planner tools

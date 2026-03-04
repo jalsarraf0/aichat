@@ -27,6 +27,7 @@ _SERVICES = {
     "aichat-toolkit":     "http://localhost:8095/health",
     "aichat-mcp":         "http://localhost:8096/health",
     "aichat-whatsapp":    "http://localhost:8097/health",
+    "aichat-pdf":         "http://localhost:8103/health",
 }
 
 # Timeout for each health-check request (seconds).
