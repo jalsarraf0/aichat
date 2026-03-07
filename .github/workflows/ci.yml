@@ -195,9 +195,6 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install test deps
-        run: pip install httpx pytest
-
       - name: Pre-clean any leftover containers
         run: |
           docker compose -f docker-compose.yml \
@@ -222,18 +219,26 @@ jobs:
           docker compose -f docker-compose.yml \
             up -d aichat-mcp
 
-      - name: Run smoke tests (inside Docker compose network)
+      - name: Install smoke test deps
+        run: pip install -q pytest httpx
+
+      - name: Run smoke tests (runner joined to compose network)
         run: |
-          docker run --rm \
-            --network "${COMPOSE_PROJECT_NAME}_default" \
-            -e DATA_URL=http://aichat-data:8091 \
-            -e VISION_URL=http://aichat-vision:8099 \
-            -e DOCS_URL=http://aichat-docs:8101 \
-            -e SANDBOX_URL=http://aichat-sandbox:8095 \
-            -e MCP_URL=http://aichat-mcp:8096 \
-            -v "${{ github.workspace }}:/workspace:ro" \
-            python:3.12-slim \
-            bash -c "pip install -q pytest httpx && pytest /workspace/tests/test_smoke.py -v -m smoke --tb=short"
+          # Join the runner container to the compose network so pytest on the
+          # runner can reach aichat-* services by their compose service names.
+          # `hostname` returns the runner container's short ID when running
+          # inside Docker with a shared socket (DinD socket-sharing pattern).
+          RUNNER_ID=$(hostname)
+          NETWORK="${COMPOSE_PROJECT_NAME}_default"
+          docker network connect "$NETWORK" "$RUNNER_ID" 2>/dev/null || true
+          trap "docker network disconnect '$NETWORK' '$RUNNER_ID' 2>/dev/null || true" EXIT
+
+          DATA_URL=http://aichat-data:8091 \
+          VISION_URL=http://aichat-vision:8099 \
+          DOCS_URL=http://aichat-docs:8101 \
+          SANDBOX_URL=http://aichat-sandbox:8095 \
+          MCP_URL=http://aichat-mcp:8096 \
+          pytest tests/test_smoke.py -v -m smoke --tb=short
 
       - name: Run architecture tests (no services needed)
         run: pytest tests/test_architecture.py -v --tb=short
