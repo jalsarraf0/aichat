@@ -37,3 +37,19 @@ where = ["src"]
 markers = [
   "smoke: smoke tests that require all Docker services to be running",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Ignore pre-existing style choices that are consistent across the codebase
+ignore = [
+    "E401",   # multiple imports on one line
+    "E402",   # module import not at top (intentional lazy imports throughout)
+    "E701",   # multiple statements on one line (colon) — style choice
+    "E702",   # multiple statements on one line (semicolon) — style choice
+    "E741",   # ambiguous variable name — pre-existing
+    "F401",   # unused import (many are conditional/type-checking imports)
+    "F811",   # redefinition of unused name
+    "F821",   # undefined name (forward references in string annotations)
+]

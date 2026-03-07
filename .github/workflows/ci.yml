@@ -94,6 +94,9 @@ jobs:
           - name: batch-jobs
             paths: >-
               tests/test_batch_jobs.py
+          - name: image-search
+            paths: >-
+              tests/test_image_search_e2e.py
     steps:
       - uses: actions/checkout@v4
 

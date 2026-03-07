@@ -36,7 +36,6 @@ import collections
 import html as _html
 import json
 import os
-import random
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -452,6 +451,58 @@ async def _searxng_search(
             if len(links) >= max_results:
                 break
         return links
+    except Exception:
+        return []
+
+
+async def _searxng_image_search(
+    client: Any,
+    query: str,
+    *,
+    max_results: int = 30,
+) -> list[dict]:
+    """Query SearXNG image search; return list of image candidate dicts
+    with keys: url (page), img_src (direct image URL), alt (title).
+
+    SearXNG image results include ``img_src`` — the direct CDN image URL —
+    which can be passed straight to ``_fetch_render`` without a browser.
+    Returns up to ``max_results`` entries with valid img_src URLs.
+    """
+    if not SEARXNG_URL:
+        return []
+    try:
+        params: dict[str, str] = {
+            "q": query,
+            "format": "json",
+            "safesearch": "0",
+            "language": "en",
+            "categories": "images",
+        }
+        r = await client.get(
+            f"{SEARXNG_URL}/search",
+            params=params,
+            headers={**_BROWSER_HEADERS, "Accept": "application/json"},
+            timeout=20.0,
+        )
+        data = r.json()
+        results = data.get("results") or []
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for res in results:
+            img_src = str(res.get("img_src") or "").strip()
+            if not img_src.startswith("http") or img_src in seen:
+                continue
+            candidates.append({
+                "url":     img_src,              # direct image URL → _fetch_render
+                "page":    str(res.get("url") or ""),
+                "alt":     str(res.get("title") or ""),
+                "natural_w": 0,
+                "type":    "searxng",
+            })
+            seen.add(img_src)
+            if len(candidates) >= max_results:
+                break
+        return candidates
     except Exception:
         return []
 
@@ -1593,13 +1644,17 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "image_search",
         "description": (
-            "Search for any image by text description and return MULTIPLE images rendered inline. "
-            "Uses query expansion (game shorthands, artwork variant), collects candidates from "
-            "multiple pages and query variants, enforces domain diversity (max 2 per domain), "
-            "fetches in parallel, and deduplicates via seen-URL cache so repeated calls return "
-            "DIFFERENT images. Use 'offset' to paginate to the next batch. "
-            "Use for character art, outfit skins, product photos, logos, screenshots, or any "
-            "visual content. Example: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower night'."
+            "Search for any image by text description and return MULTIPLE images rendered inline "
+            "directly in the chat — images will appear visually, not as URLs. "
+            "Tier 0: SearXNG meta-search (Google Images + Bing Images aggregated, direct CDN URLs "
+            "fetched without browser — most reliable, handles Klukai/GFL2/anime characters). "
+            "Tier 1: DDG web search → browser page_images extraction. "
+            "Tier 2: Bing Images browser extraction. "
+            "Uses query expansion (GFL2→Girls Frontline 2, HSR, etc.), domain diversity cap, "
+            "phash deduplication, and seen-URL memory so repeated calls return DIFFERENT images. "
+            "Use 'offset' to paginate. "
+            "Examples: 'Klukai Girls Frontline 2 artwork', 'Eiffel Tower sunset photo', "
+            "'Nike Air Max product shot'."
         ),
         "inputSchema": {
             "type": "object",
@@ -2701,7 +2756,6 @@ def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
 # Async Job Executor — runs tool calls in background tasks
 # ---------------------------------------------------------------------------
 
-import time as _time  # noqa: E402 (already imported above as _time may not exist)
 
 _job_cancelled: set[str] = set()  # track cancelled job_ids to abort in-flight jobs
 
@@ -5870,7 +5924,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     scale = 2.0
                 # sharpen: accept bool or string "false"/"true"
                 _sharpen_raw = args.get("sharpen", True)
-                sharpen = not (str(_sharpen_raw).lower() in ("false", "0", "no"))
+                sharpen = str(_sharpen_raw).lower() not in ("false", "0", "no")
                 # gpu param: None/unset → auto (GPU primary), False → force CPU only
                 gpu_arg = args.get("gpu", None)
                 force_cpu = (gpu_arg is False or str(gpu_arg).lower() == "false")
@@ -6232,6 +6286,14 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 all_candidates: list[dict] = []
                 _ddg_hosts = ("duckduckgo.com", "ddg.gg", "duck.co")
 
+                # Tier 0: SearXNG image search — direct CDN URLs, no browser needed.
+                # This is the most reliable tier: SearXNG aggregates Google Images +
+                # Bing Images and returns the raw img_src URLs (Artstation CDN, Twitter
+                # media, wixmp, etc.) so _fetch_render can download them directly.
+                for variant_q in _expand_queries(query):
+                    sx_img_cands = await _searxng_image_search(c, variant_q, max_results=30)
+                    all_candidates.extend(sx_img_cands)
+
                 # Tier 1: DDG web search → page_images on top article pages
                 for variant_q in _expand_queries(query):
                     try:
@@ -6515,7 +6577,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # tts — text-to-speech via LM Studio /v1/audio/speech
             # ----------------------------------------------------------------
             if name == "tts":
-                import tempfile as _tmpfile, os as _os_tts
+                import os as _os_tts
                 text_in  = str(args.get("text", "")).strip()
                 if not text_in:
                     return _text("tts: 'text' is required")
@@ -6562,7 +6624,6 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # embed_store — embed text + persist to DB
             # ----------------------------------------------------------------
             if name == "embed_store":
-                import json as _js_emb
                 key_e    = str(args.get("key", "")).strip()
                 content_e = str(args.get("content", "")).strip()
                 topic_e  = str(args.get("topic", "")).strip()
@@ -6605,7 +6666,6 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # embed_search — semantic search over stored embeddings
             # ----------------------------------------------------------------
             if name == "embed_search":
-                import json as _js_es
                 query_es  = str(args.get("query", "")).strip()
                 try:
                     limit_es = max(1, min(20, int(args.get("limit", 5))))
@@ -6655,7 +6715,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # code_run — sandboxed Python subprocess execution
             # ----------------------------------------------------------------
             if name == "code_run":
-                import tempfile as _tmpfile_cr, os as _os_cr, time as _time_cr
+                import tempfile as _tmpfile_cr
+                import os as _os_cr
+                import time as _time_cr
                 code_cr    = str(args.get("code", "")).strip()
                 pkgs_cr    = args.get("packages") or []
                 timeout_cr = max(1, min(120, int(args.get("timeout", 30))))
@@ -7172,7 +7234,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     return _text(f"video_thumbnail: failed — {exc}")
                 b64_vt = d_vt.get("b64", "")
                 if not b64_vt:
-                    return _text(f"video_thumbnail: no image returned")
+                    return _text("video_thumbnail: no image returned")
                 import base64 as _b64_vt_mod
                 raw_vt = _b64_vt_mod.b64decode(b64_vt)
                 summary_vt = (f"Video thumbnail at {ts_vt}s — "
@@ -7636,7 +7698,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 tasks_pl = d_pl.get("tasks", [])
                 total_pl = d_pl.get("total", len(tasks_pl))
                 if not tasks_pl:
-                    return _text(f"No tasks found" + (f" with status='{status_pl}'" if status_pl else "") + ".")
+                    return _text("No tasks found" + (f" with status='{status_pl}'" if status_pl else "") + ".")
                 lines_pl = [f"Tasks ({len(tasks_pl)}/{total_pl}" +
                             (f", status={status_pl}" if status_pl else "") + "):"]
                 for t_pl in tasks_pl:
