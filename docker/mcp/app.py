@@ -353,6 +353,147 @@ def _extract_bing_links(html: str, max_results: int = 12) -> list[tuple[str, str
     return links
 
 
+def _extract_google_links(html: str, max_results: int = 12) -> list[tuple[str, str]]:
+    """Parse Google HTML search results into [(url, title)]."""
+    links: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    from urllib.parse import parse_qs as _pqs, urlparse as _up_g
+
+    # Google wraps result links as /url?q=<target>&... — unwrap them
+    def _unwrap_google(href: str) -> str:
+        if href.startswith("/url?") or href.startswith("https://www.google.com/url?"):
+            qs = _pqs(_up_g(href).query)
+            cand = (qs.get("q") or [""])[0]
+            if cand.startswith("http"):
+                return cand
+        return href
+
+    # Pattern 1: anchor before or wrapping h3 (standard blue links)
+    for m in re.finditer(
+        r'<a[^>]+href="([^"]*)"[^>]*>(?:[^<]|<(?!h3))*?<h3[^>]*>(.*?)</h3>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        url = _unwrap_google(_html.unescape(m.group(1)))
+        title = re.sub(r"<[^>]+>", " ", m.group(2))
+        title = _html.unescape(re.sub(r"\s+", " ", title).strip())
+        if not url.startswith("http") or url in seen:
+            continue
+        host = _domain_from_url(url)
+        if "google.com" in host or "googleapis.com" in host:
+            continue
+        links.append((url, title or url))
+        seen.add(url)
+        if len(links) >= max_results:
+            return links
+
+    # Pattern 2: cite elements (often contain clean destination URLs)
+    for m in re.finditer(r'<cite[^>]*>([^<]+)</cite>', html, flags=re.IGNORECASE):
+        raw = _html.unescape(m.group(1)).strip().split(" ")[0]
+        if not raw.startswith("http"):
+            raw = "https://" + raw
+        url = raw.split("›")[0].strip().rstrip("/")
+        if not url.startswith("http") or url in seen:
+            continue
+        host = _domain_from_url(url)
+        if "google.com" in host:
+            continue
+        links.append((url, url))
+        seen.add(url)
+        if len(links) >= max_results:
+            break
+
+    return links
+
+
+async def _searxng_search(
+    client: Any,
+    query: str,
+    *,
+    engines: str = "",
+    categories: str = "general",
+    max_results: int = 10,
+) -> list[tuple[str, str]]:
+    """Query SearXNG JSON API; return [(url, title)].
+
+    ``engines`` is a comma-separated SearXNG engine list, e.g. "google,bing".
+    ``categories`` is "general" or "images".
+    """
+    if not SEARXNG_URL:
+        return []
+    try:
+        params: dict[str, str] = {
+            "q": query,
+            "format": "json",
+            "safesearch": "0",
+            "language": "en",
+        }
+        if engines:
+            params["engines"] = engines
+        if categories:
+            params["categories"] = categories
+        r = await client.get(
+            f"{SEARXNG_URL}/search",
+            params=params,
+            headers={**_BROWSER_HEADERS, "Accept": "application/json"},
+            timeout=20.0,
+        )
+        data = r.json()
+        results = data.get("results") or []
+        links: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for res in results:
+            url = str(res.get("url") or "").strip()
+            title = str(res.get("title") or url).strip()
+            if not url.startswith("http") or url in seen:
+                continue
+            links.append((url, title))
+            seen.add(url)
+            if len(links) >= max_results:
+                break
+        return links
+    except Exception:
+        return []
+
+
+async def _brave_search(
+    client: Any,
+    query: str,
+    *,
+    max_results: int = 10,
+) -> list[tuple[str, str]]:
+    """Brave Search JSON API (requires BRAVE_API_KEY env var)."""
+    if not BRAVE_API_KEY:
+        return []
+    try:
+        from urllib.parse import quote_plus as _qp_b
+        r = await client.get(
+            f"https://api.search.brave.com/res/v1/web/search?q={_qp_b(query)}&count={max_results}",
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": BRAVE_API_KEY,
+            },
+            timeout=15.0,
+        )
+        data = r.json()
+        web_results = (data.get("web") or {}).get("results") or []
+        links: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for res in web_results:
+            url = str(res.get("url") or "").strip()
+            title = str(res.get("title") or url).strip()
+            if not url.startswith("http") or url in seen:
+                continue
+            links.append((url, title))
+            seen.add(url)
+            if len(links) >= max_results:
+                break
+        return links
+    except Exception:
+        return []
+
+
 def _is_low_information_image(img: "_PilImage.Image") -> bool:
     """Detect near-solid placeholder images (e.g., pure black/white blocks)."""
     if not _HAS_PIL:
@@ -500,6 +641,10 @@ DOCS_URL      = os.environ.get("DOCS_URL",     "http://aichat-docs:8101")
 PLANNER_URL   = os.environ.get("PLANNER_URL",  "http://aichat-data:8091/planner")
 PDF_URL       = os.environ.get("PDF_URL",      "http://aichat-docs:8101/pdf")
 JOB_URL       = os.environ.get("JOB_URL",      "http://aichat-data:8091/jobs")
+# Self-hosted SearXNG meta-search — proxies Google/Bing/DDG/Brave without bot detection.
+SEARXNG_URL   = os.environ.get("SEARXNG_URL",  "http://aichat-searxng:8080")
+# Brave Search JSON API (optional — set key to enable; free tier: 2000 req/month).
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 # human_browser browser-server API — reachable after install connects it to this network.
 BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
 # Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
@@ -735,15 +880,32 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "web_search",
         "description": (
-            "Search the web and return result text. Use this to find the correct URL for a "
-            "site or topic before calling screenshot. "
-            "Tier 2 — direct httpx fetch of DuckDuckGo HTML; "
-            "Tier 3 — DuckDuckGo lite API fallback."
+            "Search the web and return result URLs + titles. Use this to find the correct URL "
+            "for a site or topic before calling screenshot or web_fetch. "
+            "Supports multiple engines: auto (default), google, bing, ddg, brave, images. "
+            "Tier 0: SearXNG meta-search (proxies all engines, no bot detection). "
+            "Tier 1: Engine-specific direct HTML scrape. "
+            "Tier 2: Real Chromium browser DOM extraction. "
+            "Tier 3: DuckDuckGo lite fallback."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query":     {"type": "string", "description": "Search query."},
+                "query": {"type": "string", "description": "Search query."},
+                "engine": {
+                    "type": "string",
+                    "description": (
+                        "Search engine to use. Options: "
+                        "'auto' (default — tries all engines in order), "
+                        "'google' (Google web search), "
+                        "'bing' (Bing web search), "
+                        "'ddg' (DuckDuckGo), "
+                        "'brave' (Brave Search), "
+                        "'images' (image search across Google Images + Bing Images), "
+                        "'searxng' (force SearXNG meta-search, all engines)."
+                    ),
+                    "enum": ["auto", "google", "bing", "ddg", "brave", "images", "searxng"],
+                },
                 "max_chars": {"type": "integer", "description": "Max chars to return (default 4000)."},
             },
             "required": ["query"],
@@ -4068,136 +4230,210 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 query, normalize_note = _normalize_search_query(raw_query)
                 if not query:
                     return _text("web_search: 'query' is required")
+                engine = str(args.get("engine", "auto")).strip().lower() or "auto"
                 max_chars = int(args.get("max_chars", 4000))
                 max_chars = max(500, min(max_chars, 16000))
                 from urllib.parse import quote_plus as _qp
-                # Tier 1: DuckDuckGo HTML via httpx (fast, reliable, bot-resilient with brotlicffi)
-                try:
-                    r = await c.get(
-                        f"https://html.duckduckgo.com/html/?q={_qp(query)}",
-                        headers=_BROWSER_HEADERS,
-                        follow_redirects=True,
-                    )
-                    links = _extract_ddg_links(r.text, max_results=10)
-                    if links:
-                        q_terms = _search_terms(query)
-                        pref = _query_preferred_domains(query)
-                        ranked: list[tuple[str, str]] = []
-                        for url, title in links:
-                            if _url_has_explicit_content(url, title):
-                                continue
-                            ranked.append((url, title))
-                        ranked.sort(
-                            key=lambda it: _score_url_relevance(
-                                f"{it[0]} {it[1]}",
-                                q_terms,
-                                pref,
-                            ),
-                            reverse=True,
-                        )
-                        if ranked:
-                            lines = [f"[Search results] Query: {query}"]
-                            if normalize_note:
-                                lines.append(normalize_note)
-                            for idx, (url, title) in enumerate(ranked[:8], start=1):
-                                lines.append(f"{idx}. {title or url}")
-                                lines.append(f"URL: {url}")
-                            return _text("\n".join(lines)[:max_chars])
-                    challenge_markers = (
-                        "bots use duckduckgo too",
-                        "select all squares",
-                        "error-lite@duckduckgo.com",
-                    )
-                    if any(m in r.text.lower() for m in challenge_markers):
-                        raise RuntimeError("duckduckgo challenge page")
-                    text = re.sub(r"<[^>]+>", " ", r.text)
-                    text = re.sub(r"\s+", " ", text).strip()
-                    if len(text) > 120:
-                        header = f"[Search results] Query: {query}\n"
-                        if normalize_note:
-                            header += normalize_note + "\n"
-                        return _text((header + "\n" + text)[:max_chars])
-                except Exception:
-                    pass
-                # Tier 2: Bing HTML fallback (more stable when DDG blocks bots)
-                try:
-                    rb = await c.get(
-                        f"https://www.bing.com/search?q={_qp(query)}&setlang=en-US",
-                        headers=_BROWSER_HEADERS,
-                        follow_redirects=True,
-                    )
-                    blinks = _extract_bing_links(rb.text, max_results=10)
-                    if blinks:
-                        q_terms = _search_terms(query)
-                        pref = _query_preferred_domains(query)
-                        ranked = [
-                            (u, t) for (u, t) in blinks
-                            if not _url_has_explicit_content(u, t)
-                        ]
-                        ranked.sort(
-                            key=lambda it: _score_url_relevance(
-                                f"{it[0]} {it[1]}",
-                                q_terms,
-                                pref,
-                            ),
-                            reverse=True,
-                        )
-                        if ranked:
-                            lines = [f"[Search results] Query: {query}"]
-                            if normalize_note:
-                                lines.append(normalize_note)
-                            for idx, (url, title) in enumerate(ranked[:8], start=1):
-                                lines.append(f"{idx}. {title or url}")
-                                lines.append(f"URL: {url}")
-                            return _text("\n".join(lines)[:max_chars])
-                except Exception:
-                    pass
-                # Tier 3: real-browser search + DOM link extraction.
-                try:
-                    await asyncio.wait_for(
-                        c.post(f"{BROWSER_URL}/search", json={"query": query}),
-                        timeout=35.0,
-                    )
-                    ev = await c.post(f"{BROWSER_URL}/eval", json={"code": r"""
-                        JSON.stringify(
-                            Array.from(document.links)
-                                .map(a => {
-                                    try {
-                                        const u = new URL(a.href);
-                                        if (u.hostname === 'duckduckgo.com' && u.pathname === '/l/')
-                                            return u.searchParams.get('uddg') || null;
-                                        if (u.hostname !== 'duckduckgo.com' && u.hostname !== 'duck.co')
-                                            return a.href;
-                                        return null;
-                                    } catch(e) { return null; }
-                                })
-                                .filter(u => u && u.startsWith('http'))
-                                .filter((u, i, arr) => arr.indexOf(u) === i)
-                                .slice(0, 20)
-                        )
-                    """}, timeout=10)
-                    extracted = json.loads(ev.json().get("result", "[]"))
-                    ranked = [
-                        (u, u) for u in extracted
-                        if u and not _url_has_explicit_content(u)
+
+                q_terms = _search_terms(query)
+                pref = _query_preferred_domains(query)
+
+                def _fmt_links(
+                    links: "list[tuple[str, str]]",
+                    label: str = "Search results",
+                    is_images: bool = False,
+                ) -> "str | None":
+                    """Rank, filter and format [(url, title)] into a result string."""
+                    cleaned = [
+                        (u, t) for (u, t) in links
+                        if u and not _url_has_explicit_content(u, t)
                     ]
-                    if ranked:
-                        q_terms = _search_terms(query)
-                        pref = _query_preferred_domains(query)
-                        ranked.sort(
-                            key=lambda it: _score_url_relevance(it[0], q_terms, pref),
-                            reverse=True,
-                        )
-                        lines = [f"[Search results] Query: {query}"]
-                        if normalize_note:
-                            lines.append(normalize_note)
-                        for idx, (url, _title) in enumerate(ranked[:8], start=1):
-                            lines.append(f"{idx}. {url}")
+                    cleaned.sort(
+                        key=lambda it: _score_url_relevance(
+                            f"{it[0]} {it[1]}", q_terms, pref
+                        ),
+                        reverse=True,
+                    )
+                    if not cleaned:
+                        return None
+                    lines = [f"[{label}] Query: {query}"]
+                    if normalize_note:
+                        lines.append(normalize_note)
+                    for idx, (url, title) in enumerate(cleaned[:8], start=1):
+                        if is_images:
+                            lines.append(f"{idx}. {title or url}")
+                            lines.append(f"Image URL: {url}")
+                        else:
+                            lines.append(f"{idx}. {title or url}")
                             lines.append(f"URL: {url}")
-                        return _text("\n".join(lines)[:max_chars])
+                    return "\n".join(lines)[:max_chars]
+
+                # ── Tier 0: SearXNG meta-search ──────────────────────────────
+                # Maps engine → (primary_engine_filter, category).
+                # primary="" means "use all available SearXNG engines".
+                # If the primary-filtered search returns nothing (e.g. Google
+                # is blocked on this SearXNG instance), we retry with all
+                # engines so Bing/Brave still provide results.
+                _SEARXNG_ENGINE_MAP: dict[str, tuple[str, str]] = {
+                    "auto":    ("",            "general"),
+                    "searxng": ("",            "general"),
+                    "google":  ("google",      "general"),
+                    "bing":    ("bing",        "general"),
+                    "ddg":     ("duckduckgo",  "general"),
+                    "brave":   ("brave",       "general"),
+                    "images":  ("",            "images"),
+                }
+                sx_engines, sx_category = _SEARXNG_ENGINE_MAP.get(
+                    engine, ("", "general")
+                )
+                sx_links = await _searxng_search(
+                    c, query,
+                    engines=sx_engines,
+                    categories=sx_category,
+                    max_results=12,
+                )
+                # If specific engine filter returned nothing, retry with all engines
+                if not sx_links and sx_engines:
+                    sx_links = await _searxng_search(
+                        c, query,
+                        engines="",
+                        categories=sx_category,
+                        max_results=12,
+                    )
+                if sx_links:
+                    formatted = _fmt_links(
+                        sx_links,
+                        label="Search results" if engine != "images" else "Image results",
+                        is_images=(engine == "images"),
+                    )
+                    if formatted:
+                        return _text(formatted)
+
+                # ── Tier 1a: Brave Search JSON API (if key is set) ────────────
+                if engine in ("auto", "brave") and BRAVE_API_KEY:
+                    brave_links = await _brave_search(c, query, max_results=10)
+                    if brave_links:
+                        formatted = _fmt_links(brave_links, label="Brave Search results")
+                        if formatted:
+                            return _text(formatted)
+
+                # ── Tier 1b: Engine-specific direct HTML scraping ─────────────
+                if engine in ("auto", "ddg"):
+                    try:
+                        r = await c.get(
+                            f"https://html.duckduckgo.com/html/?q={_qp(query)}",
+                            headers=_BROWSER_HEADERS,
+                            follow_redirects=True,
+                        )
+                        challenge_markers = (
+                            "bots use duckduckgo too",
+                            "select all squares",
+                            "error-lite@duckduckgo.com",
+                        )
+                        if not any(m in r.text.lower() for m in challenge_markers):
+                            ddg_links = _extract_ddg_links(r.text, max_results=10)
+                            formatted = _fmt_links(ddg_links, label="Search results (DDG)")
+                            if formatted:
+                                return _text(formatted)
+                    except Exception:
+                        pass
+
+                if engine in ("auto", "bing"):
+                    try:
+                        rb = await c.get(
+                            f"https://www.bing.com/search?q={_qp(query)}&setlang=en-US",
+                            headers=_BROWSER_HEADERS,
+                            follow_redirects=True,
+                        )
+                        bing_links = _extract_bing_links(rb.text, max_results=10)
+                        formatted = _fmt_links(bing_links, label="Search results (Bing)")
+                        if formatted:
+                            return _text(formatted)
+                    except Exception:
+                        pass
+
+                if engine in ("google",):
+                    try:
+                        rg = await c.get(
+                            f"https://www.google.com/search?q={_qp(query)}&hl=en&num=10",
+                            headers={
+                                **_BROWSER_HEADERS,
+                                "Accept-Language": "en-US,en;q=0.9",
+                                "Referer": "https://www.google.com/",
+                            },
+                            follow_redirects=True,
+                        )
+                        g_links = _extract_google_links(rg.text, max_results=10)
+                        formatted = _fmt_links(g_links, label="Search results (Google)")
+                        if formatted:
+                            return _text(formatted)
+                    except Exception:
+                        pass
+
+                # ── Tier 2: Real-browser DOM extraction ───────────────────────
+                try:
+                    # For Google Images, navigate directly to images.google.com
+                    if engine == "images":
+                        browser_url_target = f"https://www.google.com/search?q={_qp(query)}&tbm=isch"
+                        dom_js = r"""
+                            JSON.stringify(
+                                Array.from(document.querySelectorAll('img[src]'))
+                                    .map(img => img.src)
+                                    .filter(s => s && s.startsWith('http') && !s.includes('google.com/logos'))
+                                    .filter((s, i, a) => a.indexOf(s) === i)
+                                    .slice(0, 20)
+                            )
+                        """
+                        await asyncio.wait_for(
+                            c.post(f"{BROWSER_URL}/navigate", json={"url": browser_url_target}),
+                            timeout=35.0,
+                        )
+                    else:
+                        dom_js = r"""
+                            JSON.stringify(
+                                Array.from(document.links)
+                                    .map(a => {
+                                        try {
+                                            const u = new URL(a.href);
+                                            if (u.hostname === 'duckduckgo.com' && u.pathname === '/l/')
+                                                return [u.searchParams.get('uddg') || null, a.innerText.trim()];
+                                            if (!['duckduckgo.com','duck.co','google.com','bing.com'].includes(u.hostname))
+                                                return [a.href, a.innerText.trim()];
+                                            return null;
+                                        } catch(e) { return null; }
+                                    })
+                                    .filter(x => x && x[0] && x[0].startsWith('http'))
+                                    .filter((x, i, arr) => arr.findIndex(y => y && y[0] === x[0]) === i)
+                                    .slice(0, 20)
+                            )
+                        """
+                        await asyncio.wait_for(
+                            c.post(f"{BROWSER_URL}/search", json={"query": query}),
+                            timeout=35.0,
+                        )
+                    ev = await c.post(
+                        f"{BROWSER_URL}/eval",
+                        json={"code": dom_js},
+                        timeout=10,
+                    )
+                    raw = json.loads(ev.json().get("result", "[]"))
+                    if engine == "images":
+                        browser_links = [(u, u) for u in raw if u]
+                        formatted = _fmt_links(
+                            browser_links, label="Image results (browser)", is_images=True
+                        )
+                    else:
+                        browser_links = [
+                            (item[0], item[1]) if isinstance(item, list) else (item, item)
+                            for item in raw if item
+                        ]
+                        formatted = _fmt_links(browser_links, label="Search results (browser)")
+                    if formatted:
+                        return _text(formatted)
                 except Exception:
                     pass
-                # Tier 4: DDG lite (last resort text scrape)
+
+                # ── Tier 3: DDG lite (last resort text scrape) ────────────────
                 try:
                     r = await c.get(
                         f"https://lite.duckduckgo.com/lite/?q={_qp(query)}",

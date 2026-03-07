@@ -180,6 +180,27 @@ services:
       retries: 3
 
   # ---------------------------------------------------------------------------
+  # aichat-searxng: Self-hosted meta-search engine (port 8098)
+  #   Proxies Google, Bing, DDG, Brave — no API keys, no bot detection.
+  #   Used by web_search tool as the primary (Tier 0) search backend.
+  # ---------------------------------------------------------------------------
+  aichat-searxng:
+    image: searxng/searxng:latest
+    container_name: aichat-searxng
+    environment:
+      SEARXNG_BASE_URL: http://aichat-searxng:8080
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    ports:
+      - "8098:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz 2>/dev/null | grep -q ok || wget -qO- http://localhost:8080/ >/dev/null 2>&1"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
   # aichat-mcp: MCP HTTP/SSE gateway (port 8096)
   #   Exposes all tools to LM Studio and other MCP clients.
   #   Reachable at http://<host-ip>:8096/sse
@@ -201,6 +222,8 @@ services:
       PLANNER_URL:      http://aichat-data:8091/planner
       PDF_URL:          http://aichat-docs:8101/pdf
       JOB_URL:          http://aichat-data:8091/jobs
+      # SearXNG meta-search — Tier 0 for web_search (Google/Bing/DDG/images).
+      SEARXNG_URL:      http://aichat-searxng:8080
       # human_browser is connected to this network by the install script.
       BROWSER_URL:      http://human_browser:7081
       # Image generation — points at LM Studio (or any OpenAI-compatible image API).
@@ -225,6 +248,8 @@ services:
         condition: service_healthy
       aichat-vector:
         condition: service_started
+      aichat-searxng:
+        condition: service_healthy
     ports:
       - "8096:8096"
     # Intel Arc A380: card1 (video) + renderD128 (render/OpenCL).

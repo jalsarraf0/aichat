@@ -111,6 +111,9 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────────
   # 3. Build all service images — ephemeral Docker build per service
+  #    Uses the :cache tag from the previous run to speed up layer reuse.
+  #    After a successful build the :cache tag is updated for future runs.
+  #    The :ci-<sha> ephemeral tag is removed in the cleanup job.
   # ──────────────────────────────────────────────────────────────────────────
   build-images:
     name: Build / ${{ matrix.service }}
@@ -135,7 +138,7 @@ jobs:
         with:
           driver-opts: image=moby/buildkit:buildx-stable-1
 
-      - name: Build ${{ matrix.service }} image
+      - name: Build ${{ matrix.service }} image (with layer cache)
         run: |
           SERVICE=${{ matrix.service }}
           # Map service name → build context directory
@@ -146,11 +149,17 @@ jobs:
             aichat-sandbox) DIR=docker/sandbox ;;
             aichat-mcp)     DIR=docker/mcp     ;;
           esac
+          # Pull the previous :cache image to warm Docker layer cache
+          docker pull "${SERVICE}:cache" 2>/dev/null || true
           docker build \
+            --cache-from "${SERVICE}:cache" \
             --tag "${SERVICE}:ci-${{ github.sha }}" \
+            --tag "${SERVICE}:cache" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.repositoryUrl }}" \
             "$DIR"
+          # :cache tag persists on this runner for future runs.
+          # :ci-<sha> ephemeral tag is removed by the cleanup job after CI.
 
       - name: Save image tarball (for SBOM job)
         run: |
@@ -188,7 +197,7 @@ jobs:
       - name: Start consolidated stack
         run: |
           docker compose up -d --build \
-            aichat-db aichat-vector aichat-data aichat-vision aichat-docs aichat-sandbox
+            aichat-db aichat-vector aichat-data aichat-vision aichat-docs aichat-sandbox aichat-searxng
           # Wait for data service (slowest — needs PostgreSQL)
           for i in $(seq 1 24); do
             curl -sf http://localhost:8091/health && break
@@ -311,3 +320,29 @@ jobs:
             --fail-on high \
             --output table \
             || echo "::warning::Vulnerabilities found in ${{ matrix.service }} — review SBOM artifact"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 7. Cleanup — remove ephemeral :ci-<sha> image tags from the runner.
+  #    The :cache tags are KEPT so the next push can reuse Docker layers.
+  #    Runs on every push, even if earlier jobs fail.
+  # ──────────────────────────────────────────────────────────────────────────
+  cleanup:
+    name: Cleanup Ephemeral Images
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 5
+    if: always()
+    needs: [smoke, sbom, package]
+    steps:
+      - name: Remove ephemeral ci-<sha> image tags (keep :cache)
+        run: |
+          SERVICES="aichat-data aichat-vision aichat-docs aichat-sandbox aichat-mcp"
+          for svc in $SERVICES; do
+            echo "Removing ${svc}:ci-${{ github.sha }} ..."
+            docker rmi "${svc}:ci-${{ github.sha }}" 2>/dev/null || true
+          done
+          echo "Cache images retained for next run:"
+          for svc in $SERVICES; do
+            docker image inspect "${svc}:cache" --format "  ${svc}:cache — {{.Id}}" 2>/dev/null || true
+          done
+          # Prune dangling layers (untagged intermediates) — safe, never removes :cache
+          docker image prune -f

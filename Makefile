@@ -50,10 +50,15 @@ smoke:
 	  [aichat-docs]=8101 \
 	  [aichat-sandbox]=8095 \
 	  [aichat-mcp]=8096 \
+	  [aichat-searxng]=8098 \
+	); \
+	declare -A HEALTH_PATHS=( \
+	  [aichat-searxng]="/" \
 	); \
 	for svc in "$${!PORTS[@]}"; do \
 	  port=$${PORTS[$$svc]}; \
-	  url="http://localhost:$${port}/health"; \
+	  path=$${HEALTH_PATHS[$$svc]:-/health}; \
+	  url="http://localhost:$${port}$${path}"; \
 	  echo -n "  $$svc ($$url) ... "; \
 	  status=$$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$$url"); \
 	  if [ "$$status" = "200" ]; then echo "OK"; \
