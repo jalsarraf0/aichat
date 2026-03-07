@@ -26,7 +26,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-vector:
     image: qdrant/qdrant:latest
-    container_name: aichat-vector
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -49,7 +48,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-data:
     build: ./docker/data
-    container_name: aichat-data
     environment:
       DATABASE_URL: postgresql://aichat:aichat@aichat-db:5432/aichat
       INTEL_GPU: "1"
@@ -83,7 +81,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-vision:
     build: ./docker/vision
-    container_name: aichat-vision
     environment:
       DATABASE_URL: http://aichat-data:8091
       WORKSPACE: /workspace
@@ -120,7 +117,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-docs:
     build: ./docker/docs
-    container_name: aichat-docs
     environment:
       DATABASE_URL: http://aichat-data:8091
       OCR_URL: http://aichat-vision:8099/ocr
@@ -155,7 +151,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-sandbox:
     build: ./docker/sandbox
-    container_name: aichat-sandbox
     environment:
       DATABASE_URL: http://aichat-data:8091
       INTEL_GPU: "1"
@@ -186,7 +181,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-searxng:
     image: searxng/searxng:latest
-    container_name: aichat-searxng
     environment:
       SEARXNG_BASE_URL: http://aichat-searxng:8080
     volumes:
@@ -207,7 +201,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-mcp:
     build: ./docker/mcp
-    container_name: aichat-mcp
     environment:
       # Consolidated service URLs
       DATABASE_URL:     http://aichat-data:8091

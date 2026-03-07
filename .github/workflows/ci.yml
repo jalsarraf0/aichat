@@ -198,6 +198,9 @@ jobs:
       - name: Install test deps
         run: pip install httpx pytest
 
+      - name: Pre-clean any leftover containers
+        run: docker compose down --volumes --remove-orphans 2>/dev/null || true
+
       - name: Start consolidated stack
         run: |
           docker compose up -d --build \
@@ -307,11 +310,11 @@ jobs:
             -o cyclonedx-json \
             > "sbom-${{ matrix.service }}.cyclonedx.json"
 
-      - name: Upload SBOMs
+      - name: Upload CycloneDX SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-${{ matrix.service }}
-          path: "sbom-${{ matrix.service }}.*"
+          name: sbom-cdx-${{ matrix.service }}
+          path: "sbom-${{ matrix.service }}.cyclonedx.json"
           retention-days: 30
 
       - name: Vulnerability scan (grype)
