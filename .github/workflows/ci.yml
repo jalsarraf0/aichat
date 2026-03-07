@@ -199,34 +199,56 @@ jobs:
         run: pip install httpx pytest
 
       - name: Pre-clean any leftover containers
-        run: docker compose down --volumes --remove-orphans 2>/dev/null || true
-
-      - name: Start consolidated stack
         run: |
-          docker compose up -d --build \
+          docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+            down --volumes --remove-orphans 2>/dev/null || true
+
+      - name: Start consolidated stack (no host ports — avoids production conflicts)
+        run: |
+          docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+            up -d --build \
             aichat-db aichat-vector aichat-data aichat-vision aichat-docs aichat-sandbox aichat-searxng
-          # Wait for data service (slowest — needs PostgreSQL)
+          # Wait for data service via docker exec (no host port binding)
           for i in $(seq 1 24); do
-            curl -sf http://localhost:8091/health && break
+            docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+              exec aichat-data python3 -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8091/health',timeout=3)" \
+              2>/dev/null && break
             echo "Waiting for aichat-data ($i/24)…"; sleep 5
           done
 
       - name: Start MCP gateway
-        run: docker compose up -d aichat-mcp
+        run: |
+          docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+            up -d aichat-mcp
 
-      - name: Run smoke tests
-        run: pytest tests/test_smoke.py -v -m smoke --tb=short
+      - name: Run smoke tests (inside Docker compose network)
+        run: |
+          docker run --rm \
+            --network "${COMPOSE_PROJECT_NAME}_default" \
+            -e DATA_URL=http://aichat-data:8091 \
+            -e VISION_URL=http://aichat-vision:8099 \
+            -e DOCS_URL=http://aichat-docs:8101 \
+            -e SANDBOX_URL=http://aichat-sandbox:8095 \
+            -e MCP_URL=http://aichat-mcp:8096 \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            python:3.12-slim \
+            bash -c "pip install -q pytest httpx && pytest /workspace/tests/test_smoke.py -v -m smoke --tb=short"
 
-      - name: Run architecture tests against live stack
+      - name: Run architecture tests (no services needed)
         run: pytest tests/test_architecture.py -v --tb=short
 
       - name: Dump logs on failure
         if: failure()
-        run: docker compose logs --tail=100
+        run: |
+          docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+            logs --tail=100
 
       - name: Tear down
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: |
+          docker compose -f docker-compose.yml -f .github/compose/smoke-no-host-ports.yml \
+            down --volumes --remove-orphans
 
   # ──────────────────────────────────────────────────────────────────────────
   # 5. Package build
