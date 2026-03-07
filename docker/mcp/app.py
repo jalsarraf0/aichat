@@ -7257,7 +7257,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     b64_oi = _b64_oi.standard_b64encode(_f_oi.read()).decode("ascii")
                 try:
                     r_oi = await c.post(
-                        f"{OCR_URL}/ocr",
+                        OCR_URL,
                         json={"b64": b64_oi, "lang": lang_oi},
                         timeout=60,
                     )
@@ -7283,7 +7283,7 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     b64_op = _b64_op.standard_b64encode(_f_op.read()).decode("ascii")
                 try:
                     r_op = await c.post(
-                        f"{OCR_URL}/ocr/pdf",
+                        f"{OCR_URL}/pdf",
                         json={"b64_pdf": b64_op, "lang": lang_op, "pages": pages_op or None},
                         timeout=120,
                     )
