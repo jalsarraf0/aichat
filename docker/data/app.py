@@ -327,12 +327,9 @@ def article_search(
         params.append(f"%{topic}%")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
+    sql_articles = f"SELECT id, url, title, topic, stored_at FROM articles {where} ORDER BY stored_at DESC LIMIT %s"  # nosec B608
     with _pg() as pg:
-        rows = pg.execute(  # nosec B608
-            f"SELECT id, url, title, topic, stored_at FROM articles {where} "
-            "ORDER BY stored_at DESC LIMIT %s",
-            params,
-        ).fetchall()
+        rows = pg.execute(sql_articles, params).fetchall()
     return {
         "results": [
             {"id": r[0], "url": r[1], "title": r[2], "topic": r[3], "stored_at": str(r[4])}
