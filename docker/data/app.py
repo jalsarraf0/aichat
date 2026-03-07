@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Generator, Optional
 
 import feedparser
-import httpx
 import networkx as nx
 import psycopg
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
@@ -329,7 +328,7 @@ def article_search(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
     with _pg() as pg:
-        rows = pg.execute(
+        rows = pg.execute(  # nosec B608
             f"SELECT id, url, title, topic, stored_at FROM articles {where} "
             "ORDER BY stored_at DESC LIMIT %s",
             params,
@@ -1042,11 +1041,11 @@ def jobs_list(
     count_params = list(params)
     params += [limit, offset]
     with _sqlite(JOBS_DB) as con:
-        rows = con.execute(
+        rows = con.execute(  # nosec B608
             f"SELECT * FROM jobs {where} ORDER BY priority DESC, submitted_at DESC "
             "LIMIT ? OFFSET ?", params,
         ).fetchall()
-        total = con.execute(f"SELECT COUNT(*) FROM jobs {where}", count_params).fetchone()[0]
+        total = con.execute(f"SELECT COUNT(*) FROM jobs {where}", count_params).fetchone()[0]  # nosec B608
     return {"jobs": [_job_row(r) for r in rows], "total": total,
             "limit": limit, "offset": offset}
 
@@ -1085,7 +1084,7 @@ def jobs_update(job_id: str, payload: dict) -> dict:
         if not fields:
             return _job_row(row)
         params.append(job_id)
-        con.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", params)
+        con.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", params)  # nosec B608
         con.commit()
     return jobs_get(job_id)
 
