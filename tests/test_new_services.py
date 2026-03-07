@@ -58,13 +58,16 @@ skip_load = pytest.mark.skipif(not _LOAD_OK, reason="docker/mcp/app.py failed to
 # ---------------------------------------------------------------------------
 
 MCP_URL     = "http://localhost:8096"
-GRAPH_URL   = "http://localhost:8098"
-VECTOR_URL  = "http://localhost:6333"
+# Consolidated service URLs (post-refactor)
+DATA_URL    = "http://localhost:8091"
+GRAPH_URL   = "http://localhost:8091/graph"
+PLANNER_URL = "http://localhost:8091/planner"
+VISION_URL  = "http://localhost:8099"
 VIDEO_URL   = "http://localhost:8099"
-OCR_URL     = "http://localhost:8100"
+OCR_URL     = "http://localhost:8099/ocr"
 DOCS_URL    = "http://localhost:8101"
-PDF_URL     = "http://localhost:8103"
-PLANNER_URL = "http://localhost:8102"
+PDF_URL     = "http://localhost:8101/pdf"
+VECTOR_URL  = "http://localhost:6333"
 LM_URL      = os.environ.get("LM_STUDIO_URL", os.environ.get("LM_URL", "http://192.168.50.2:1234"))
 
 
@@ -76,23 +79,24 @@ def _up(url: str, path: str = "/health") -> bool:
 
 
 _MCP_UP     = _up(MCP_URL)
-_GRAPH_UP   = _up(GRAPH_URL)
+_DATA_UP    = _up(DATA_URL)
+_GRAPH_UP   = _DATA_UP   # graph is a sub-route of aichat-data
 _VECTOR_UP  = _up(VECTOR_URL)  # Qdrant health endpoint
-_VIDEO_UP   = _up(VIDEO_URL)
-_OCR_UP     = _up(OCR_URL)
+_VIDEO_UP   = _up(VISION_URL)
+_OCR_UP     = _VIDEO_UP   # OCR is a sub-route of aichat-vision
 _DOCS_UP    = _up(DOCS_URL)
-_PDF_UP     = _up(PDF_URL)
-_PLANNER_UP = _up(PLANNER_URL)
+_PDF_UP     = _DOCS_UP    # PDF is a sub-route of aichat-docs
+_PLANNER_UP = _DATA_UP    # planner is a sub-route of aichat-data
 _LM_UP      = _up(LM_URL, "/v1/models")
 
 skip_mcp     = pytest.mark.skipif(not _MCP_UP,     reason="aichat-mcp not running")
-skip_graph   = pytest.mark.skipif(not _GRAPH_UP,   reason="aichat-graph not running")
+skip_graph   = pytest.mark.skipif(not _GRAPH_UP,   reason="aichat-data (graph) not running")
 skip_vector  = pytest.mark.skipif(not _VECTOR_UP,  reason="aichat-vector (Qdrant) not running")
-skip_video   = pytest.mark.skipif(not _VIDEO_UP,   reason="aichat-video not running")
-skip_ocr     = pytest.mark.skipif(not _OCR_UP,     reason="aichat-ocr not running")
+skip_video   = pytest.mark.skipif(not _VIDEO_UP,   reason="aichat-vision not running")
+skip_ocr     = pytest.mark.skipif(not _OCR_UP,     reason="aichat-vision (ocr) not running")
 skip_docs    = pytest.mark.skipif(not _DOCS_UP,    reason="aichat-docs not running")
-skip_pdf     = pytest.mark.skipif(not _PDF_UP,     reason="aichat-pdf not running")
-skip_planner = pytest.mark.skipif(not _PLANNER_UP, reason="aichat-planner not running")
+skip_pdf     = pytest.mark.skipif(not _PDF_UP,     reason="aichat-docs (pdf) not running")
+skip_planner = pytest.mark.skipif(not _PLANNER_UP, reason="aichat-data (planner) not running")
 skip_lm      = pytest.mark.skipif(not _LM_UP,      reason="LM Studio not running")
 
 
@@ -542,6 +546,11 @@ class TestDocsE2E:
         assert r.status_code == 200
         fmts = r.json().get("formats", [])
         assert "pdf" in fmts and "docx" in fmts
+
+    def test_pdf_health_via_docs(self):
+        r = httpx.get(f"{DOCS_URL}/pdf/health", timeout=5)
+        assert r.status_code == 200
+        assert r.json().get("status") == "ok"
 
 
 @skip_mcp

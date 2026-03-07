@@ -9,6 +9,14 @@ when the services are not reachable.  Run them with:
 Or alongside the full suite:
 
     pytest -v -m "smoke or not smoke"
+
+Consolidated architecture (as of refactor):
+  aichat-data    :8091  — database, memory, graph, planner, research, jobs
+  aichat-vision  :8099  — video + OCR
+  aichat-docs    :8101  — document ingestor + PDF operations
+  aichat-sandbox :8095  — isolated code execution
+  aichat-mcp     :8096  — MCP gateway
+  aichat-whatsapp:8097  — WhatsApp bot (optional)
 """
 from __future__ import annotations
 
@@ -17,17 +25,16 @@ import httpx
 
 
 # ---------------------------------------------------------------------------
-# Service definitions
+# Service definitions (consolidated architecture)
 # ---------------------------------------------------------------------------
 
 _SERVICES = {
-    "aichat-database":    "http://localhost:8091/health",
-    "aichat-researchbox": "http://localhost:8092/health",
-    "aichat-memory":      "http://localhost:8094/health",
-    "aichat-toolkit":     "http://localhost:8095/health",
-    "aichat-mcp":         "http://localhost:8096/health",
-    "aichat-whatsapp":    "http://localhost:8097/health",
-    "aichat-pdf":         "http://localhost:8103/health",
+    "aichat-data":     "http://localhost:8091/health",
+    "aichat-vision":   "http://localhost:8099/health",
+    "aichat-docs":     "http://localhost:8101/health",
+    "aichat-sandbox":  "http://localhost:8095/health",
+    "aichat-mcp":      "http://localhost:8096/health",
+    "aichat-whatsapp": "http://localhost:8097/health",
 }
 
 # Timeout for each health-check request (seconds).
@@ -61,16 +68,16 @@ def test_service_health(service: str, url: str) -> None:
 
 
 @pytest.mark.smoke
-def test_database_health_includes_counts() -> None:
-    """aichat-database /health must include article and page-cache counts."""
-    url = _SERVICES["aichat-database"]
+def test_data_health_includes_counts() -> None:
+    """aichat-data /health must include article and page-cache counts."""
+    url = _SERVICES["aichat-data"]
     if not _is_reachable(url):
-        pytest.skip("aichat-database not reachable")
+        pytest.skip("aichat-data not reachable")
     r = httpx.get(url, timeout=_TIMEOUT)
     assert r.status_code == 200
     body = r.json()
-    assert "articles" in body, f"Missing 'articles' in database health: {body}"
-    assert "cached_pages" in body, f"Missing 'cached_pages' in database health: {body}"
+    assert "articles" in body, f"Missing 'articles' in data health: {body}"
+    assert "cached_pages" in body, f"Missing 'cached_pages' in data health: {body}"
 
 
 @pytest.mark.smoke
@@ -110,10 +117,10 @@ def test_mcp_tools_list_via_jsonrpc() -> None:
 
 @pytest.mark.smoke
 def test_errors_endpoint_accessible() -> None:
-    """aichat-database /errors/recent must return a valid response."""
+    """aichat-data /errors/recent must return a valid response."""
     url = "http://localhost:8091/errors/recent"
-    if not _is_reachable(_SERVICES["aichat-database"]):
-        pytest.skip("aichat-database not reachable")
+    if not _is_reachable(_SERVICES["aichat-data"]):
+        pytest.skip("aichat-data not reachable")
     r = httpx.get(url, timeout=_TIMEOUT, params={"limit": 10})
     assert r.status_code == 200
     body = r.json()
@@ -126,7 +133,7 @@ def test_error_log_roundtrip() -> None:
     """POST /errors/log then GET /errors/recent must return the logged entry."""
     base = "http://localhost:8091"
     if not _is_reachable(f"{base}/health"):
-        pytest.skip("aichat-database not reachable")
+        pytest.skip("aichat-data not reachable")
 
     marker = "smoke-test-marker-aichat"
     post_r = httpx.post(
@@ -149,18 +156,18 @@ def test_error_log_roundtrip() -> None:
 
 @pytest.mark.smoke
 def test_memory_store_recall_roundtrip() -> None:
-    """POST /store then GET /recall must return the stored value."""
-    base = "http://localhost:8094"
+    """POST /memory/store then GET /memory/recall must return the stored value."""
+    base = "http://localhost:8091"
     if not _is_reachable(f"{base}/health"):
-        pytest.skip("aichat-memory not reachable")
+        pytest.skip("aichat-data not reachable")
 
     key = "_smoke_test_key"
     value = "smoke-test-value-aichat"
 
-    post_r = httpx.post(f"{base}/store", json={"key": key, "value": value}, timeout=_TIMEOUT)
+    post_r = httpx.post(f"{base}/memory/store", json={"key": key, "value": value}, timeout=_TIMEOUT)
     assert post_r.status_code == 200
 
-    get_r = httpx.get(f"{base}/recall", params={"key": key}, timeout=_TIMEOUT)
+    get_r = httpx.get(f"{base}/memory/recall", params={"key": key}, timeout=_TIMEOUT)
     assert get_r.status_code == 200
     body = get_r.json()
     assert body.get("found"), f"Stored key not found: {body}"
@@ -168,11 +175,11 @@ def test_memory_store_recall_roundtrip() -> None:
 
 
 @pytest.mark.smoke
-def test_toolkit_tools_list() -> None:
-    """aichat-toolkit GET /tools must return a valid tools list."""
+def test_sandbox_tools_list() -> None:
+    """aichat-sandbox GET /tools must return a valid tools list."""
     base = "http://localhost:8095"
     if not _is_reachable(f"{base}/health"):
-        pytest.skip("aichat-toolkit not reachable")
+        pytest.skip("aichat-sandbox not reachable")
 
     r = httpx.get(f"{base}/tools", timeout=_TIMEOUT)
     assert r.status_code == 200
@@ -182,13 +189,13 @@ def test_toolkit_tools_list() -> None:
 
 
 @pytest.mark.smoke
-def test_researchbox_search_feeds() -> None:
-    """aichat-researchbox GET /search-feeds must return feed URLs for a topic."""
-    base = "http://localhost:8092"
+def test_research_search_feeds() -> None:
+    """aichat-data /research/search-feeds must return feed URLs for a topic."""
+    base = "http://localhost:8091"
     if not _is_reachable(f"{base}/health"):
-        pytest.skip("aichat-researchbox not reachable")
+        pytest.skip("aichat-data not reachable")
 
-    r = httpx.get(f"{base}/search-feeds", params={"topic": "python"}, timeout=_TIMEOUT)
+    r = httpx.get(f"{base}/research/search-feeds", params={"topic": "python"}, timeout=_TIMEOUT)
     assert r.status_code == 200
     body = r.json()
     assert "feeds" in body, f"Missing 'feeds' key: {body}"

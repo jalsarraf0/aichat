@@ -1,8 +1,7 @@
 services:
-  # PostgreSQL: general-purpose storage for articles, images, and web cache.
-  # The old aichat-rssfeed and aichat-fetch services have been removed;
-  # all web content is now fetched via the human_browser container (a12fdfeaaf78)
-  # and persisted here.
+  # ---------------------------------------------------------------------------
+  # Infrastructure: PostgreSQL
+  # ---------------------------------------------------------------------------
   aichat-db:
     image: postgres:16
     environment:
@@ -22,19 +21,46 @@ services:
       timeout: 5s
       retries: 5
 
-  # FastAPI service that wraps the PostgreSQL DB with REST endpoints for
-  # storing/searching articles, images, and cached web pages.
-  aichat-database:
-    build: ./docker/database
+  # ---------------------------------------------------------------------------
+  # Infrastructure: Qdrant vector database
+  # ---------------------------------------------------------------------------
+  aichat-vector:
+    image: qdrant/qdrant:latest
+    container_name: aichat-vector
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrantdb:/qdrant/storage
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # aichat-data: consolidated data service (port 8091)
+  #   Replaces: aichat-database, aichat-memory, aichat-graph,
+  #             aichat-planner, aichat-researchbox
+  #
+  #   Routes:
+  #     /          — PostgreSQL article/image/cache REST (backward-compat)
+  #     /memory/*  — SQLite episodic memory store
+  #     /graph/*   — SQLite knowledge graph (NetworkX)
+  #     /planner/* — SQLite task planner (DAG-aware)
+  #     /research/*— RSS/feed discovery
+  #     /jobs/*    — Durable async job system
+  # ---------------------------------------------------------------------------
+  aichat-data:
+    build: ./docker/data
+    container_name: aichat-data
     environment:
       DATABASE_URL: postgresql://aichat:aichat@aichat-db:5432/aichat
       INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
     depends_on:
-      - aichat-db
+      aichat-db:
+        condition: service_healthy
     ports:
       - "8091:8091"
-    # Intel Arc A380: expose DRI devices for OpenCL/VA-API in image ops (phash, PIL).
-    # group_add uses host GIDs: 39=video (card1), 105=render (renderD128).
+    volumes:
+      - datadb:/data
     devices:
       - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
@@ -47,20 +73,100 @@ services:
       timeout: 5s
       retries: 3
 
-  # RSS/feed discovery (returns feed URLs; stores articles via aichat-database).
-  aichat-researchbox:
-    build: ./docker/researchbox
-    tty: true
-    stdin_open: true
+  # ---------------------------------------------------------------------------
+  # aichat-vision: consolidated media service (port 8099)
+  #   Replaces: aichat-video, aichat-ocr
+  #
+  #   Routes:
+  #     /          — Video analysis: /info, /frames, /thumbnail
+  #     /ocr/*     — OCR: /ocr, /ocr/boxes, /ocr/path, /ocr/pdf, etc.
+  # ---------------------------------------------------------------------------
+  aichat-vision:
+    build: ./docker/vision
+    container_name: aichat-vision
     environment:
-      DATABASE_URL: http://aichat-database:8091
+      DATABASE_URL: http://aichat-data:8091
+      WORKSPACE: /workspace
       INTEL_GPU: "1"
       LIBVA_DRIVER_NAME: iHD
-    volumes:
-      - /tmp/research:/tmp/research
+    depends_on:
+      aichat-data:
+        condition: service_healthy
     ports:
-      - "8092:8092"
-    # Intel Arc A380: Playwright/Chromium benefits from GPU-accelerated rendering.
+      - "8099:8099"
+    volumes:
+      - /docker/human_browser/workspace:/workspace:rw
+    # Intel Arc A380: FFmpeg VA-API hw decode/encode + Tesseract OpenCL preprocessing.
+    devices:
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
+    group_add:
+      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
+      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc VA-API/OpenCL)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # aichat-docs: consolidated document service (port 8101)
+  #   Replaces: aichat-docs, aichat-pdf
+  #
+  #   Routes:
+  #     /          — Document ingestor: /ingest, /ingest/url, /tables, /formats
+  #     /pdf/*     — PDF operations: /pdf/read, /pdf/edit, /pdf/fill-form,
+  #                  /pdf/merge, /pdf/split  (OCR delegated to aichat-vision)
+  # ---------------------------------------------------------------------------
+  aichat-docs:
+    build: ./docker/docs
+    container_name: aichat-docs
+    environment:
+      DATABASE_URL: http://aichat-data:8091
+      OCR_URL: http://aichat-vision:8099/ocr
+      WORKSPACE: /workspace
+      INTEL_GPU: "1"
+      LIBVA_DRIVER_NAME: iHD
+    depends_on:
+      aichat-data:
+        condition: service_healthy
+      aichat-vision:
+        condition: service_healthy
+    ports:
+      - "8101:8101"
+    volumes:
+      - /docker/human_browser/workspace:/workspace:rw
+    devices:
+      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
+    group_add:
+      - "${INTEL_VIDEO_GID:-39}"
+      - "${INTEL_RENDER_GID:-105}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8101/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # aichat-sandbox: isolated code execution (port 8095)
+  #   Renamed from: aichat-toolkit
+  #   Non-root, minimal packages, controlled filesystem mounts.
+  # ---------------------------------------------------------------------------
+  aichat-sandbox:
+    build: ./docker/sandbox
+    container_name: aichat-sandbox
+    environment:
+      DATABASE_URL: http://aichat-data:8091
+      INTEL_GPU: "1"
+    depends_on:
+      aichat-data:
+        condition: service_healthy
+    ports:
+      - "8095:8095"
+    volumes:
+      - ${HOME}/.config/aichat/tools:/data/tools
+      - ${HOME}/git:/data/repos:ro
     devices:
       - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
@@ -68,59 +174,60 @@ services:
       - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=3)\""]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 3
 
-  # MCP HTTP/SSE server — exposes all aichat tools to LM Studio and other
-  # MCP clients over the network.  Reachable at http://<host-ip>:8096/sse
+  # ---------------------------------------------------------------------------
+  # aichat-mcp: MCP HTTP/SSE gateway (port 8096)
+  #   Exposes all tools to LM Studio and other MCP clients.
+  #   Reachable at http://<host-ip>:8096/sse
+  # ---------------------------------------------------------------------------
   aichat-mcp:
     build: ./docker/mcp
+    container_name: aichat-mcp
     environment:
-      DATABASE_URL: http://aichat-database:8091
-      MEMORY_URL:   http://aichat-memory:8094
-      RESEARCH_URL: http://aichat-researchbox:8092
-      TOOLKIT_URL:  http://aichat-toolkit:8095
-      # human_browser is connected to this network by the install script
-      # so it is reachable by hostname from within the container.
-      BROWSER_URL:  http://human_browser:7081
+      # Consolidated service URLs
+      DATABASE_URL:     http://aichat-data:8091
+      MEMORY_URL:       http://aichat-data:8091/memory
+      RESEARCH_URL:     http://aichat-data:8091/research
+      TOOLKIT_URL:      http://aichat-sandbox:8095
+      GRAPH_URL:        http://aichat-data:8091/graph
+      VECTOR_URL:       http://aichat-vector:6333
+      VIDEO_URL:        http://aichat-vision:8099
+      OCR_URL:          http://aichat-vision:8099/ocr
+      DOCS_URL:         http://aichat-docs:8101
+      PLANNER_URL:      http://aichat-data:8091/planner
+      PDF_URL:          http://aichat-docs:8101/pdf
+      JOB_URL:          http://aichat-data:8091/jobs
+      # human_browser is connected to this network by the install script.
+      BROWSER_URL:      http://human_browser:7081
       # Image generation — points at LM Studio (or any OpenAI-compatible image API).
       # Set IMAGE_GEN_MODEL to the exact model name shown in LM Studio to pin a model.
       IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
-      IMAGE_GEN_MODEL: ""
+      IMAGE_GEN_MODEL:  ""
       INTEL_GPU: "1"
       LIBVA_DRIVER_NAME: iHD
-      # New services
-      GRAPH_URL:   http://aichat-graph:8098
-      VECTOR_URL:  http://aichat-vector:6333
-      VIDEO_URL:   http://aichat-video:8099
-      OCR_URL:     http://aichat-ocr:8100
-      DOCS_URL:    http://aichat-docs:8101
-      PLANNER_URL: http://aichat-planner:8102
-      PDF_URL:     http://aichat-pdf:8103
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Read/write the browser screenshot workspace — rw allows saving pipeline outputs
+      # Read/write the browser screenshot workspace
       - /docker/human_browser/workspace:/browser-workspace
     depends_on:
-      - aichat-database
-      - aichat-memory
-      - aichat-researchbox
-      - aichat-graph
-      - aichat-vector
-      - aichat-video
-      - aichat-ocr
-      - aichat-docs
-      - aichat-planner
-      - aichat-pdf
+      aichat-data:
+        condition: service_healthy
+      aichat-vision:
+        condition: service_healthy
+      aichat-docs:
+        condition: service_healthy
+      aichat-sandbox:
+        condition: service_healthy
+      aichat-vector:
+        condition: service_started
     ports:
       - "8096:8096"
-    # ── GPU passthrough ─────────────────────────────────────────────────────
     # Intel Arc A380: card1 (video) + renderD128 (render/OpenCL).
-    # group_add uses host GIDs: 39=video, 105=render.  Numeric GIDs are used
-    # because container images may not define these group names in /etc/group.
     devices:
       - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
     group_add:
@@ -135,7 +242,6 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
-    # ────────────────────────────────────────────────────────────────────────
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8096/health', timeout=3)\""]
@@ -143,59 +249,16 @@ services:
       timeout: 5s
       retries: 3
 
-  aichat-memory:
-    build: ./docker/memory
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-    depends_on:
-      - aichat-database
-    ports:
-      - "8094:8094"
-    volumes:
-      - memorydb:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  aichat-toolkit:
-    build: ./docker/toolkit
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-      INTEL_GPU: "1"
-    depends_on:
-      - aichat-database
-    ports:
-      - "8095:8095"
-    volumes:
-      - ${HOME}/.config/aichat/tools:/data/tools
-      - ${HOME}/git:/data/repos:ro
-    # ── GPU passthrough ─────────────────────────────────────────────────────
-    # Intel Arc A380: gives custom tools access to numpy/cv2 with OpenCL acceleration.
-    # group_add uses host GIDs: 39=video, 105=render.
-    devices:
-      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
-    group_add:
-      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
-      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
-    # ────────────────────────────────────────────────────────────────────────
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # WhatsApp bot — Baileys + LM Studio with full MCP tool support.
-  # Visit http://localhost:8097 to scan the QR code and pair a number.
+  # ---------------------------------------------------------------------------
+  # aichat-whatsapp: WhatsApp bot (optional, port 8097)
+  #   Visit http://localhost:8097 to scan the QR code and pair a number.
+  # ---------------------------------------------------------------------------
   aichat-whatsapp:
     build: ./docker/whatsapp
     environment:
       LM_STUDIO_URL: http://host.docker.internal:1234
       MCP_URL:       http://aichat-mcp:8096
-      MEMORY_URL:    http://aichat-memory:8094
+      MEMORY_URL:    http://aichat-data:8091/memory
       BOT_NAME:      AI Assistant
       MAX_HISTORY:   "20"
       MAX_TOOL_ITER: "5"
@@ -204,183 +267,20 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - aichat-memory
-      - aichat-mcp
-      - aichat-toolkit
+      aichat-data:
+        condition: service_healthy
+      aichat-mcp:
+        condition: service_healthy
+      aichat-sandbox:
+        condition: service_healthy
     ports:
       - "8097:8097"
     volumes:
       - whatsappauth:/data/auth
     restart: unless-stopped
 
-  # ---------------------------------------------------------------------------
-  # Knowledge graph: SQLite-backed node/edge store with NetworkX path queries.
-  aichat-graph:
-    build: ./docker/graph
-    container_name: aichat-graph
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-    depends_on:
-      - aichat-database
-    ports:
-      - "8098:8098"
-    volumes:
-      - graphdb:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8098/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ---------------------------------------------------------------------------
-  # Vector DB: Qdrant for semantic search (multi-collection, filtered search).
-  aichat-vector:
-    image: qdrant/qdrant:latest
-    container_name: aichat-vector
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrantdb:/qdrant/storage
-    restart: unless-stopped
-
-  # ---------------------------------------------------------------------------
-  # Video analysis: FFmpeg frame extraction, thumbnails, metadata.
-  aichat-video:
-    build: ./docker/video
-    container_name: aichat-video
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-      WORKSPACE: /workspace
-      INTEL_GPU: "1"
-      LIBVA_DRIVER_NAME: iHD
-    depends_on:
-      - aichat-database
-    ports:
-      - "8099:8099"
-    volumes:
-      - /docker/human_browser/workspace:/workspace:rw
-    # ── GPU passthrough ─────────────────────────────────────────────────────
-    # Intel Arc A380: FFmpeg hardware video encode/decode via VA-API + OpenCL.
-    # group_add uses host GIDs: 39=video, 105=render.
-    devices:
-      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
-    group_add:
-      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
-      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc VA-API/OpenCL)
-    # ────────────────────────────────────────────────────────────────────────
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ---------------------------------------------------------------------------
-  # OCR: Tesseract image/PDF text extraction.
-  aichat-ocr:
-    build: ./docker/ocr
-    container_name: aichat-ocr
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-      WORKSPACE: /workspace
-      INTEL_GPU: "1"
-      LIBVA_DRIVER_NAME: iHD
-    depends_on:
-      - aichat-database
-    ports:
-      - "8100:8100"
-    volumes:
-      - /docker/human_browser/workspace:/workspace:ro
-    # ── GPU passthrough ─────────────────────────────────────────────────────
-    # Intel Arc A380: Tesseract + PDF2Image can use OpenCL for image preprocessing.
-    # group_add uses host GIDs: 39=video, 105=render.
-    devices:
-      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
-    group_add:
-      - "${INTEL_VIDEO_GID:-39}"    # host video GID  — DRI card1
-      - "${INTEL_RENDER_GID:-105}"  # host render GID — DRI renderD128 (Intel Arc OpenCL)
-    # ────────────────────────────────────────────────────────────────────────
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ---------------------------------------------------------------------------
-  # Document ingestor: PDF/DOCX/XLSX/PPTX/HTML → Markdown (no ML).
-  aichat-docs:
-    build: ./docker/docs
-    container_name: aichat-docs
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-    depends_on:
-      - aichat-database
-    ports:
-      - "8101:8101"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8101/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ---------------------------------------------------------------------------
-  # PDF service: precise read/edit/form/merge/split operations.
-  aichat-pdf:
-    build: ./docker/pdf
-    container_name: aichat-pdf
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-      OCR_URL: http://aichat-ocr:8100
-      WORKSPACE: /workspace
-      INTEL_GPU: "1"
-      LIBVA_DRIVER_NAME: iHD
-    depends_on:
-      - aichat-database
-      - aichat-ocr
-    ports:
-      - "8103:8103"
-    volumes:
-      - /docker/human_browser/workspace:/workspace:rw
-    devices:
-      - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
-    group_add:
-      - "${INTEL_VIDEO_GID:-39}"
-      - "${INTEL_RENDER_GID:-105}"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8103/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ---------------------------------------------------------------------------
-  # Task planner: SQLite-backed dependency-aware task queue.
-  aichat-planner:
-    build: ./docker/planner
-    container_name: aichat-planner
-    environment:
-      DATABASE_URL: http://aichat-database:8091
-    depends_on:
-      - aichat-database
-    ports:
-      - "8102:8102"
-    volumes:
-      - plannerdb:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8102/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
 volumes:
-  aichatdb:
-  memorydb:
-  whatsappauth:
-  graphdb:
-  qdrantdb:
-  plannerdb:
+  aichatdb:       # PostgreSQL data
+  datadb:         # aichat-data: SQLite stores (memory, graph, planner, jobs)
+  qdrantdb:       # Qdrant vector storage
+  whatsappauth:   # WhatsApp session credentials

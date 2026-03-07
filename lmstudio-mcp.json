@@ -1,0 +1,2169 @@
+{
+  "mcpServers": {
+    "aichat": {
+      "url": "http://localhost:8096/sse",
+      "transport": "sse",
+      "description": "aichat MCP platform \u2014 83 tools for browser, vision, docs, memory, graph, vector, jobs, and more.",
+      "tools": [
+        {
+          "name": "batch_submit",
+          "description": "Submit a batch of tool calls as async jobs in one request. Returns a list of job_ids. Use job_status/job_result to track each. Supports deduplication and concurrency control via priority.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "description": "List of jobs to submit.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "tool_name": {
+                      "type": "string"
+                    },
+                    "args": {
+                      "type": "object"
+                    },
+                    "priority": {
+                      "type": "integer"
+                    },
+                    "timeout_s": {
+                      "type": "number"
+                    },
+                    "max_retries": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "tool_name",
+                    "args"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "items"
+            ]
+          }
+        },
+        {
+          "name": "browser",
+          "description": "Control a real Chromium browser running in the human_browser Docker container via Playwright. The browser keeps its state between calls (same live session), so you can navigate to a page, click a button, fill a form, then read the result. Actions: navigate \u2014 go to a URL and return page title + readable text; read \u2014 return the current page title + text without navigating; click/left_click/right_click \u2014 click a CSS selector and return updated content; scroll \u2014 scroll the page up/down/left/right by pixels; fill \u2014 type text into a CSS selector input; eval \u2014 run a JavaScript expression and return its result; screenshot_element \u2014 take a precise screenshot cropped to a CSS selector element; list_images_detail \u2014 list all <img> elements with src, alt, dimensions, and viewport info; save_images/download_page_images \u2014 persist page images using the browser's live session.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "navigate",
+                  "read",
+                  "click",
+                  "left_click",
+                  "right_click",
+                  "scroll",
+                  "fill",
+                  "eval",
+                  "screenshot_element",
+                  "list_images_detail",
+                  "save_images",
+                  "download_page_images"
+                ],
+                "description": "Which browser action to perform."
+              },
+              "url": {
+                "type": "string",
+                "description": "URL to navigate to (navigate action only)."
+              },
+              "selector": {
+                "type": "string",
+                "description": "CSS selector for click / fill / screenshot_element actions. For screenshot_element, use any valid CSS selector, e.g. 'img.hero', '#logo', 'article img:first-child'."
+              },
+              "value": {
+                "type": "string",
+                "description": "Text to type into the element (fill action only)."
+              },
+              "code": {
+                "type": "string",
+                "description": "JavaScript expression to evaluate (eval action only)."
+              },
+              "button": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "right",
+                  "middle"
+                ],
+                "description": "Mouse button for click action (default left)."
+              },
+              "click_count": {
+                "type": "integer",
+                "description": "Number of clicks for click action (default 1)."
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down",
+                  "left",
+                  "right"
+                ],
+                "description": "Scroll direction for scroll action."
+              },
+              "amount": {
+                "type": "integer",
+                "description": "Pixels to scroll for scroll action (default 800)."
+              },
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "instant",
+                  "smooth"
+                ],
+                "description": "Scroll behavior for scroll action (default instant)."
+              },
+              "pad": {
+                "type": "integer",
+                "description": "Padding in pixels around the element for screenshot_element (default 20)."
+              },
+              "urls": {
+                "description": "Image URLs to download for save_images (list or comma-separated string)."
+              },
+              "prefix": {
+                "type": "string",
+                "description": "Filename prefix for save_images/download_page_images (default image)."
+              },
+              "max": {
+                "type": "integer",
+                "description": "Max images for save_images/download_page_images (default 20)."
+              },
+              "filter": {
+                "type": "string",
+                "description": "Optional src/alt substring filter for download_page_images."
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        },
+        {
+          "name": "browser_download_page_images",
+          "description": "Navigate to a URL (or use the current browser page) and download all visible <img> elements using the browser's live session \u2014 the same as a human saving every image on a page. Optionally filter by a substring in the image src or alt. Uses cookies, auth headers, and referrer so auth-gated or CDN-protected images are downloaded successfully. Returns saved file paths and inline previews of the first few images.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Optional. Navigate to this URL first, then download images. If omitted, downloads images from the current browser page."
+              },
+              "filter": {
+                "type": "string",
+                "description": "Optional substring to match against image src or alt text. Only images containing this string are downloaded. Examples: 'product', 'hero', '.jpg', 'thumbnail'."
+              },
+              "prefix": {
+                "type": "string",
+                "description": "Filename prefix for saved files (default 'image')."
+              },
+              "max": {
+                "type": "integer",
+                "description": "Maximum number of images to download (default 20, max 50)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "browser_save_images",
+          "description": "Download specific image URLs using the real Chromium browser's live session \u2014 exactly like a human right-clicking 'Save Image As'. Because it uses the browser's cookies, auth tokens, and referrer headers it succeeds on auth-gated images, CDN-protected images, session-bound content, and lazy-loaded images that a plain HTTP download would fail on. Pass urls as a JSON array of image URLs (or a comma-separated string). Files are saved to the browser workspace and returned as inline images.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "urls": {
+                "description": "Image URLs to download. Accepts a JSON array of strings, or a single comma-separated string. Get these from browser list_images_detail or from page source."
+              },
+              "prefix": {
+                "type": "string",
+                "description": "Filename prefix for saved files (default 'image')."
+              },
+              "max": {
+                "type": "integer",
+                "description": "Maximum number of images to download (default 20, max 50)."
+              }
+            },
+            "required": [
+              "urls"
+            ]
+          }
+        },
+        {
+          "name": "bulk_screenshot",
+          "description": "Take screenshots of multiple URLs in parallel and return them all inline. Useful for monitoring a list of pages, comparing several sites, or batch-capturing search results. Returns up to 6 screenshots; for larger batches use repeated screenshot calls.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "urls": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of URLs to screenshot (max 6)."
+              }
+            },
+            "required": [
+              "urls"
+            ]
+          }
+        },
+        {
+          "name": "call_custom_tool",
+          "description": "Call a previously created custom tool by name. Use list_custom_tools first to see available tool names and their parameter schemas.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the custom tool to call."
+              },
+              "params": {
+                "type": "object",
+                "description": "Parameters to pass to the tool (must match its schema)."
+              }
+            },
+            "required": [
+              "tool_name"
+            ]
+          }
+        },
+        {
+          "name": "code_run",
+          "description": "Execute arbitrary Python code in a sandboxed subprocess with a 30-second timeout. Returns stdout, stderr, exit code, and duration. Optionally installs pip packages before running. GPU support: when code references torch/tensorflow/cuda, a DEVICE variable is automatically injected ('cuda', 'mps', or 'cpu') \u2014 use model.to(DEVICE) without any setup. Pre-installed packages: numpy, scipy, opencv-python-headless (cv2), Pillow, httpx. Larger GPU frameworks (torch, tensorflow) can be installed via packages param. Use for data analysis, GPU tensor operations, image processing, or testing code snippets.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Python source code to execute."
+              },
+              "packages": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional list of pip packages to install before running (e.g. ['requests', 'pandas'])."
+              },
+              "timeout": {
+                "type": "integer",
+                "description": "Wall-clock timeout in seconds (default 30, max 120)."
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        {
+          "name": "create_tool",
+          "description": "Create a new persistent custom tool that runs inside the aichat-toolkit Docker sandbox. The tool is saved to disk and immediately available \u2014 in this session and all future sessions. Use this when you need a capability not covered by built-in tools. Tools can make HTTP calls (httpx), process data, call APIs, run shell commands (subprocess/asyncio.create_subprocess_exec), and read files from user repos at /data/repos.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string",
+                "description": "Snake_case identifier (e.g. 'get_stock_price')."
+              },
+              "description": {
+                "type": "string",
+                "description": "What the tool does \u2014 shown when deciding which tool to call."
+              },
+              "parameters": {
+                "type": "object",
+                "description": "JSON Schema object for the tool's inputs. Example: {\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
+              },
+              "code": {
+                "type": "string",
+                "description": "Python implementation \u2014 the body of `async def run(**kwargs) -> str:`. Available: asyncio, json, re, os, math, datetime, pathlib, shlex, subprocess, httpx. Access parameters via kwargs. Must return a string."
+              }
+            },
+            "required": [
+              "tool_name",
+              "description",
+              "code"
+            ]
+          }
+        },
+        {
+          "name": "db_cache_get",
+          "description": "Retrieve a cached web page from PostgreSQL.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "db_cache_store",
+          "description": "Cache a web page's content in PostgreSQL.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url",
+              "content"
+            ]
+          }
+        },
+        {
+          "name": "db_list_images",
+          "description": "List screenshots and images saved in the PostgreSQL database.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "description": "Max images to return (default 20)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "db_search",
+          "description": "Search stored articles in PostgreSQL by topic and/or full-text query.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              },
+              "q": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Max results (default 20)."
+              },
+              "offset": {
+                "type": "integer",
+                "description": "Skip first N results for pagination (default 0)."
+              },
+              "summary_only": {
+                "type": "boolean",
+                "description": "Truncate content to 300 chars for compact results (default false)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "db_store_article",
+          "description": "Store an article (url, title, content, topic) in PostgreSQL.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "db_store_image",
+          "description": "Save a screenshot or image reference to the PostgreSQL image registry.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Source URL the image was captured from."
+              },
+              "host_path": {
+                "type": "string",
+                "description": "Host file path of the image."
+              },
+              "alt_text": {
+                "type": "string",
+                "description": "Description or caption."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "delete_custom_tool",
+          "description": "Permanently delete a custom tool you previously created.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the tool to delete."
+              }
+            },
+            "required": [
+              "tool_name"
+            ]
+          }
+        },
+        {
+          "name": "docs_extract_tables",
+          "description": "Extract all tables from a document as structured JSON. Each table has a title, headers list, and rows list. Supports PDF, DOCX, XLSX, HTML. Use when you need the data from tables in a structured format for analysis.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTP/HTTPS URL of the document."
+              },
+              "path": {
+                "type": "string",
+                "description": "Workspace file path."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Filename with extension."
+              }
+            }
+          }
+        },
+        {
+          "name": "docs_ingest",
+          "description": "Convert a document (PDF, DOCX, XLSX, PPTX, HTML, MD, TXT) to clean Markdown. Accepts a URL (downloaded automatically) or a workspace file path. Extracts headings, paragraphs, and tables in normalized Markdown format. Pipeline: docs_ingest \u2192 smart_summarize to summarize any document in one step.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTP/HTTPS URL of the document (alternative to path)."
+              },
+              "path": {
+                "type": "string",
+                "description": "Workspace file path (alternative to url)."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Filename with extension \u2014 needed for format detection when using path."
+              }
+            }
+          }
+        },
+        {
+          "name": "embed_search",
+          "description": "Embed a query string and find the most semantically similar documents previously stored via embed_store. Uses cosine similarity on LM Studio embeddings. Returns ranked results with similarity scores.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The search query to embed and match against stored documents."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default 5)."
+              },
+              "topic": {
+                "type": "string",
+                "description": "Filter results to a specific topic tag (optional)."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "embed_store",
+          "description": "Embed a piece of text using LM Studio's /v1/embeddings endpoint and store it in the PostgreSQL database for later semantic search. Use a meaningful key (e.g. URL or doc ID) and optional topic for filtering. Pipeline: embed_store \u2192 embed_search to find semantically similar documents.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Unique identifier for this document (URL, hash, or descriptive ID)."
+              },
+              "content": {
+                "type": "string",
+                "description": "The text to embed and store (up to ~8000 chars)."
+              },
+              "topic": {
+                "type": "string",
+                "description": "Optional topic tag for filtering (e.g. 'science', 'news')."
+              }
+            },
+            "required": [
+              "key",
+              "content"
+            ]
+          }
+        },
+        {
+          "name": "extract_article",
+          "description": "Fetch a URL and extract a clean, readable article (title, byline, publish date, and body text) stripping all ads, nav, and boilerplate. Returns plain text ready for the model to summarise. Much faster than screenshot for text-heavy pages.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The article URL to fetch and extract."
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "Truncate article body to this many characters (default 8000)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "face_recognize",
+          "description": "Detect faces in an image and optionally compare them against a reference face. Returns an annotated image with face boxes and a text summary. Use this for people-photo triage, frame inspection, and basic same-person checks.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path to analyze (supports bare filename, /workspace/..., or host path)."
+              },
+              "reference_path": {
+                "type": "string",
+                "description": "Optional second image containing a reference face. When provided, each detected face in 'path' is scored against it."
+              },
+              "match_threshold": {
+                "type": "number",
+                "description": "Similarity threshold (0.0-1.0) for same-person match, default 0.82."
+              },
+              "min_face_size": {
+                "type": "integer",
+                "description": "Minimum face size in pixels for detection (default 40)."
+              },
+              "annotate": {
+                "type": "boolean",
+                "description": "If true (default), draw face boxes/labels on the output image."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "fetch_image",
+          "description": "Download an image directly from a URL (jpg, png, gif, webp, etc.) and return it as an inline rendered image. Also saves metadata to the PostgreSQL image registry. Use this when the user provides a direct image URL and wants to view or save it, rather than screenshotting a full web page.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Direct URL to the image file (http/https)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "get_errors",
+          "description": "Query the structured error log stored in PostgreSQL. Returns recent application errors from all aichat services (aichat-mcp, aichat-memory, aichat-toolkit, aichat-researchbox, etc.). Use this to diagnose failures, check service health history, or audit errors.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of error entries to return (default 50, max 200)."
+              },
+              "service": {
+                "type": "string",
+                "description": "Filter by service name (e.g. 'aichat-memory'). Omit to see all services."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "graph_add_edge",
+          "description": "Add a directed edge between two nodes in the knowledge graph. Edges have a from_id, to_id, type (relationship label), and optional properties. Example: graph_add_edge(from_id='person:alice', to_id='org:mit', type='works_at').",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "from_id": {
+                "type": "string",
+                "description": "Source node ID."
+              },
+              "to_id": {
+                "type": "string",
+                "description": "Target node ID."
+              },
+              "type": {
+                "type": "string",
+                "description": "Relationship type (e.g. 'knows', 'works_at', 'related_to')."
+              },
+              "properties": {
+                "type": "object",
+                "description": "Optional edge metadata."
+              }
+            },
+            "required": [
+              "from_id",
+              "to_id"
+            ]
+          }
+        },
+        {
+          "name": "graph_add_node",
+          "description": "Add or update a node in the knowledge graph. Nodes have an ID, a list of labels (categories), and arbitrary JSON properties. Use this to build a persistent knowledge base of entities and concepts. Pipeline: graph_add_node \u2192 graph_add_edge to connect nodes \u2192 graph_query to explore.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique node ID (e.g. 'person:alice', 'concept:AI')."
+              },
+              "labels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Category labels (e.g. ['Person', 'Researcher'])."
+              },
+              "properties": {
+                "type": "object",
+                "description": "Arbitrary key-value metadata."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "graph_path",
+          "description": "Find the shortest path between two nodes in the knowledge graph using BFS. Returns the list of node IDs forming the path, or null if no path exists. Useful for discovering indirect relationships between entities.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "from_id": {
+                "type": "string",
+                "description": "Starting node ID."
+              },
+              "to_id": {
+                "type": "string",
+                "description": "Target node ID."
+              }
+            },
+            "required": [
+              "from_id",
+              "to_id"
+            ]
+          }
+        },
+        {
+          "name": "graph_query",
+          "description": "Get a node and all its connected neighbors from the knowledge graph. Returns the node's properties plus its outgoing and incoming edges. Use this to explore what is connected to a known entity.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Node ID to look up."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "graph_search",
+          "description": "Search the knowledge graph for nodes matching a label and/or property values. Returns a list of matching nodes with their properties. Example: graph_search(label='Person', properties={'city': 'Seattle'}).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Node label to filter by (substring match)."
+              },
+              "properties": {
+                "type": "object",
+                "description": "Property key-value pairs to match exactly."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Max results (default 50)."
+              }
+            }
+          }
+        },
+        {
+          "name": "image_annotate",
+          "description": "Draw bounding boxes and labels on a screenshot to highlight regions of interest. Useful for marking UI elements, errors, or areas to fix before sending to the user.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path to annotate."
+              },
+              "boxes": {
+                "type": "array",
+                "description": "List of bounding box objects: each has 'left', 'top', 'right', 'bottom' (pixels), optional 'label' (string), optional 'color' (hex e.g. '#FF0000', default red).",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "left": {
+                      "type": "integer"
+                    },
+                    "top": {
+                      "type": "integer"
+                    },
+                    "right": {
+                      "type": "integer"
+                    },
+                    "bottom": {
+                      "type": "integer"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "color": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "left",
+                    "top",
+                    "right",
+                    "bottom"
+                  ]
+                }
+              },
+              "outline_width": {
+                "type": "integer",
+                "description": "Thickness of the bounding box outline in pixels (default 3)."
+              }
+            },
+            "required": [
+              "path",
+              "boxes"
+            ]
+          }
+        },
+        {
+          "name": "image_caption",
+          "description": "Describe an image in detail using LM Studio's vision model. Pass the image as a base64-encoded JPEG string. Returns a detailed description including subject, colors, style, and notable elements. Pipeline: fetch_image \u2192 image_caption (describe) or screenshot \u2192 image_caption.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "b64": {
+                "type": "string",
+                "description": "Base64-encoded JPEG image data (without data: URI prefix)."
+              },
+              "detail_level": {
+                "type": "string",
+                "enum": [
+                  "brief",
+                  "detailed"
+                ],
+                "description": "brief = one sentence, detailed = full description with colors/mood/style (default detailed)."
+              }
+            },
+            "required": [
+              "b64"
+            ]
+          }
+        },
+        {
+          "name": "image_crop",
+          "description": "Crop a saved screenshot or image to a specific pixel region and return it inline. Use this after screenshot to isolate a panel, chart, button, or any rectangular area. Step 1 in the zoom-scan pipeline: crop \u2192 zoom \u2192 scan.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Filename (e.g. 'screenshot_20260224_120000.png'), container path (/workspace/\u2026), or host path (/docker/human_browser/workspace/\u2026)."
+              },
+              "left": {
+                "type": "integer",
+                "description": "Left edge in pixels (default 0)."
+              },
+              "top": {
+                "type": "integer",
+                "description": "Top edge in pixels (default 0)."
+              },
+              "right": {
+                "type": "integer",
+                "description": "Right edge in pixels (default: image width)."
+              },
+              "bottom": {
+                "type": "integer",
+                "description": "Bottom edge in pixels (default: image height)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "image_diff",
+          "description": "Show a pixel-level visual diff between two screenshots. Changed pixels are highlighted in red on a white background so it is easy to spot what changed between two page states. Useful after interactions (click, scroll, fill).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path_a": {
+                "type": "string",
+                "description": "First image (before state) \u2014 filename or path."
+              },
+              "path_b": {
+                "type": "string",
+                "description": "Second image (after state) \u2014 filename or path."
+              },
+              "amplify": {
+                "type": "number",
+                "description": "Multiply pixel differences by this factor so subtle changes are visible (default 3.0)."
+              }
+            },
+            "required": [
+              "path_a",
+              "path_b"
+            ]
+          }
+        },
+        {
+          "name": "image_edit",
+          "description": "Edit or remix an existing image using a text prompt (img2img / inpainting). Loads an image from the workspace, applies the prompt-guided transformation, and returns the result inline. Pipeline: screenshot \u2192 image_edit('make it look like a watercolor') \u2192 image_diff(original, edited). Note: requires LM Studio to support /v1/images/edits \u2014 support varies by model.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Source image filename or path (from workspace). Same formats as image_crop."
+              },
+              "prompt": {
+                "type": "string",
+                "description": "Editing instruction, e.g. 'make it look like an oil painting' or 'change the sky to night'."
+              },
+              "negative_prompt": {
+                "type": "string",
+                "description": "What to avoid in the result (optional)."
+              },
+              "model": {
+                "type": "string",
+                "description": "Model name to use (optional)."
+              },
+              "size": {
+                "type": "string",
+                "description": "Output size, e.g. '512x512' (optional, default matches source)."
+              },
+              "strength": {
+                "type": "number",
+                "description": "How much to transform 0.0\u20131.0. Lower = more like original, higher = more creative (default 0.75)."
+              },
+              "n": {
+                "type": "integer",
+                "description": "Number of variations to generate (default 1)."
+              }
+            },
+            "required": [
+              "path",
+              "prompt"
+            ]
+          }
+        },
+        {
+          "name": "image_enhance",
+          "description": "Apply visual enhancements to a saved screenshot \u2014 adjust contrast, sharpness, and brightness, or convert to greyscale. Returns the enhanced image inline. Useful for making dark screenshots, blurry text, or low-contrast charts easier to read.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path."
+              },
+              "contrast": {
+                "type": "number",
+                "description": "Contrast multiplier 0.5\u20134.0 (default 1.5)."
+              },
+              "sharpness": {
+                "type": "number",
+                "description": "Sharpness multiplier 0.5\u20134.0 (default 1.5)."
+              },
+              "brightness": {
+                "type": "number",
+                "description": "Brightness multiplier 0.5\u20133.0 (default 1.0)."
+              },
+              "grayscale": {
+                "type": "boolean",
+                "description": "Convert to greyscale before enhancing (default false)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "image_generate",
+          "description": "Generate an image from a text prompt using LM Studio's OpenAI-compatible image API (requires an image generation model such as FLUX or SDXL to be loaded in LM Studio). The generated image is returned inline and saved to the workspace so it can be passed directly into image_crop, image_zoom, image_scan, image_annotate, image_stitch, etc. Pipeline: image_generate \u2192 image_upscale \u2192 image_scan (to read text in generated image) or image_generate \u00d7 2 \u2192 image_stitch \u2192 image_diff (style comparison).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string",
+                "description": "Text description of the image to generate. Be detailed and specific."
+              },
+              "negative_prompt": {
+                "type": "string",
+                "description": "What to avoid in the image (e.g. 'blurry, low quality, watermark')."
+              },
+              "model": {
+                "type": "string",
+                "description": "Model name as shown in LM Studio (optional; uses IMAGE_GEN_MODEL env var or server default)."
+              },
+              "size": {
+                "type": "string",
+                "description": "Image dimensions WxH, e.g. '512x512', '768x768', '1024x1024' (default '512x512')."
+              },
+              "n": {
+                "type": "integer",
+                "description": "Number of images to generate 1\u20134 (default 1)."
+              },
+              "steps": {
+                "type": "integer",
+                "description": "Inference steps \u2014 more steps = higher quality, slower (optional, provider-specific)."
+              },
+              "guidance_scale": {
+                "type": "number",
+                "description": "Prompt adherence strength 1\u201320. Higher = follows prompt more strictly (optional)."
+              },
+              "seed": {
+                "type": "integer",
+                "description": "Random seed for reproducible results (optional, -1 = random)."
+              }
+            },
+            "required": [
+              "prompt"
+            ]
+          }
+        },
+        {
+          "name": "image_remix",
+          "description": "Style-transfer / creative remix of an existing workspace image using GPU AI (LM Studio). Differs from image_edit: image_remix is for creative transformation (style, mood, medium) while image_edit is for content edits (remove object, change sky). Examples: 'anime style', 'oil painting', 'cyberpunk neon', 'make it dark mode', 'pixel art', 'watercolor sketch'. Uses /v1/images/edits with a moderate strength to preserve structure. Requires an image-generation model in LM Studio; returns a friendly error if none is loaded. Returns up to 4 inline image variations.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Source image filename or path in the workspace."
+              },
+              "prompt": {
+                "type": "string",
+                "description": "Style / transformation description, e.g. 'anime style' or 'oil painting on canvas'."
+              },
+              "strength": {
+                "type": "number",
+                "description": "Transformation strength 0.1\u20131.0 (default 0.65). Lower = more faithful to source, higher = more creative."
+              },
+              "n": {
+                "type": "integer",
+                "description": "Number of variations to return, 1\u20134 (default 1)."
+              }
+            },
+            "required": [
+              "path",
+              "prompt"
+            ]
+          }
+        },
+        {
+          "name": "image_scan",
+          "description": "Prepare a screenshot region for text reading by the vision model. Converts to greyscale, boosts contrast 2.5\u00d7, sharpens 3\u00d7, scales up small regions, and returns the enhanced image inline so the model can read any text in it. Step 3 in the zoom-scan pipeline: crop \u2192 zoom \u2192 scan.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path (same formats as image_crop)."
+              },
+              "left": {
+                "type": "integer",
+                "description": "Scan region left (default 0 = whole image)."
+              },
+              "top": {
+                "type": "integer",
+                "description": "Scan region top (default 0)."
+              },
+              "right": {
+                "type": "integer",
+                "description": "Scan region right (default: image width)."
+              },
+              "bottom": {
+                "type": "integer",
+                "description": "Scan region bottom (default: image height)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "image_search",
+          "description": "Search for any image by text description and return MULTIPLE images rendered inline. Uses query expansion (game shorthands, artwork variant), collects candidates from multiple pages and query variants, enforces domain diversity (max 2 per domain), fetches in parallel, and deduplicates via seen-URL cache so repeated calls return DIFFERENT images. Use 'offset' to paginate to the next batch. Use for character art, outfit skins, product photos, logos, screenshots, or any visual content. Example: 'Klukai GFL2 Cerulean Breaker outfit', 'Eiffel Tower night'.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Natural-language description of the image to find."
+              },
+              "count": {
+                "type": "integer",
+                "description": "Number of images to return (default 4, max 20)."
+              },
+              "offset": {
+                "type": "integer",
+                "description": "Skip first N ranked candidates for pagination (default 0)."
+              },
+              "domains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional hostname allow-list for safer/more-specific retrieval (e.g. ['iopwiki.com','fandom.com'])."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "image_stitch",
+          "description": "Combine two or more saved screenshots side-by-side (horizontal) or stacked (vertical). Useful for comparing before/after states, merging multi-panel pages, or building a composite view of several cropped regions.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of image filenames or paths to combine (in order, 2\u20138 images)."
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "horizontal",
+                  "vertical"
+                ],
+                "description": "Stack images left-to-right ('horizontal') or top-to-bottom ('vertical'). Default: vertical."
+              },
+              "gap": {
+                "type": "integer",
+                "description": "Pixel gap between images (default 0)."
+              }
+            },
+            "required": [
+              "paths"
+            ]
+          }
+        },
+        {
+          "name": "image_upscale",
+          "description": "Upscale a saved image. GPU AI (via LM Studio) is the primary path \u2014 supports both NVIDIA and Intel Arc GPUs. CPU LANCZOS is the fallback only when no GPU model is available. Works on any image in the workspace including generated images, screenshots, or crops. Set gpu=false to force CPU-only (LANCZOS + optional sharpening). Pipeline: image_generate \u2192 image_upscale(scale=4) \u2192 image_scan (read fine text in generated image). Also useful for making small thumbnails or cropped regions large enough for the vision model to read.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path to upscale (same formats as image_crop)."
+              },
+              "scale": {
+                "type": "number",
+                "description": "CPU LANCZOS upscale factor: 2.0 = 200%, max 8.0 (default 2.0). Ignored when GPU path succeeds."
+              },
+              "sharpen": {
+                "type": "boolean",
+                "description": "Apply a sharpening pass after CPU LANCZOS upscaling (default true). Ignored when GPU path succeeds."
+              },
+              "gpu": {
+                "type": "boolean",
+                "description": "Default unset/true = try GPU first (NVIDIA + Intel Arc via LM Studio). Set gpu=false to force CPU LANCZOS only (no LM Studio call)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "image_zoom",
+          "description": "Zoom into a region of a saved screenshot by a scale factor and return it inline. Optionally crop first (left/top/right/bottom) then scale. Scale 2.0 = 200%. Step 2 in the zoom-scan pipeline: crop \u2192 zoom \u2192 scan.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Image filename or path (same formats as image_crop)."
+              },
+              "scale": {
+                "type": "number",
+                "description": "Zoom factor: 2.0 = 200%, max 8.0 (default 2.0)."
+              },
+              "left": {
+                "type": "integer",
+                "description": "Crop left before zooming (default 0)."
+              },
+              "top": {
+                "type": "integer",
+                "description": "Crop top before zooming (default 0)."
+              },
+              "right": {
+                "type": "integer",
+                "description": "Crop right before zooming (default: image width)."
+              },
+              "bottom": {
+                "type": "integer",
+                "description": "Crop bottom before zooming (default: image height)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "job_cancel",
+          "description": "Cancel a queued or running async job.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "description": "Job ID to cancel."
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        },
+        {
+          "name": "job_list",
+          "description": "List async jobs with optional status filter.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "description": "Filter by status: queued, running, succeeded, failed, cancelled."
+              },
+              "tool_name": {
+                "type": "string",
+                "description": "Filter by tool name."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Max results. Default 20."
+              }
+            }
+          }
+        },
+        {
+          "name": "job_result",
+          "description": "Retrieve the result of a completed async job. Returns the tool output text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "description": "Job ID returned by job_submit."
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        },
+        {
+          "name": "job_status",
+          "description": "Check the status of an async job submitted with job_submit. Returns status, progress, timing, and any error.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "description": "Job ID returned by job_submit."
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        },
+        {
+          "name": "job_submit",
+          "description": "Submit a long-running tool call as an async background job. Returns a job_id immediately. Use job_status to poll for completion and job_result to retrieve output. Ideal for expensive operations like bulk_screenshot, docs_ingest, video_frames, ocr_pdf, image_generate, structured_extract, and embed_store over large inputs.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string",
+                "description": "MCP tool name to run asynchronously."
+              },
+              "args": {
+                "type": "object",
+                "description": "Tool arguments (same as calling the tool directly)."
+              },
+              "priority": {
+                "type": "integer",
+                "description": "Job priority (higher = runs first). Default 0."
+              },
+              "timeout_s": {
+                "type": "number",
+                "description": "Max seconds before the job is marked failed. Default 300."
+              },
+              "max_retries": {
+                "type": "integer",
+                "description": "Retry count on failure. Default 0."
+              }
+            },
+            "required": [
+              "tool_name",
+              "args"
+            ]
+          }
+        },
+        {
+          "name": "list_custom_tools",
+          "description": "List all custom tools previously created, with names, descriptions, and parameter schemas.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "memory_recall",
+          "description": "Recall a note from persistent memory (omit key to list all).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Exact key to look up (optional)."
+              },
+              "pattern": {
+                "type": "string",
+                "description": "Optional SQL LIKE pattern to match multiple keys (e.g. 'whatsapp:%'). Used when key is empty."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "memory_store",
+          "description": "Store a key-value note in persistent memory.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              },
+              "ttl_seconds": {
+                "type": "integer",
+                "description": "Optional. Entry expires after this many seconds (omit for permanent)."
+              }
+            },
+            "required": [
+              "key",
+              "value"
+            ]
+          }
+        },
+        {
+          "name": "ocr_image",
+          "description": "Extract text from an image in the workspace using Tesseract OCR. More accurate than LLM vision for dense text (receipts, scanned docs, charts with labels). Pass a workspace file path (e.g. from screenshot, video_frames, image_scan). Pipeline: screenshot \u2192 ocr_image to read text from any web page or document scan.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace file path (e.g. '/workspace/screenshot_20260301.png')."
+              },
+              "lang": {
+                "type": "string",
+                "description": "Tesseract language code (default 'eng'). Use 'eng+fra' for multi-language."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "ocr_pdf",
+          "description": "Extract text from a PDF file using Tesseract OCR (rasterizes pages at 300 DPI). Better than pdfminer for scanned PDFs that have no embedded text. Provide the PDF path from the workspace. Returns per-page text and a combined full_text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace path to the PDF file."
+              },
+              "pages": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "description": "Specific 1-based page numbers to OCR (omit for all pages)."
+              },
+              "lang": {
+                "type": "string",
+                "description": "Tesseract language code (default 'eng')."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "orchestrate",
+          "description": "Execute a multi-step workflow of MCP tools with automatic parallelism and dependency management. Steps without dependencies run in parallel via asyncio.gather(); steps with 'depends_on' run after their prerequisites complete. Earlier step outputs can be injected into later step arguments using {step_id.result} placeholders. Returns a structured report with every step's result and timing. Use this to chain browser + research + summarise + store operations in a single call, dramatically reducing the number of LLM turns needed for complex tasks.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "steps": {
+                "type": "array",
+                "description": "Ordered list of workflow steps to execute.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Unique step identifier (letters, digits, underscores). Used in depends_on references and {id.result} placeholders."
+                    },
+                    "tool": {
+                      "type": "string",
+                      "description": "MCP tool name to call (e.g. 'screenshot', 'web_search', 'smart_summarize')."
+                    },
+                    "args": {
+                      "type": "object",
+                      "description": "Arguments for the tool. String values may contain {id.result} to embed a prior step's text output."
+                    },
+                    "depends_on": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Step IDs that must complete before this step runs. Omit or leave empty for parallel execution with other independent steps."
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "Human-readable label shown in the result report. Defaults to the step id if omitted."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "tool",
+                    "args"
+                  ]
+                }
+              },
+              "stop_on_error": {
+                "type": "boolean",
+                "description": "If true, abort all remaining steps when any step fails. Default: false (continue executing independent steps)."
+              }
+            },
+            "required": [
+              "steps"
+            ]
+          }
+        },
+        {
+          "name": "page_extract",
+          "description": "Extract structured data from the current browser page: links, headings, tables, images, and meta tags \u2014 all in one call. Navigate first with browser(action='navigate', url=...) then call this to get a structured view without a full screenshot.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "include": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "links",
+                    "headings",
+                    "tables",
+                    "images",
+                    "meta",
+                    "text"
+                  ]
+                },
+                "description": "Which data types to extract (default: all). Options: links, headings, tables, images, meta, text."
+              },
+              "max_links": {
+                "type": "integer",
+                "description": "Max number of links to return (default 50)."
+              },
+              "max_text": {
+                "type": "integer",
+                "description": "Max characters of body text to return (default 3000)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "page_images",
+          "description": "Extract every image URL from a web page: <img> src, highest-resolution srcset variant, data-src/data-lazy-src lazy-load attributes, <picture><source> responsive images, og:image and twitter:image meta tags, inline CSS background-image, and JSON-LD schema.org image/logo/thumbnail fields. Scrolls the page first to trigger lazy loaders. Returns a deduplicated list (up to 150) with source type and alt text. Use with fetch_image or browser_save_images to render/download the results.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Page URL to navigate to and extract images from."
+              },
+              "scroll": {
+                "type": "boolean",
+                "description": "Scroll before extracting to trigger lazy-loaded images (default true)."
+              },
+              "max_scrolls": {
+                "type": "integer",
+                "description": "Number of scroll steps to trigger lazy loaders (default 3)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "page_scrape",
+          "description": "Navigate to a URL, scroll through the full page in viewport-sized steps waiting for lazy-loaded content to appear (infinite-scroll feeds, JS widgets, lazy images), then extract the complete rendered text from the final DOM state. Unlike web_fetch or extract_article (which grab text immediately after load), page_scrape simulates a human scrolling to the bottom, so content that only renders on scroll is captured. Returns the full page text plus scroll statistics (steps taken, whether the page grew, final height). Use max_scrolls to control depth (default 10, max 30). Set include_links=true to also return all hyperlinks from the final DOM.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "URL to navigate to before scraping. Omit to scrape the current browser page."
+              },
+              "max_scrolls": {
+                "type": "integer",
+                "description": "Maximum scroll steps (default 10, max 30). Each step is ~one viewport height."
+              },
+              "wait_ms": {
+                "type": "integer",
+                "description": "Milliseconds to wait after each scroll step for lazy content to load (default 500)."
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "Maximum characters to return from the page text (default 16000)."
+              },
+              "include_links": {
+                "type": "boolean",
+                "description": "If true, also return all hyperlinks found in the final DOM (default false)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "pdf_edit",
+          "description": "Precisely edit a PDF or image and save output to the workspace. Supports deterministic text replacement (redact + overlay), redaction, annotation, text insertion, and rotation. Page reorder/delete are PDF-only operations. Pass one or more operations in sequence.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace path to source PDF or image."
+              },
+              "output_path": {
+                "type": "string",
+                "description": "Optional output path in workspace."
+              },
+              "verify": {
+                "type": "boolean",
+                "description": "Run post-edit verification checks (default true)."
+              },
+              "password": {
+                "type": "string",
+                "description": "Password for encrypted PDFs (PDF inputs only)."
+              },
+              "operations": {
+                "type": "array",
+                "description": "Ordered edit operations. Each object must include 'op'. Ops: replace_text, redact_text, annotate, insert_text, rotate_page, reorder_pages, delete_pages.",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "required": [
+              "path",
+              "operations"
+            ]
+          }
+        },
+        {
+          "name": "pdf_fill_form",
+          "description": "Fill AcroForm fields in a PDF by name and save the result. Optionally flatten filled widgets into static page content.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace path to source PDF."
+              },
+              "fields": {
+                "type": "object",
+                "description": "Map of field_name -> value."
+              },
+              "flatten": {
+                "type": "boolean",
+                "description": "If true, flatten filled widgets (default false)."
+              },
+              "output_path": {
+                "type": "string",
+                "description": "Optional output path in workspace."
+              },
+              "password": {
+                "type": "string",
+                "description": "Password for encrypted PDFs."
+              }
+            },
+            "required": [
+              "path",
+              "fields"
+            ]
+          }
+        },
+        {
+          "name": "pdf_merge",
+          "description": "Merge multiple PDFs from the workspace into one output PDF.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of PDF paths to merge (2+)."
+              },
+              "output_path": {
+                "type": "string",
+                "description": "Optional output path in workspace."
+              },
+              "passwords": {
+                "type": "object",
+                "description": "Optional password map keyed by input path."
+              }
+            },
+            "required": [
+              "paths"
+            ]
+          }
+        },
+        {
+          "name": "pdf_read",
+          "description": "Read a PDF or image from the workspace with high accuracy. Modes: text (embedded text for PDFs), ocr (force OCR), auto (text + OCR fallback). Returns per-page text and combined text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace path to the source PDF or image (required)."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "ocr",
+                  "auto"
+                ],
+                "description": "Extraction mode (default auto)."
+              },
+              "pages": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "description": "Optional 1-based pages to read (omit for all pages)."
+              },
+              "lang": {
+                "type": "string",
+                "description": "OCR language for ocr/auto mode (default 'eng')."
+              },
+              "password": {
+                "type": "string",
+                "description": "Password for encrypted PDFs (PDF inputs only)."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "pdf_split",
+          "description": "Split a PDF into multiple files by page ranges.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Workspace path to source PDF."
+              },
+              "ranges": {
+                "type": "array",
+                "description": "Page ranges as '1-3', [1,3], or {start,end}.",
+                "items": {}
+              },
+              "prefix": {
+                "type": "string",
+                "description": "Optional output filename prefix."
+              },
+              "output_dir": {
+                "type": "string",
+                "description": "Optional output directory in workspace."
+              },
+              "password": {
+                "type": "string",
+                "description": "Password for encrypted PDFs."
+              }
+            },
+            "required": [
+              "path",
+              "ranges"
+            ]
+          }
+        },
+        {
+          "name": "plan_complete_task",
+          "description": "Mark a task as done. Unlocks any tasks that depend on this one.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Task ID to mark as done."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "plan_create_task",
+          "description": "Create a task in the persistent task planner with optional dependencies. A task is 'ready' when all its depends_on tasks are done. Use this to break complex goals into trackable sub-tasks with a dependency graph. Pipeline: plan_create_task (multiple, with depends_on) \u2192 plan_list_tasks \u2192 plan_complete_task.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Short task title."
+              },
+              "description": {
+                "type": "string",
+                "description": "Detailed task description."
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Task IDs that must complete before this task is ready."
+              },
+              "priority": {
+                "type": "integer",
+                "description": "Priority (higher = more urgent, default 0)."
+              },
+              "due_at": {
+                "type": "string",
+                "description": "ISO 8601 due date (optional)."
+              },
+              "metadata": {
+                "type": "object",
+                "description": "Arbitrary metadata (e.g. assignee, tags)."
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "name": "plan_delete_task",
+          "description": "Delete a task from the planner.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Task ID to delete."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "plan_fail_task",
+          "description": "Mark a task as failed with an optional reason.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Task ID to mark as failed."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Failure reason or error message."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "plan_get_task",
+          "description": "Get the status and details of a task by its ID.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Task ID returned by plan_create_task."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "plan_list_tasks",
+          "description": "List tasks in the planner. Filter by status or leave blank for all tasks. Use status='ready' to find tasks that can be started now (all dependencies satisfied).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "description": "Filter: pending | ready | in_progress | done | failed | cancelled. Omit for all."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Max results (default 50)."
+              }
+            }
+          }
+        },
+        {
+          "name": "researchbox_push",
+          "description": "Fetch an RSS feed and store its articles in PostgreSQL.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "feed_url": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "feed_url",
+              "topic"
+            ]
+          }
+        },
+        {
+          "name": "researchbox_search",
+          "description": "Discover RSS feed URLs for a topic.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "topic"
+            ]
+          }
+        },
+        {
+          "name": "screenshot",
+          "description": "Take a screenshot of a specific URL using the real Chromium browser and return it as an inline image rendered directly in the chat. The screenshot is also saved to the PostgreSQL image registry. IMPORTANT: Always use the exact URL from the user's request or from a prior web_search result. Never substitute a placeholder like example.com. If the user asks to screenshot a topic or site name rather than a full URL, call web_search first to find the correct URL, then call screenshot with that URL. Use 'find_text' to zoom in on a specific section \u2014 the browser will scroll to the first occurrence of that text and clip the screenshot to show just that region. Use 'find_image' to precisely capture a specific <img> element on the page \u2014 match by src/alt substring (e.g. 'logo', 'hero') or 1-based index (e.g. '2', '#3').",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The exact URL to screenshot (must start with http:// or https://). Do NOT use example.com or any placeholder \u2014 use the real URL from the user's message or from a web_search result."
+              },
+              "find_text": {
+                "type": "string",
+                "description": "Optional. A word or phrase to search for on the page. The screenshot will be clipped to the section containing this text, zooming in on the relevant content instead of the full viewport."
+              },
+              "find_image": {
+                "type": "string",
+                "description": "Optional. Match an <img> element by src/alt substring or 1-based index (e.g. 'logo', 'hero', '2', '#3'). The screenshot is tightly cropped to that image element only. Mutually exclusive with find_text."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "screenshot_search",
+          "description": "Search the web for a topic, screenshot the top result pages, and return all screenshots inline as rendered images. Also saves each to the PostgreSQL image registry. Use this when the user asks to 'find a picture of X', 'show me X', or wants to visually browse search results for a query. Makes a best-effort: returns whatever screenshots succeed even if some pages fail.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Topic or query to search and screenshot."
+              },
+              "max_results": {
+                "type": "integer",
+                "description": "Number of result pages to screenshot (default 3, max 5)."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "scroll_screenshot",
+          "description": "Capture a full-page screenshot by scrolling through the page and stitching viewport captures together. Useful for long pages where a single viewport screenshot misses content. Navigate to the page first, then call this. Returns one tall composite image.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Page URL to capture. If omitted, captures the currently loaded page."
+              },
+              "max_scrolls": {
+                "type": "integer",
+                "description": "Maximum number of viewport scrolls (default 5, max 10)."
+              },
+              "scroll_overlap": {
+                "type": "integer",
+                "description": "Pixel overlap between consecutive captures to avoid gaps (default 100)."
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "smart_summarize",
+          "description": "Summarize text using LM Studio's chat completion endpoint. Supports 3 styles: brief (2-3 sentences), detailed (full paragraph), bullets (markdown list). Pass the raw text directly (already fetched from web_fetch or db_cache_get).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Text to summarize (up to ~8000 chars; longer content is truncated)."
+              },
+              "style": {
+                "type": "string",
+                "enum": [
+                  "brief",
+                  "detailed",
+                  "bullets"
+                ],
+                "description": "Summary style: brief (2-3 sentences), detailed (paragraph), bullets (markdown list)."
+              },
+              "max_words": {
+                "type": "integer",
+                "description": "Approximate target word count for the summary (optional)."
+              }
+            },
+            "required": [
+              "content"
+            ]
+          }
+        },
+        {
+          "name": "structured_extract",
+          "description": "Extract structured JSON data from text using LM Studio's json_object response mode. Provide the text to parse and a JSON Schema describing the desired output shape. Uses response_format: json_object for strict JSON output. Ideal for pulling structured facts from articles, product pages, or research text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Text to extract structured data from (up to ~6000 chars)."
+              },
+              "schema_json": {
+                "type": "string",
+                "description": "JSON Schema string describing the output shape, e.g. '{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}}}'."
+              },
+              "instructions": {
+                "type": "string",
+                "description": "Additional extraction instructions or context (optional)."
+              }
+            },
+            "required": [
+              "content",
+              "schema_json"
+            ]
+          }
+        },
+        {
+          "name": "tts",
+          "description": "Convert text to speech using LM Studio's /v1/audio/speech endpoint. Saves the audio file to the workspace and returns the file path. Requires a TTS-capable model loaded in LM Studio. Supports multiple voices and output formats.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "The text to convert to speech."
+              },
+              "voice": {
+                "type": "string",
+                "description": "Voice name (default 'alloy'). Options: alloy, echo, fable, onyx, nova, shimmer."
+              },
+              "speed": {
+                "type": "number",
+                "description": "Speech speed multiplier 0.25\u20134.0 (default 1.0)."
+              },
+              "format": {
+                "type": "string",
+                "description": "Output format: mp3, opus, aac, flac, wav (default mp3)."
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        },
+        {
+          "name": "vector_collections",
+          "description": "List all Qdrant collections (vector namespaces) and their sizes.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "name": "vector_delete",
+          "description": "Delete a vector entry from Qdrant by its ID.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Entry ID to delete."
+              },
+              "collection": {
+                "type": "string",
+                "description": "Collection name (default: 'default')."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "vector_search",
+          "description": "Semantic search in the Qdrant vector database. Embeds the query text and finds the most similar stored entries. Returns top_k results with scores and metadata. More powerful than embed_search: supports multi-collection and metadata filtering.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query text."
+              },
+              "collection": {
+                "type": "string",
+                "description": "Qdrant collection to search (default: 'default')."
+              },
+              "top_k": {
+                "type": "integer",
+                "description": "Number of results (default 5)."
+              },
+              "filter": {
+                "type": "object",
+                "description": "Optional Qdrant payload filter object."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "vector_store",
+          "description": "Store a text embedding in the Qdrant vector database for later semantic search. Text is embedded via LM Studio (/v1/embeddings) and stored with its metadata. Supports multiple collections (namespaces) for organizing different knowledge domains. Pipeline: vector_store \u2192 vector_search to retrieve similar content.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Text to embed and store."
+              },
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this entry."
+              },
+              "collection": {
+                "type": "string",
+                "description": "Qdrant collection name (default: 'default')."
+              },
+              "metadata": {
+                "type": "object",
+                "description": "Arbitrary metadata stored alongside the vector."
+              }
+            },
+            "required": [
+              "text",
+              "id"
+            ]
+          }
+        },
+        {
+          "name": "video_frames",
+          "description": "Extract frames from a video at regular intervals and save them to the workspace. Returns a list of frame file paths with their timestamps. Frames can be passed to screenshot, image_crop, ocr_image, or image_caption for analysis. Pipeline: video_frames \u2192 [frame paths] \u2192 image_caption or ocr_image.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTP/HTTPS URL of the video."
+              },
+              "interval_sec": {
+                "type": "number",
+                "description": "Seconds between frames (default 5.0)."
+              },
+              "max_frames": {
+                "type": "integer",
+                "description": "Maximum frames to extract (default 20, max 100)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "video_info",
+          "description": "Get metadata from a video URL: duration, frame rate, resolution, codec, file size. Supports HTTP/HTTPS video URLs (mp4, webm, mkv, etc.). Use this before video_frames to know the video length and choose a good interval.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTP/HTTPS URL of the video file."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "video_thumbnail",
+          "description": "Extract a single frame from a video at a specific timestamp. Returns the frame as an inline image block. Use to preview video content or get a representative image for a specific moment.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTP/HTTPS URL of the video."
+              },
+              "timestamp_sec": {
+                "type": "number",
+                "description": "Timestamp in seconds (default 0.0)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "web_fetch",
+          "description": "Fetch a web page and return its readable text. Checks the PostgreSQL cache first; falls back to a live httpx fetch.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Full URL to fetch."
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "Max chars to return (default 4000)."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "name": "web_search",
+          "description": "Search the web and return result text. Use this to find the correct URL for a site or topic before calling screenshot. Tier 2 \u2014 direct httpx fetch of DuckDuckGo HTML; Tier 3 \u2014 DuckDuckGo lite API fallback.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query."
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "Max chars to return (default 4000)."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

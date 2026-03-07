@@ -481,19 +481,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Base URLs for aichat backend services (running on the same Docker network).
-# (exception handler is registered after _report_error is defined, below)
-DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
-MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-memory:8094")
-RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-researchbox:8092")
-TOOLKIT_URL   = os.environ.get("TOOLKIT_URL",  "http://aichat-toolkit:8095")
-GRAPH_URL     = os.environ.get("GRAPH_URL",   "http://aichat-graph:8098")
-VECTOR_URL    = os.environ.get("VECTOR_URL",  "http://aichat-vector:6333")
-VIDEO_URL     = os.environ.get("VIDEO_URL",   "http://aichat-video:8099")
-OCR_URL       = os.environ.get("OCR_URL",     "http://aichat-ocr:8100")
-DOCS_URL      = os.environ.get("DOCS_URL",    "http://aichat-docs:8101")
-PLANNER_URL   = os.environ.get("PLANNER_URL", "http://aichat-planner:8102")
-PDF_URL       = os.environ.get("PDF_URL", "http://aichat-pdf:8103")
+# ---------------------------------------------------------------------------
+# Backend service URLs — consolidated service containers (reduced from 10 to 5)
+# aichat-data    (8091): database + memory + graph + planner + researchbox + jobs
+# aichat-vision  (8099): video + ocr
+# aichat-docs    (8101): docs ingestor + pdf editing
+# aichat-sandbox (8095): custom code execution (isolated)
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL", "http://aichat-data:8091")
+MEMORY_URL    = os.environ.get("MEMORY_URL",   "http://aichat-data:8091/memory")
+RESEARCH_URL  = os.environ.get("RESEARCH_URL", "http://aichat-data:8091/research")
+TOOLKIT_URL   = os.environ.get("TOOLKIT_URL",  "http://aichat-sandbox:8095")
+GRAPH_URL     = os.environ.get("GRAPH_URL",    "http://aichat-data:8091/graph")
+VECTOR_URL    = os.environ.get("VECTOR_URL",   "http://aichat-vector:6333")
+VIDEO_URL     = os.environ.get("VIDEO_URL",    "http://aichat-vision:8099")
+OCR_URL       = os.environ.get("OCR_URL",      "http://aichat-vision:8099/ocr")
+DOCS_URL      = os.environ.get("DOCS_URL",     "http://aichat-docs:8101")
+PLANNER_URL   = os.environ.get("PLANNER_URL",  "http://aichat-data:8091/planner")
+PDF_URL       = os.environ.get("PDF_URL",      "http://aichat-docs:8101/pdf")
+JOB_URL       = os.environ.get("JOB_URL",      "http://aichat-data:8091/jobs")
 # human_browser browser-server API — reachable after install connects it to this network.
 BROWSER_URL   = os.environ.get("BROWSER_URL",  "http://human_browser:7081")
 # Screenshot PNGs are bind-mounted from /docker/human_browser/workspace on the host.
@@ -2403,6 +2409,104 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["steps"],
         },
     },
+    # -----------------------------------------------------------------------
+    # Async job system tools (NEW)
+    # -----------------------------------------------------------------------
+    {
+        "name": "job_submit",
+        "description": (
+            "Submit a long-running tool call as an async background job. "
+            "Returns a job_id immediately. Use job_status to poll for completion "
+            "and job_result to retrieve output. Ideal for expensive operations like "
+            "bulk_screenshot, docs_ingest, video_frames, ocr_pdf, image_generate, "
+            "structured_extract, and embed_store over large inputs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name":  {"type": "string", "description": "MCP tool name to run asynchronously."},
+                "args":       {"type": "object", "description": "Tool arguments (same as calling the tool directly)."},
+                "priority":   {"type": "integer", "description": "Job priority (higher = runs first). Default 0."},
+                "timeout_s":  {"type": "number",  "description": "Max seconds before the job is marked failed. Default 300."},
+                "max_retries":{"type": "integer", "description": "Retry count on failure. Default 0."},
+            },
+            "required": ["tool_name", "args"],
+        },
+    },
+    {
+        "name": "job_status",
+        "description": "Check the status of an async job submitted with job_submit. Returns status, progress, timing, and any error.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job ID returned by job_submit."},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "job_result",
+        "description": "Retrieve the result of a completed async job. Returns the tool output text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job ID returned by job_submit."},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "job_cancel",
+        "description": "Cancel a queued or running async job.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job ID to cancel."},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "job_list",
+        "description": "List async jobs with optional status filter.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status":    {"type": "string", "description": "Filter by status: queued, running, succeeded, failed, cancelled."},
+                "tool_name": {"type": "string", "description": "Filter by tool name."},
+                "limit":     {"type": "integer", "description": "Max results. Default 20."},
+            },
+        },
+    },
+    {
+        "name": "batch_submit",
+        "description": (
+            "Submit a batch of tool calls as async jobs in one request. "
+            "Returns a list of job_ids. Use job_status/job_result to track each. "
+            "Supports deduplication and concurrency control via priority."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "List of jobs to submit.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name":  {"type": "string"},
+                            "args":       {"type": "object"},
+                            "priority":   {"type": "integer"},
+                            "timeout_s":  {"type": "number"},
+                            "max_retries":{"type": "integer"},
+                        },
+                        "required": ["tool_name", "args"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
 ]
 
 
@@ -2431,7 +2535,52 @@ def _image_blocks(container_path: str, summary: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Async Job Executor — runs tool calls in background tasks
+# ---------------------------------------------------------------------------
+
+import time as _time  # noqa: E402 (already imported above as _time may not exist)
+
+_job_cancelled: set[str] = set()  # track cancelled job_ids to abort in-flight jobs
+
+
+async def _execute_job(job_id: str, tool_name: str, tool_args: dict, timeout_s: float) -> None:
+    """Background coroutine: execute a job and update its state in aichat-data/jobs."""
+    def _iso() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    async def _patch(data: dict) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=10) as hc:
+                await hc.patch(f"{JOB_URL}/{job_id}", json=data)
+        except Exception:
+            pass
+
+    # Mark running
+    await _patch({"status": "running", "started_at": _iso()})
+
+    try:
+        if job_id in _job_cancelled:
+            await _patch({"status": "cancelled", "finished_at": _iso()})
+            return
+        result_blocks = await asyncio.wait_for(_call_tool(tool_name, tool_args), timeout=timeout_s)
+        if job_id in _job_cancelled:
+            await _patch({"status": "cancelled", "finished_at": _iso()})
+            return
+        result_text = next((b["text"] for b in result_blocks if b.get("type") == "text"), "")
+        await _patch({"status": "succeeded", "result": result_text[:100_000],
+                      "progress": 100, "finished_at": _iso()})
+    except asyncio.TimeoutError:
+        await _patch({"status": "failed", "error": f"Timed out after {timeout_s}s",
+                      "finished_at": _iso()})
+    except Exception as exc:
+        await _patch({"status": "failed", "error": str(exc)[:2000], "finished_at": _iso()})
+
+
+# ---------------------------------------------------------------------------
 # Orchestration — WorkflowStep / WorkflowResult / WorkflowExecutor
+
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -7271,6 +7420,118 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception as exc:
                     return _text(f"plan_delete_task: failed — {exc}")
                 return _text(f"Task {tid_pd} deleted.")
+
+            # ----------------------------------------------------------------
+            # Async job tools
+            # ----------------------------------------------------------------
+            if name == "job_submit":
+                t_name   = str(args.get("tool_name", "")).strip()
+                t_args   = dict(args.get("args", {}))
+                priority  = int(args.get("priority", 0))
+                timeout_s = float(args.get("timeout_s", 300.0))
+                max_ret   = int(args.get("max_retries", 0))
+                if not t_name:
+                    return _text("job_submit: 'tool_name' is required")
+                payload = {"tool_name": t_name, "args": t_args, "priority": priority,
+                           "timeout_s": timeout_s, "max_retries": max_ret,
+                           "input_summary": f"{t_name}({json.dumps(t_args)[:120]})"}
+                r = await c.post(f"{JOB_URL}", json=payload, timeout=10)
+                if r.status_code >= 400:
+                    return _text(f"job_submit failed: {r.status_code} — {r.text[:300]}")
+                job = r.json()
+                job_id = job["id"]
+                # Start background execution
+                asyncio.create_task(_execute_job(job_id, t_name, t_args, timeout_s))
+                return _text(json.dumps({"job_id": job_id, "status": "queued",
+                                         "tool_name": t_name, "timeout_s": timeout_s}))
+
+            if name == "job_status":
+                jid = str(args.get("job_id", "")).strip()
+                if not jid:
+                    return _text("job_status: 'job_id' is required")
+                r = await c.get(f"{JOB_URL}/{jid}", timeout=10)
+                if r.status_code == 404:
+                    return _text(f"job_status: job '{jid}' not found")
+                if r.status_code >= 400:
+                    return _text(f"job_status failed: {r.status_code} — {r.text[:300]}")
+                d = r.json()
+                return _text(json.dumps({
+                    "job_id":       d["id"],
+                    "tool_name":    d["tool_name"],
+                    "status":       d["status"],
+                    "progress":     d["progress"],
+                    "submitted_at": d["submitted_at"],
+                    "started_at":   d["started_at"],
+                    "finished_at":  d["finished_at"],
+                    "error":        d["error"],
+                }))
+
+            if name == "job_result":
+                jid = str(args.get("job_id", "")).strip()
+                if not jid:
+                    return _text("job_result: 'job_id' is required")
+                r = await c.get(f"{JOB_URL}/{jid}", timeout=10)
+                if r.status_code == 404:
+                    return _text(f"job_result: job '{jid}' not found")
+                d = r.json()
+                if d["status"] not in ("succeeded", "failed", "cancelled"):
+                    return _text(json.dumps({"job_id": jid, "status": d["status"],
+                                             "message": "Job has not completed yet."}))
+                if d["status"] == "succeeded":
+                    return _text(d.get("result") or "(empty result)")
+                return _text(json.dumps({"job_id": jid, "status": d["status"],
+                                         "error": d.get("error", "unknown error")}))
+
+            if name == "job_cancel":
+                jid = str(args.get("job_id", "")).strip()
+                if not jid:
+                    return _text("job_cancel: 'job_id' is required")
+                _job_cancelled.add(jid)
+                r = await c.post(f"{JOB_URL}/{jid}/cancel", json={}, timeout=10)
+                if r.status_code == 404:
+                    return _text(f"job_cancel: job '{jid}' not found")
+                d = r.json()
+                return _text(json.dumps({"job_id": jid, "status": d.get("status")}))
+
+            if name == "job_list":
+                status_f   = str(args.get("status",    "")).strip()
+                tool_f     = str(args.get("tool_name", "")).strip()
+                limit_f    = max(1, min(int(args.get("limit", 20)), 100))
+                params_q: dict = {"limit": limit_f}
+                if status_f:
+                    params_q["status"] = status_f
+                if tool_f:
+                    params_q["tool_name"] = tool_f
+                r = await c.get(f"{JOB_URL}", params=params_q, timeout=10)
+                if r.status_code >= 400:
+                    return _text(f"job_list failed: {r.status_code} — {r.text[:300]}")
+                d = r.json()
+                jobs = d.get("jobs", [])
+                lines = [f"Jobs ({d.get('total', 0)} total, showing {len(jobs)}):"]
+                for j in jobs:
+                    lines.append(f"  {j['id']}  {j['tool_name']:<22}  {j['status']:<12}  "
+                                 f"submitted={j['submitted_at'][:19]}")
+                return _text("\n".join(lines))
+
+            if name == "batch_submit":
+                items_raw = list(args.get("items", []))
+                if not items_raw:
+                    return _text("batch_submit: 'items' must be a non-empty list")
+                r = await c.post(f"{JOB_URL}/batch", json={"items": items_raw}, timeout=30)
+                if r.status_code >= 400:
+                    return _text(f"batch_submit failed: {r.status_code} — {r.text[:300]}")
+                d = r.json()
+                job_ids = [j["id"] for j in d.get("job_ids", [])]
+                # Fire off background execution for each job
+                for item, jid in zip(items_raw, job_ids):
+                    asyncio.create_task(_execute_job(
+                        jid,
+                        item.get("tool_name", ""),
+                        dict(item.get("args", {})),
+                        float(item.get("timeout_s", 300.0)),
+                    ))
+                return _text(json.dumps({"job_ids": job_ids, "count": len(job_ids),
+                                         "status": "queued"}))
 
             return _text(f"Unknown tool: {name}")
 
