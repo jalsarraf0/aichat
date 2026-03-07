@@ -79,16 +79,18 @@ def test_service_health(service: str, url: str) -> None:
 
 
 @pytest.mark.smoke
-def test_data_health_includes_counts() -> None:
-    """aichat-data /health must include article and page-cache counts."""
+def test_data_health_includes_services() -> None:
+    """aichat-data /health must report status ok and all sub-service states."""
     url = _SERVICES["aichat-data"]
     if not _is_reachable(url):
         pytest.skip("aichat-data not reachable")
     r = httpx.get(url, timeout=_TIMEOUT)
     assert r.status_code == 200
     body = r.json()
-    assert "articles" in body, f"Missing 'articles' in data health: {body}"
-    assert "cached_pages" in body, f"Missing 'cached_pages' in data health: {body}"
+    assert body.get("status") == "ok", f"Unexpected status in data health: {body}"
+    assert "services" in body, f"Missing 'services' in data health: {body}"
+    for svc in ("postgres", "memory", "graph", "planner", "jobs"):
+        assert svc in body["services"], f"Sub-service '{svc}' missing from data health: {body}"
 
 
 @pytest.mark.smoke
