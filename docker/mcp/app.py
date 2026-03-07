@@ -6852,27 +6852,53 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                 ]}]
                 payload_ic: dict = {
                     "messages": msgs_ic,
-                    "max_tokens": 300 if detail_ic == "detailed" else 80,
+                    "max_tokens": 512 if detail_ic == "detailed" else 80,
                     "temperature": 0.3,
                 }
-                if IMAGE_GEN_MODEL:
-                    payload_ic["model"] = IMAGE_GEN_MODEL
-                async with httpx.AsyncClient(timeout=30.0) as hc_ic:
+
+                # Model selection: use IMAGE_GEN_MODEL if set; otherwise auto-detect
+                # the first vision-capable model from the LM Studio /v1/models list.
+                # Known vision model name patterns (substrings, case-insensitive):
+                _VISION_PATTERNS = (
+                    "vl", "vision", "llava", "clip", "bakllava", "minicpm",
+                    "qwen.*vl", "glm.*v", "internvl", "cogvlm", "phi.*vision",
+                    "pixtral", "molmo", "idefics", "florence",
+                )
+                _chosen_model = IMAGE_GEN_MODEL or ""
+                if not _chosen_model:
                     try:
-                        r_ic = await asyncio.wait_for(
-                            hc_ic.post(
-                                f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_ic
-                            ),
-                            timeout=12.0,
+                        import re as _re_ic
+                        async with httpx.AsyncClient(timeout=5.0) as _mc:
+                            _ml = await _mc.get(f"{IMAGE_GEN_BASE_URL}/v1/models")
+                        for _m in _ml.json().get("data", []):
+                            _mid = (_m.get("id") or "").lower()
+                            if any(_re_ic.search(p, _mid) for p in _VISION_PATTERNS):
+                                _chosen_model = _m.get("id", "")
+                                break
+                    except Exception:
+                        pass
+
+                if _chosen_model:
+                    payload_ic["model"] = _chosen_model
+
+                # Vision inference can be slow (30 s+) for large models; give 120 s.
+                async with httpx.AsyncClient(timeout=120.0) as hc_ic:
+                    try:
+                        r_ic = await hc_ic.post(
+                            f"{IMAGE_GEN_BASE_URL}/v1/chat/completions", json=payload_ic
                         )
                         r_ic.raise_for_status()
                         _ch_ic = r_ic.json().get("choices", [])
                         caption = (_ch_ic[0]["message"]["content"].strip() if _ch_ic else "")
-                        return _text(caption if caption else "image_caption: empty response from vision model")
+                        if caption:
+                            model_note = f" [model: {_chosen_model}]" if _chosen_model else ""
+                            return _text(f"{caption}{model_note}")
+                        return _text("image_caption: empty response from vision model — ensure a vision-capable model (e.g. Qwen-VL, LLaVA, GLM-V) is loaded in LM Studio.")
                     except Exception as exc:
                         return _text(
                             f"image_caption: LM Studio vision request failed — {exc}\n"
-                            "Make sure a vision-capable model is loaded in LM Studio."
+                            f"Endpoint: {IMAGE_GEN_BASE_URL}  Model: {_chosen_model or '(auto)'}\n"
+                            "Ensure LM Studio Local Server is running and a vision-capable model is loaded."
                         )
 
             # ----------------------------------------------------------------

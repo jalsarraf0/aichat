@@ -204,8 +204,8 @@ services:
       BROWSER_URL:      http://human_browser:7081
       # Image generation — points at LM Studio (or any OpenAI-compatible image API).
       # Set IMAGE_GEN_MODEL to the exact model name shown in LM Studio to pin a model.
-      IMAGE_GEN_BASE_URL: http://host.docker.internal:1234
-      IMAGE_GEN_MODEL:  ""
+      IMAGE_GEN_BASE_URL: ${IMAGE_GEN_BASE_URL:-http://192.168.50.2:1234}
+      IMAGE_GEN_MODEL:  "${IMAGE_GEN_MODEL:-}"
       INTEL_GPU: "1"
       LIBVA_DRIVER_NAME: iHD
     extra_hosts:
