@@ -1,0 +1,20 @@
+# CI smoke override: strip all host port bindings so the ephemeral smoke stack
+# does not conflict with any production services running on the same host.
+# Tests run inside the Docker compose network using service hostnames.
+services:
+  aichat-db:
+    ports: []
+  aichat-vector:
+    ports: []
+  aichat-data:
+    ports: []
+  aichat-vision:
+    ports: []
+  aichat-docs:
+    ports: []
+  aichat-sandbox:
+    ports: []
+  aichat-searxng:
+    ports: []
+  aichat-mcp:
+    ports: []

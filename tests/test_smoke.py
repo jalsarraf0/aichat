@@ -20,21 +20,32 @@ Consolidated architecture (as of refactor):
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 import httpx
 
 
 # ---------------------------------------------------------------------------
 # Service definitions (consolidated architecture)
+# URLs can be overridden via env vars so CI can run tests inside the Docker
+# compose network (using service hostnames) without host port bindings.
 # ---------------------------------------------------------------------------
 
+_DATA_URL    = os.environ.get("DATA_URL",    "http://localhost:8091")
+_VISION_URL  = os.environ.get("VISION_URL",  "http://localhost:8099")
+_DOCS_URL    = os.environ.get("DOCS_URL",    "http://localhost:8101")
+_SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://localhost:8095")
+_MCP_URL     = os.environ.get("MCP_URL",     "http://localhost:8096")
+_WHATSAPP_URL = os.environ.get("WHATSAPP_URL", "http://localhost:8097")
+
 _SERVICES = {
-    "aichat-data":     "http://localhost:8091/health",
-    "aichat-vision":   "http://localhost:8099/health",
-    "aichat-docs":     "http://localhost:8101/health",
-    "aichat-sandbox":  "http://localhost:8095/health",
-    "aichat-mcp":      "http://localhost:8096/health",
-    "aichat-whatsapp": "http://localhost:8097/health",
+    "aichat-data":     f"{_DATA_URL}/health",
+    "aichat-vision":   f"{_VISION_URL}/health",
+    "aichat-docs":     f"{_DOCS_URL}/health",
+    "aichat-sandbox":  f"{_SANDBOX_URL}/health",
+    "aichat-mcp":      f"{_MCP_URL}/health",
+    "aichat-whatsapp": f"{_WHATSAPP_URL}/health",
 }
 
 # Timeout for each health-check request (seconds).
@@ -68,16 +79,18 @@ def test_service_health(service: str, url: str) -> None:
 
 
 @pytest.mark.smoke
-def test_data_health_includes_counts() -> None:
-    """aichat-data /health must include article and page-cache counts."""
+def test_data_health_includes_services() -> None:
+    """aichat-data /health must report status ok and all sub-service states."""
     url = _SERVICES["aichat-data"]
     if not _is_reachable(url):
         pytest.skip("aichat-data not reachable")
     r = httpx.get(url, timeout=_TIMEOUT)
     assert r.status_code == 200
     body = r.json()
-    assert "articles" in body, f"Missing 'articles' in data health: {body}"
-    assert "cached_pages" in body, f"Missing 'cached_pages' in data health: {body}"
+    assert body.get("status") == "ok", f"Unexpected status in data health: {body}"
+    assert "services" in body, f"Missing 'services' in data health: {body}"
+    for svc in ("postgres", "memory", "graph", "planner", "jobs"):
+        assert svc in body["services"], f"Sub-service '{svc}' missing from data health: {body}"
 
 
 @pytest.mark.smoke
@@ -96,7 +109,7 @@ def test_mcp_health_includes_tools() -> None:
 @pytest.mark.smoke
 def test_mcp_tools_list_via_jsonrpc() -> None:
     """MCP server must respond to tools/list JSON-RPC request with ≥20 tools."""
-    base_url = "http://localhost:8096"
+    base_url = _MCP_URL
     if not _is_reachable(f"{base_url}/health"):
         pytest.skip("aichat-mcp not reachable")
     rpc_req = {
@@ -118,7 +131,7 @@ def test_mcp_tools_list_via_jsonrpc() -> None:
 @pytest.mark.smoke
 def test_errors_endpoint_accessible() -> None:
     """aichat-data /errors/recent must return a valid response."""
-    url = "http://localhost:8091/errors/recent"
+    url = f"{_DATA_URL}/errors/recent"
     if not _is_reachable(_SERVICES["aichat-data"]):
         pytest.skip("aichat-data not reachable")
     r = httpx.get(url, timeout=_TIMEOUT, params={"limit": 10})
@@ -131,7 +144,7 @@ def test_errors_endpoint_accessible() -> None:
 @pytest.mark.smoke
 def test_error_log_roundtrip() -> None:
     """POST /errors/log then GET /errors/recent must return the logged entry."""
-    base = "http://localhost:8091"
+    base = _DATA_URL
     if not _is_reachable(f"{base}/health"):
         pytest.skip("aichat-data not reachable")
 
@@ -157,7 +170,7 @@ def test_error_log_roundtrip() -> None:
 @pytest.mark.smoke
 def test_memory_store_recall_roundtrip() -> None:
     """POST /memory/store then GET /memory/recall must return the stored value."""
-    base = "http://localhost:8091"
+    base = _DATA_URL
     if not _is_reachable(f"{base}/health"):
         pytest.skip("aichat-data not reachable")
 
@@ -177,7 +190,7 @@ def test_memory_store_recall_roundtrip() -> None:
 @pytest.mark.smoke
 def test_sandbox_tools_list() -> None:
     """aichat-sandbox GET /tools must return a valid tools list."""
-    base = "http://localhost:8095"
+    base = _SANDBOX_URL
     if not _is_reachable(f"{base}/health"):
         pytest.skip("aichat-sandbox not reachable")
 
@@ -191,7 +204,7 @@ def test_sandbox_tools_list() -> None:
 @pytest.mark.smoke
 def test_research_search_feeds() -> None:
     """aichat-data /research/search-feeds must return feed URLs for a topic."""
-    base = "http://localhost:8091"
+    base = _DATA_URL
     if not _is_reachable(f"{base}/health"):
         pytest.skip("aichat-data not reachable")
 

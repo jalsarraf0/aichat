@@ -10,10 +10,6 @@ services:
       POSTGRES_PASSWORD: aichat
     volumes:
       - aichatdb:/var/lib/postgresql/data
-    ports:
-      # Bind to localhost by default to avoid exposing Postgres to the public internet.
-      # Override with AICHAT_DB_BIND=0.0.0.0 if remote access is intentionally required.
-      - "${AICHAT_DB_BIND:-127.0.0.1}:5432:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aichat -d aichat"]
@@ -26,10 +22,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-vector:
     image: qdrant/qdrant:latest
-    container_name: aichat-vector
-    ports:
-      - "6333:6333"
-      - "6334:6334"
     volumes:
       - qdrantdb:/qdrant/storage
     restart: unless-stopped
@@ -49,7 +41,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-data:
     build: ./docker/data
-    container_name: aichat-data
     environment:
       DATABASE_URL: postgresql://aichat:aichat@aichat-db:5432/aichat
       INTEL_GPU: "1"
@@ -57,8 +48,6 @@ services:
     depends_on:
       aichat-db:
         condition: service_healthy
-    ports:
-      - "8091:8091"
     volumes:
       - datadb:/data
     devices:
@@ -83,7 +72,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-vision:
     build: ./docker/vision
-    container_name: aichat-vision
     environment:
       DATABASE_URL: http://aichat-data:8091
       WORKSPACE: /workspace
@@ -92,8 +80,6 @@ services:
     depends_on:
       aichat-data:
         condition: service_healthy
-    ports:
-      - "8099:8099"
     volumes:
       - /docker/human_browser/workspace:/workspace:rw
     # Intel Arc A380: FFmpeg VA-API hw decode/encode + Tesseract OpenCL preprocessing.
@@ -120,7 +106,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-docs:
     build: ./docker/docs
-    container_name: aichat-docs
     environment:
       DATABASE_URL: http://aichat-data:8091
       OCR_URL: http://aichat-vision:8099/ocr
@@ -132,8 +117,6 @@ services:
         condition: service_healthy
       aichat-vision:
         condition: service_healthy
-    ports:
-      - "8101:8101"
     volumes:
       - /docker/human_browser/workspace:/workspace:rw
     devices:
@@ -155,15 +138,12 @@ services:
   # ---------------------------------------------------------------------------
   aichat-sandbox:
     build: ./docker/sandbox
-    container_name: aichat-sandbox
     environment:
       DATABASE_URL: http://aichat-data:8091
       INTEL_GPU: "1"
     depends_on:
       aichat-data:
         condition: service_healthy
-    ports:
-      - "8095:8095"
     volumes:
       - ${HOME}/.config/aichat/tools:/data/tools
       - ${HOME}/git:/data/repos:ro
@@ -186,13 +166,10 @@ services:
   # ---------------------------------------------------------------------------
   aichat-searxng:
     image: searxng/searxng:latest
-    container_name: aichat-searxng
     environment:
       SEARXNG_BASE_URL: http://aichat-searxng:8080
     volumes:
       - ./docker/searxng:/etc/searxng:rw
-    ports:
-      - "8098:8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz 2>/dev/null | grep -q ok || wget -qO- http://localhost:8080/ >/dev/null 2>&1"]
@@ -207,7 +184,6 @@ services:
   # ---------------------------------------------------------------------------
   aichat-mcp:
     build: ./docker/mcp
-    container_name: aichat-mcp
     environment:
       # Consolidated service URLs
       DATABASE_URL:     http://aichat-data:8091
@@ -250,8 +226,6 @@ services:
         condition: service_started
       aichat-searxng:
         condition: service_healthy
-    ports:
-      - "8096:8096"
     # Intel Arc A380: card1 (video) + renderD128 (render/OpenCL).
     devices:
       - ${INTEL_DRI_DEVICE:-/dev/dri}:${INTEL_DRI_DEVICE:-/dev/dri}
@@ -298,8 +272,6 @@ services:
         condition: service_healthy
       aichat-sandbox:
         condition: service_healthy
-    ports:
-      - "8097:8097"
     volumes:
       - whatsappauth:/data/auth
     restart: unless-stopped

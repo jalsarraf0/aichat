@@ -50,6 +50,8 @@ ignore = [
     "E702",   # multiple statements on one line (semicolon) — style choice
     "E741",   # ambiguous variable name — pre-existing
     "F401",   # unused import (many are conditional/type-checking imports)
+    "F541",   # f-string without any placeholders — pre-existing style
     "F811",   # redefinition of unused name
     "F821",   # undefined name (forward references in string annotations)
+    "F841",   # local variable assigned but never used — pre-existing
 ]

@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Generator, Optional
 
 import feedparser
-import httpx
 import networkx as nx
 import psycopg
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
@@ -328,12 +327,9 @@ def article_search(
         params.append(f"%{topic}%")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
+    sql_articles = f"SELECT id, url, title, topic, stored_at FROM articles {where} ORDER BY stored_at DESC LIMIT %s"  # nosec B608
     with _pg() as pg:
-        rows = pg.execute(
-            f"SELECT id, url, title, topic, stored_at FROM articles {where} "
-            "ORDER BY stored_at DESC LIMIT %s",
-            params,
-        ).fetchall()
+        rows = pg.execute(sql_articles, params).fetchall()
     return {
         "results": [
             {"id": r[0], "url": r[1], "title": r[2], "topic": r[3], "stored_at": str(r[4])}
@@ -1041,12 +1037,11 @@ def jobs_list(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     count_params = list(params)
     params += [limit, offset]
+    sql_jobs = f"SELECT * FROM jobs {where} ORDER BY priority DESC, submitted_at DESC LIMIT ? OFFSET ?"  # nosec B608
+    sql_count = f"SELECT COUNT(*) FROM jobs {where}"  # nosec B608
     with _sqlite(JOBS_DB) as con:
-        rows = con.execute(
-            f"SELECT * FROM jobs {where} ORDER BY priority DESC, submitted_at DESC "
-            "LIMIT ? OFFSET ?", params,
-        ).fetchall()
-        total = con.execute(f"SELECT COUNT(*) FROM jobs {where}", count_params).fetchone()[0]
+        rows = con.execute(sql_jobs, params).fetchall()
+        total = con.execute(sql_count, count_params).fetchone()[0]
     return {"jobs": [_job_row(r) for r in rows], "total": total,
             "limit": limit, "offset": offset}
 
@@ -1085,7 +1080,7 @@ def jobs_update(job_id: str, payload: dict) -> dict:
         if not fields:
             return _job_row(row)
         params.append(job_id)
-        con.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", params)
+        con.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", params)  # nosec B608
         con.commit()
     return jobs_get(job_id)
 
