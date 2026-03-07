@@ -213,3 +213,80 @@ def test_research_search_feeds() -> None:
     body = r.json()
     assert "feeds" in body, f"Missing 'feeds' key: {body}"
     assert len(body["feeds"]) > 0, "No feeds returned"
+
+
+def _make_tiny_png() -> bytes:
+    """Generate a valid 4×4 white RGB PNG using stdlib only (no Pillow)."""
+    import struct, zlib as _zl
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        payload = tag + data
+        return struct.pack(">I", len(data)) + payload + struct.pack(">I", _zl.crc32(payload) & 0xFFFFFFFF)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    # IHDR: width=4, height=4, bit_depth=8, color_type=2 (RGB)
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+    # Raw scanlines: filter_byte(0) + 4 white pixels per row
+    raw = b"".join(b"\x00" + b"\xff\xff\xff" * 4 for _ in range(4))
+    idat = _chunk(b"IDAT", _zl.compress(raw))
+    iend = _chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+@pytest.mark.smoke
+def test_ocr_vision_direct() -> None:
+    """aichat-vision POST /ocr must accept a valid PNG and return OCR fields.
+
+    Regression test: ensures the /ocr route exists (not /ocr/ocr).
+    """
+    base_url = _VISION_URL
+    if not _is_reachable(f"{base_url}/health"):
+        pytest.skip("aichat-vision not reachable")
+
+    import base64
+    b64 = base64.standard_b64encode(_make_tiny_png()).decode()
+    r = httpx.post(f"{base_url}/ocr", json={"b64": b64, "lang": "eng"}, timeout=30)
+    assert r.status_code == 200, f"POST /ocr returned {r.status_code}: {r.text}"
+    body = r.json()
+    assert "text" in body, f"Missing 'text' key in OCR response: {body}"
+    assert "word_count" in body, f"Missing 'word_count' key in OCR response: {body}"
+
+
+@pytest.mark.smoke
+def test_ocr_image_via_mcp_jsonrpc() -> None:
+    """ocr_image MCP tool must call /ocr (not /ocr/ocr) and return OCR text.
+
+    Regression test for the double-prefix bug where OCR_URL already contained
+    /ocr but the handler appended /ocr again → /ocr/ocr (404 Not Found).
+    Uses _resolve_image_path's /docker/human_browser/workspace/ alias so the
+    path works both from the test host and inside the MCP container.
+    """
+    base_url = _MCP_URL
+    if not _is_reachable(f"{base_url}/health"):
+        pytest.skip("aichat-mcp not reachable")
+    if not _is_reachable(f"{_VISION_URL}/ocr/health"):
+        pytest.skip("aichat-vision OCR not reachable")
+
+    import glob
+    # _resolve_image_path inside MCP remaps /docker/human_browser/workspace/* → BROWSER_WORKSPACE
+    host_ws = "/docker/human_browser/workspace"
+    images = sorted(glob.glob(f"{host_ws}/*.jpg") + glob.glob(f"{host_ws}/*.png"))
+    if not images:
+        pytest.skip("No images in /docker/human_browser/workspace to OCR")
+
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "ocr_image",
+            "arguments": {"path": images[0], "lang": "eng"},
+        },
+    }
+    r = httpx.post(f"{base_url}/mcp", json=rpc, timeout=60)
+    assert r.status_code == 200, f"MCP returned {r.status_code}"
+    body = r.json()
+    content = body.get("result", {}).get("content", [{}])
+    text = content[0].get("text", "") if content else ""
+    assert "OCR result" in text, f"Expected 'OCR result' in response, got: {text[:300]}"
+    assert "404" not in text, f"OCR still returning 404 — routing bug: {text[:300]}"
