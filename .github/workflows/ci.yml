@@ -11,9 +11,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
-  packages: write      # push images (optional registry)
-  id-token: write      # OIDC for cosign attestation
+  contents: write      # checkout + push cache tags
+  packages: write      # push/pull images from GHCR
+  id-token: write      # OIDC for cosign / sbom-action
+  actions: write       # cancel stale runs, upload artifacts
 
 # ---------------------------------------------------------------------------
 # Global env
