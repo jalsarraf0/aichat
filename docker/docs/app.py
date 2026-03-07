@@ -1,13 +1,22 @@
-"""aichat-docs: Pure-text document ingestor. No ML — outputs normalized Markdown.
+"""aichat-docs: Consolidated document ingestor + precise PDF operations service.
 
-Supported formats: .pdf, .docx, .xlsx, .pptx, .html, .md, .txt
+Merges aichat-docs (document ingestion) and aichat-pdf (PDF editing/OCR) into
+one FastAPI application.  Docs routes are at the root; PDF routes are at /pdf/*.
 
-Endpoints:
-  POST /ingest      — convert document (base64) to Markdown
-  POST /ingest/url  — download URL and ingest
-  POST /tables      — extract tables from document
-  GET  /formats     — list supported extensions
-  GET  /health
+Root routes (document ingestor - no ML, outputs normalized Markdown):
+  POST /ingest      -- convert document (base64) to Markdown
+  POST /ingest/url  -- download URL and ingest
+  POST /tables      -- extract tables from document
+  GET  /formats     -- list supported formats
+  GET  /health      -- aggregate health (docs + pdf)
+
+PDF sub-routes (mount at /pdf, OCR delegated to aichat-vision:8099):
+  POST /pdf/read       -- extract text from PDF or image (text/OCR/auto)
+  POST /pdf/edit       -- deterministic editing operations for PDF and images
+  POST /pdf/fill-form  -- fill AcroForm fields (PDF only)
+  POST /pdf/merge      -- merge multiple PDFs
+  POST /pdf/split      -- split a PDF by page ranges
+  GET  /pdf/health     -- PDF sub-health
 """
 from __future__ import annotations
 
@@ -38,13 +47,13 @@ log = logging.getLogger("aichat-docs")
 # Config
 # ---------------------------------------------------------------------------
 
-DB_API   = os.environ.get("DATABASE_URL", "http://aichat-database:8091")
+DB_API   = os.environ.get("DATABASE_URL", "http://aichat-data:8091")
 _SERVICE = "aichat-docs"
 
 SUPPORTED = ["pdf", "docx", "xlsx", "xls", "pptx", "html", "htm", "md", "txt"]
 SYSTEM_SSL_CONTEXT = ssl.create_default_context()
 
-app = FastAPI()
+app = FastAPI(title="aichat-docs")
 
 
 # ---------------------------------------------------------------------------
@@ -313,3 +322,15 @@ def extract_tables_only(payload: dict) -> dict:
         raise HTTPException(status_code=422, detail=f"Invalid base64: {exc}") from exc
     result = _ingest(data, filename)
     return {"tables": result["tables"], "count": len(result["tables"])}
+
+
+# ---------------------------------------------------------------------------
+# Mount PDF sub-application at /pdf
+# ---------------------------------------------------------------------------
+
+try:
+    from pdf_service import app as _pdf_app
+    app.mount("/pdf", _pdf_app)
+    log.info("aichat-docs: PDF sub-service mounted at /pdf")
+except Exception as _pdf_exc:
+    log.warning("aichat-docs: PDF sub-service not available: %s", _pdf_exc)
