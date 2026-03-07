@@ -455,7 +455,7 @@ class TestWebTools:
         txt = mcp("image_search", {
             "query": "Klukai HK416 Girls Frontline 2 character art",
             "max_results": 3
-        }, timeout=60)
+        }, timeout=120)
         assert txt
 
     def test_fetch_image(self):
