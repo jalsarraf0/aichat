@@ -6856,28 +6856,9 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                     "temperature": 0.3,
                 }
 
-                # Model selection: use IMAGE_GEN_MODEL if set; otherwise auto-detect
-                # the first vision-capable model from the LM Studio /v1/models list.
-                # Known vision model name patterns (substrings, case-insensitive):
-                _VISION_PATTERNS = (
-                    "vl", "vision", "llava", "clip", "bakllava", "minicpm",
-                    "qwen.*vl", "glm.*v", "internvl", "cogvlm", "phi.*vision",
-                    "pixtral", "molmo", "idefics", "florence",
-                )
-                _chosen_model = IMAGE_GEN_MODEL or ""
-                if not _chosen_model:
-                    try:
-                        import re as _re_ic
-                        async with httpx.AsyncClient(timeout=5.0) as _mc:
-                            _ml = await _mc.get(f"{IMAGE_GEN_BASE_URL}/v1/models")
-                        for _m in _ml.json().get("data", []):
-                            _mid = (_m.get("id") or "").lower()
-                            if any(_re_ic.search(p, _mid) for p in _VISION_PATTERNS):
-                                _chosen_model = _m.get("id", "")
-                                break
-                    except Exception:
-                        pass
-
+                # Model selection: use IMAGE_GEN_MODEL if explicitly set,
+                # otherwise let LM Studio use whatever model is currently loaded.
+                _chosen_model = IMAGE_GEN_MODEL.strip() if IMAGE_GEN_MODEL else ""
                 if _chosen_model:
                     payload_ic["model"] = _chosen_model
 
@@ -6893,12 +6874,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
                         if caption:
                             model_note = f" [model: {_chosen_model}]" if _chosen_model else ""
                             return _text(f"{caption}{model_note}")
-                        return _text("image_caption: empty response from vision model — ensure a vision-capable model (e.g. Qwen-VL, LLaVA, GLM-V) is loaded in LM Studio.")
+                        return _text("image_caption: empty response — ensure a model is loaded and running in LM Studio.")
                     except Exception as exc:
                         return _text(
-                            f"image_caption: LM Studio vision request failed — {exc}\n"
-                            f"Endpoint: {IMAGE_GEN_BASE_URL}  Model: {_chosen_model or '(auto)'}\n"
-                            "Ensure LM Studio Local Server is running and a vision-capable model is loaded."
+                            f"image_caption: LM Studio request failed — {exc}\n"
+                            f"Endpoint: {IMAGE_GEN_BASE_URL}  Model: {_chosen_model or '(server default)'}\n"
+                            "Ensure LM Studio Local Server is running with a model loaded."
                         )
 
             # ----------------------------------------------------------------
