@@ -1040,12 +1040,11 @@ def jobs_list(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     count_params = list(params)
     params += [limit, offset]
+    sql_jobs = f"SELECT * FROM jobs {where} ORDER BY priority DESC, submitted_at DESC LIMIT ? OFFSET ?"  # nosec B608
+    sql_count = f"SELECT COUNT(*) FROM jobs {where}"  # nosec B608
     with _sqlite(JOBS_DB) as con:
-        rows = con.execute(  # nosec B608
-            f"SELECT * FROM jobs {where} ORDER BY priority DESC, submitted_at DESC "
-            "LIMIT ? OFFSET ?", params,
-        ).fetchall()
-        total = con.execute(f"SELECT COUNT(*) FROM jobs {where}", count_params).fetchone()[0]  # nosec B608
+        rows = con.execute(sql_jobs, params).fetchall()
+        total = con.execute(sql_count, count_params).fetchone()[0]
     return {"jobs": [_job_row(r) for r in rows], "total": total,
             "limit": limit, "offset": offset}
 
