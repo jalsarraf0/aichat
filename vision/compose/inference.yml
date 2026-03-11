@@ -1,0 +1,89 @@
+services:
+  compreface-postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: frs
+      # CompreFace internally connects as "compreface" — must match here
+      POSTGRES_USER: compreface
+      POSTGRES_PASSWORD: ${COMPREFACE_DB_PASSWORD:-compreface_secret}
+    volumes:
+      - compreface_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compreface -d frs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  compreface:
+    image: exadel/compreface:1.2.0
+    depends_on:
+      compreface-postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: jdbc:postgresql://compreface-postgres:5432/frs
+      POSTGRES_USERNAME: compreface
+      POSTGRES_PASSWORD: ${COMPREFACE_DB_PASSWORD:-compreface_secret}
+      SPRING_PROFILES_ACTIVE: dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - compreface_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8080/actuator/health | grep -qE 'status|x-api-key' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.05-py3
+    command: ["tritonserver", "--model-repository=/models", "--http-port=8000", "--grpc-port=8001", "--metrics-port=8002", "--log-verbose=1"]
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    volumes:
+      - ../triton/model_repository:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/v2/health/ready || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  vision-router:
+    build:
+      context: ../services/vision-router
+      dockerfile: Dockerfile
+    environment:
+      ROUTER_TRITON__URL: http://triton:8000
+      ROUTER_LOG_LEVEL: INFO
+      ROUTER_API_KEY: ${VISION_ROUTER_API_KEY:-}
+    ports:
+      - "8090:8090"
+    volumes:
+      # Read-only mount of model repository so vision-router can load
+      # text_embeddings.npy sidecar for zero-shot FashionCLIP scoring.
+      - ../triton/model_repository:/models:ro
+    depends_on:
+      triton:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8090/v1/metrics > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  compreface_db:
+  compreface_data:

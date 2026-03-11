@@ -1,0 +1,28 @@
+name: "efficientnet_b0"
+backend: "onnxruntime"
+max_batch_size: 32
+input [
+  {
+    name: "input_1"
+    data_type: TYPE_FP32
+    dims: [3, 224, 224]
+  }
+]
+output [
+  {
+    name: "Predictions/Softmax"
+    data_type: TYPE_FP32
+    dims: [1000]
+  }
+]
+dynamic_batching {
+  preferred_batch_size: [1, 4, 8, 16, 32]
+  max_queue_delay_microseconds: 50
+}
+instance_group [
+  {
+    kind: KIND_GPU
+    gpus: [0]
+    count: 2
+  }
+]

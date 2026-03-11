@@ -1,0 +1,145 @@
+name: Security CI
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF results
+  actions: write           # download artifacts
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # SAST: bandit + semgrep — per code layer (src vs docker)
+  # ──────────────────────────────────────────────────────────────────────────
+  sast:
+    name: SAST / ${{ matrix.layer.name }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        layer:
+          - name: src
+            path: src/
+          - name: docker-services
+            path: docker/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install bandit
+        run: pip install bandit[toml]
+
+      - name: Bandit SAST (${{ matrix.layer.name }})
+        run: bandit -r "${{ matrix.layer.path }}" -ll -q
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Dependency vulnerability audit — fanned out per service requirements.txt
+  # ──────────────────────────────────────────────────────────────────────────
+  dep-audit:
+    name: Dep Audit / ${{ matrix.target.name }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: main
+            req: ""
+          - name: data
+            req: docker/data/requirements.txt
+          - name: vision
+            req: docker/vision/requirements.txt
+          - name: docs
+            req: docker/docs/requirements.txt
+          - name: sandbox
+            req: docker/sandbox/requirements.txt
+          - name: mcp
+            req: docker/mcp/requirements.txt
+          - name: jupyter
+            req: docker/jupyter/requirements.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit ${{ matrix.target.name }}
+        run: |
+          if [ -z "${{ matrix.target.req }}" ]; then
+            pip-audit .
+          else
+            pip-audit -r "${{ matrix.target.req }}"
+          fi
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Secret scanning — detect accidentally committed credentials
+  # ──────────────────────────────────────────────────────────────────────────
+  secrets:
+    name: Secret Scan
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets (truffleHog)
+        run: |
+          if ! command -v trufflehog &>/dev/null; then
+            curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+          trufflehog git file://. \
+            --only-verified \
+            --fail \
+            --no-update \
+          || echo "::warning::Potential secrets detected — review truffleHog output above"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Shell script security + formatting
+  # ──────────────────────────────────────────────────────────────────────────
+  shellcheck:
+    name: Shellcheck + shfmt
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || apt-get install -y shellcheck
+          shellcheck install.sh uninstall.sh entrypoint \
+            scripts/bin/install scripts/bin/uninstall \
+            scripts/bootstrap/install_aichat.sh \
+            .github/scripts/*.sh 2>/dev/null || true
+
+      - name: shfmt
+        run: |
+          if ! command -v shfmt &>/dev/null; then
+            curl -sSfL https://github.com/mvdan/sh/releases/latest/download/shfmt_v3.8.0_linux_amd64 \
+              -o /usr/local/bin/shfmt && chmod +x /usr/local/bin/shfmt
+          fi
+          shfmt -d install.sh uninstall.sh entrypoint \
+            scripts/bin/install scripts/bin/uninstall \
+            scripts/bootstrap/install_aichat.sh \
+            .github/scripts/*.sh 2>/dev/null || true

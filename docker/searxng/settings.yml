@@ -1,0 +1,78 @@
+# SearXNG configuration for aichat
+# Self-hosted meta-search: proxies Google, Bing, DDG, Brave — no bot detection
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - duckduckgo
+      - brave
+      - google images
+      - bing images
+      - qwant
+
+server:
+  secret_key: "aichat-searxng-secret-change-in-production"
+  limiter: false
+  image_proxy: true
+  port: 8080
+  bind_address: "0.0.0.0"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  ban_time_on_fail: 0
+  max_ban_time_on_fail: 0
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    engine: google
+    language: en
+    region: en-US
+    safesearch: 0
+    disabled: false
+
+  - name: bing
+    engine: bing
+    disabled: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+
+  - name: brave
+    engine: brave
+    disabled: false
+
+  - name: google images
+    engine: google_images
+    categories: images
+    disabled: false
+
+  - name: bing images
+    engine: bing_images
+    categories: images
+    disabled: false
+
+  - name: qwant
+    engine: qwant
+    disabled: false
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 20.0
+  # Rotate through realistic user agents
+  useragent_suffix: ""
+
+ui:
+  static_use_hash: true
+  default_locale: en
+  query_in_title: false
+  infinite_scroll: false
+  results_on_new_tab: false
+  theme_args:
+    simple_style: auto

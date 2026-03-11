@@ -1,0 +1,235 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write    # OIDC for cosign SBOM attestation
+  actions: write     # artifact upload/download
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build Python distribution
+  # ──────────────────────────────────────────────────────────────────────────
+  build-python-dist:
+    name: Build Python Dist
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build standalone binary
+  # ──────────────────────────────────────────────────────────────────────────
+  build-binary:
+    name: Build Binary
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build binary
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pyinstaller
+          pyinstaller --onefile --name aichat src/aichat/__main__.py
+          tar -czf "aichat-${RELEASE_TAG}-linux-x64.tar.gz" -C dist aichat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux
+          path: "*.tar.gz"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build + SBOM all Docker service images
+  # ──────────────────────────────────────────────────────────────────────────
+  build-images:
+    name: Build Image / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - service: aichat-data
+            context: docker/data
+          - service: aichat-vision
+            context: docker/vision
+          - service: aichat-docs
+            context: docker/docs
+          - service: aichat-sandbox
+            context: docker/sandbox
+          - service: aichat-mcp
+            context: docker/mcp
+          - service: aichat-jupyter
+            context: docker/jupyter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }}
+        run: |
+          docker build \
+            --tag "${{ matrix.service }}:${{ env.RELEASE_TAG }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${{ env.RELEASE_TAG }}" \
+            --label "org.opencontainers.image.source=${{ github.repositoryUrl }}" \
+            "${{ matrix.context }}"
+
+      - name: Save image tarball
+        run: |
+          docker save "${{ matrix.service }}:${{ env.RELEASE_TAG }}" \
+            | gzip > "${{ matrix.service }}-${{ env.RELEASE_TAG }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: "${{ matrix.service }}-${{ env.RELEASE_TAG }}.tar.gz"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SBOM for every release image
+  # ──────────────────────────────────────────────────────────────────────────
+  sbom:
+    name: SBOM / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 15
+    needs: build-images
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        service:
+          - aichat-data
+          - aichat-vision
+          - aichat-docs
+          - aichat-sandbox
+          - aichat-mcp
+          - aichat-jupyter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+
+      - name: Load image
+        run: docker load < "${{ matrix.service }}-${{ env.RELEASE_TAG }}.tar.gz"
+
+      - name: Install syft
+        run: |
+          if ! command -v syft &>/dev/null; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+
+      - name: Generate SPDX SBOM
+        run: |
+          syft "${{ matrix.service }}:${{ env.RELEASE_TAG }}" \
+            -o spdx-json \
+            > "sbom-${{ matrix.service }}-${{ env.RELEASE_TAG }}.spdx.json"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          syft "${{ matrix.service }}:${{ env.RELEASE_TAG }}" \
+            -o cyclonedx-json \
+            > "sbom-${{ matrix.service }}-${{ env.RELEASE_TAG }}.cdx.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: "sbom-${{ matrix.service }}-${{ env.RELEASE_TAG }}.*"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Create GitHub Release with all assets + SBOMs
+  # ──────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 15
+    needs: [build-python-dist, build-binary, sbom]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+          merge-multiple: true
+
+      - name: Generate release notes
+        run: |
+          cat > RELEASE_NOTES.md <<EOF
+          ## aichat ${RELEASE_TAG}
+
+          ### Platform Architecture
+          This release includes the consolidated platform (5 service containers → full MCP platform):
+          - \`aichat-data\` — database, memory, graph, planner, research, jobs
+          - \`aichat-vision\` — video analysis + OCR
+          - \`aichat-docs\` — document ingestor + PDF operations
+          - \`aichat-sandbox\` — isolated code execution
+          - \`aichat-mcp\` — MCP gateway (93+ tools)
+          - \`aichat-jupyter\` — persistent Python kernel execution
+
+          ### Assets
+          - Standalone Linux binary
+          - Python wheel (.whl) and source distribution (.tar.gz)
+          - Docker image tarballs for all 5 service containers
+          - SBOM in SPDX and CycloneDX format for each image
+
+          ### Quick Start
+          \`\`\`bash
+          cp .env.example .env
+          docker compose up -d
+          # Point LM Studio at http://<host>:8096/sse
+          \`\`\`
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.whl
+            release-assets/**/*.spdx.json
+            release-assets/**/*.cdx.json

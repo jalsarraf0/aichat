@@ -1,0 +1,378 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel any in-progress run for the same branch/PR when a new push arrives.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  actions: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 1 — Static analysis
+  # Fast, no Docker. Blocks all downstream jobs on failure.
+  # ──────────────────────────────────────────────────────────────────────────
+  static:
+    name: Static Analysis
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" ruff
+
+      - name: Lint (ruff)
+        run: ruff check docker/ src/ tests/
+
+      - name: Architecture contract tests
+        run: pytest tests/test_architecture.py -v --tb=short
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 2a — Regression tests
+  # One ephemeral container per test file, all 25 running in parallel.
+  # Each job: checkout → pip install → pytest → teardown containers.
+  # ──────────────────────────────────────────────────────────────────────────
+  regression:
+    name: Test / ${{ matrix.test }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 20
+    needs: static
+    env:
+      COMPOSE_PROJECT_NAME: aichat-ci-${{ github.run_id }}-${{ matrix.test }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_tui
+          - test_tool_args
+          - test_tool_scheduler
+          - test_toolkit
+          - test_streaming
+          - test_thinking
+          - test_ssh_keys
+          - test_sanitizer
+          - test_keybinds
+          - test_cli_mcp_server
+          - test_compaction
+          - test_compaction_enhancements
+          - test_conversation_db
+          - test_database_tools
+          - test_orchestrate
+          - test_browser_gpu
+          - test_image_pipeline
+          - test_image_rendering
+          - test_face_recognition
+          - test_new_services
+          - test_finetuning
+          - test_batch_jobs
+          - test_image_search_e2e
+          - test_vision_tools
+          - test_tools_e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run ${{ matrix.test }}
+        run: pytest -q -m "not smoke" tests/${{ matrix.test }}.py --tb=short
+
+      - name: Teardown ephemeral containers
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml \
+            down --volumes --remove-orphans 2>/dev/null || true
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 2b — Build service images
+  # One build container per service, all 6 running in parallel with Stage 2a.
+  # :cache tag is kept on the runner; :ci-<sha> is ephemeral (removed later).
+  # ──────────────────────────────────────────────────────────────────────────
+  build-images:
+    name: Build / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 45
+    needs: static
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - aichat-data
+          - aichat-vision
+          - aichat-docs
+          - aichat-sandbox
+          - aichat-mcp
+          - aichat-jupyter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1
+
+      - name: Build ${{ matrix.service }}
+        run: |
+          SERVICE=${{ matrix.service }}
+          case "$SERVICE" in
+            aichat-data)    DIR=docker/data    ;;
+            aichat-vision)  DIR=docker/vision  ;;
+            aichat-docs)    DIR=docker/docs    ;;
+            aichat-sandbox) DIR=docker/sandbox ;;
+            aichat-mcp)     DIR=docker/mcp     ;;
+            aichat-jupyter) DIR=docker/jupyter ;;
+          esac
+          docker pull "${SERVICE}:cache" 2>/dev/null || true
+          docker build \
+            --cache-from "${SERVICE}:cache" \
+            --tag "${SERVICE}:ci-${{ github.sha }}" \
+            --tag "${SERVICE}:cache" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.repositoryUrl }}" \
+            "$DIR"
+
+      - name: Save image tarball
+        run: |
+          docker save "${{ matrix.service }}:ci-${{ github.sha }}" \
+            | gzip > "${{ matrix.service }}.tar.gz"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: ${{ matrix.service }}.tar.gz
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 3a — Smoke tests (full stack)
+  # Requires both regression and build-images to pass.
+  # Starts a complete ephemeral stack, runs smoke tests, tears it all down.
+  # ──────────────────────────────────────────────────────────────────────────
+  smoke:
+    name: Smoke Tests
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 20
+    needs: [regression, build-images]
+    env:
+      COMPOSE_PROJECT_NAME: aichat-smoke-${{ github.run_id }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pre-clean any stale containers
+        run: |
+          docker compose -f docker-compose.yml \
+            down --volumes --remove-orphans 2>/dev/null || true
+
+      - name: Start full stack
+        run: |
+          docker compose -f docker-compose.yml up -d --build \
+            aichat-db aichat-vector aichat-data aichat-vision \
+            aichat-docs aichat-sandbox aichat-searxng
+          for i in $(seq 1 24); do
+            docker compose -f docker-compose.yml exec aichat-data \
+              python3 -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8091/health',timeout=3)" \
+              2>/dev/null && { echo "aichat-data ready"; break; }
+            echo "Waiting for aichat-data ($i/24)…"; sleep 5
+          done
+
+      - name: Start MCP gateway
+        run: docker compose -f docker-compose.yml up -d aichat-mcp
+
+      - name: Install test deps
+        run: pip install -q pytest httpx
+
+      - name: Run smoke tests
+        run: |
+          RUNNER_ID=$(hostname)
+          NETWORK="${COMPOSE_PROJECT_NAME}_default"
+          docker network connect "$NETWORK" "$RUNNER_ID" 2>/dev/null || true
+          trap "docker network disconnect '$NETWORK' '$RUNNER_ID' 2>/dev/null || true" EXIT
+          DATA_URL=http://aichat-data:8091 \
+          VISION_URL=http://aichat-vision:8099 \
+          DOCS_URL=http://aichat-docs:8101 \
+          SANDBOX_URL=http://aichat-sandbox:8095 \
+          MCP_URL=http://aichat-mcp:8096 \
+          pytest tests/test_smoke.py -v -m smoke --tb=short
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml logs --tail=100
+
+      - name: Teardown stack
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml \
+            down --volumes --remove-orphans
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 3b — Package build (parallel with smoke)
+  # ──────────────────────────────────────────────────────────────────────────
+  package:
+    name: Package Build
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 20
+    needs: regression
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Build standalone binary
+        run: |
+          pip install . pyinstaller
+          pyinstaller --onefile --name aichat src/aichat/__main__.py
+
+      - name: Bundle artifact
+        run: tar -czf "aichat-${{ runner.os }}-x64-${{ github.sha }}.tar.gz" -C dist aichat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aichat-${{ runner.os }}-x64
+          path: "*.tar.gz"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 3c — SBOM + vulnerability scan (parallel with smoke, 1 per service)
+  # Ephemeral :ci-<sha> image is removed at the end of each SBOM job.
+  # ──────────────────────────────────────────────────────────────────────────
+  sbom:
+    name: SBOM / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 15
+    needs: build-images
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - aichat-data
+          - aichat-vision
+          - aichat-docs
+          - aichat-sandbox
+          - aichat-mcp
+          - aichat-jupyter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+
+      - name: Load image
+        run: docker load < "${{ matrix.service }}.tar.gz"
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: "${{ matrix.service }}:ci-${{ github.sha }}"
+          artifact-name: "sbom-${{ matrix.service }}"
+          format: spdx-json
+          output-file: "sbom-${{ matrix.service }}.spdx.json"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          if ! command -v syft &>/dev/null; then
+            curl -sSfL \
+              https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+          syft "${{ matrix.service }}:ci-${{ github.sha }}" \
+            -o cyclonedx-json \
+            > "sbom-${{ matrix.service }}.cyclonedx.json"
+
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cdx-${{ matrix.service }}
+          path: "sbom-${{ matrix.service }}.cyclonedx.json"
+          retention-days: 30
+
+      - name: Vulnerability scan (grype)
+        run: |
+          if ! command -v grype &>/dev/null; then
+            curl -sSfL \
+              https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+          grype "sbom:sbom-${{ matrix.service }}.spdx.json" \
+            --fail-on high \
+            --output table \
+            || echo "::warning::Vulnerabilities found in ${{ matrix.service }}"
+
+      - name: Remove ephemeral image
+        if: always()
+        run: docker rmi "${{ matrix.service }}:ci-${{ github.sha }}" 2>/dev/null || true
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 4 — Final cleanup
+  # Runs regardless of earlier failures. Removes all :ci-<sha> tags and
+  # dangling layers. :cache tags are intentionally kept for the next run.
+  # ──────────────────────────────────────────────────────────────────────────
+  cleanup:
+    name: Cleanup
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 5
+    if: always()
+    needs: [smoke, package, sbom]
+    steps:
+      - name: Remove all :ci-<sha> image tags
+        run: |
+          for svc in aichat-data aichat-vision aichat-docs \
+                     aichat-sandbox aichat-mcp aichat-jupyter; do
+            docker rmi "${svc}:ci-${{ github.sha }}" 2>/dev/null \
+              && echo "Removed ${svc}:ci-${{ github.sha }}" || true
+          done
+
+      - name: Prune dangling layers
+        run: docker image prune -f
+
+      - name: Show retained cache images
+        run: |
+          for svc in aichat-data aichat-vision aichat-docs \
+                     aichat-sandbox aichat-mcp aichat-jupyter; do
+            docker image inspect "${svc}:cache" \
+              --format "  ${svc}:cache — {{.Id}}" 2>/dev/null || true
+          done

@@ -1,0 +1,236 @@
+name: SBOM & Vulnerability Audit
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "0 3 * * 1"   # Weekly Monday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write       # push SBOM attestations
+  id-token: write       # OIDC for cosign / Sigstore
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  COMPOSE_PROJECT_NAME: aichat-sbom-${{ github.run_id }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build all service images (ephemeral, no push to registry)
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - service: aichat-data
+            context: docker/data
+          - service: aichat-vision
+            context: docker/vision
+          - service: aichat-docs
+            context: docker/docs
+          - service: aichat-sandbox
+            context: docker/sandbox
+          - service: aichat-mcp
+            context: docker/mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }}
+        run: |
+          docker build \
+            --tag "${{ matrix.service }}:sbom-${{ github.sha }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            "${{ matrix.context }}"
+
+      - name: Save image tarball
+        run: |
+          docker save "${{ matrix.service }}:sbom-${{ github.sha }}" \
+            | gzip > "${{ matrix.service }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: img-${{ matrix.service }}
+          path: ${{ matrix.service }}.tar.gz
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SBOM generation + vulnerability scan — fanned out per service
+  # ──────────────────────────────────────────────────────────────────────────
+  sbom-scan:
+    name: SBOM+Scan / ${{ matrix.service }}
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 20
+    needs: build
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        service:
+          - aichat-data
+          - aichat-vision
+          - aichat-docs
+          - aichat-sandbox
+          - aichat-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: img-${{ matrix.service }}
+
+      - name: Load image
+        run: docker load < "${{ matrix.service }}.tar.gz"
+
+      - name: Install syft + grype
+        run: |
+          if ! command -v syft &>/dev/null; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+          if ! command -v grype &>/dev/null; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+
+      - name: Generate SPDX SBOM
+        run: |
+          syft "${{ matrix.service }}:sbom-${{ github.sha }}" \
+            -o spdx-json \
+            > "sbom-${{ matrix.service }}.spdx.json"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          syft "${{ matrix.service }}:sbom-${{ github.sha }}" \
+            -o cyclonedx-json \
+            > "sbom-${{ matrix.service }}.cdx.json"
+
+      - name: Generate SBOM summary (table)
+        run: |
+          syft "${{ matrix.service }}:sbom-${{ github.sha }}" \
+            -o table \
+            | tee "sbom-${{ matrix.service }}.txt" \
+            | tail -5
+
+      - name: Vulnerability scan (grype)
+        id: grype
+        run: |
+          grype "sbom:sbom-${{ matrix.service }}.spdx.json" \
+            --fail-on critical \
+            --output table \
+            | tee "vuln-${{ matrix.service }}.txt"
+        continue-on-error: true
+
+      - name: Annotate with vulnerability count
+        run: |
+          CRITS=$(grep -c "Critical" "vuln-${{ matrix.service }}.txt" || true)
+          HIGHS=$(grep -c "High"     "vuln-${{ matrix.service }}.txt" || true)
+          if [ "$CRITS" -gt "0" ]; then
+            echo "::error::${{ matrix.service }}: $CRITS critical vulnerability(ies) found"
+          elif [ "$HIGHS" -gt "0" ]; then
+            echo "::warning::${{ matrix.service }}: $HIGHS high vulnerability(ies) found"
+          else
+            echo "${{ matrix.service }}: no critical/high CVEs"
+          fi
+
+      - name: Upload SBOM + vuln report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: |
+            sbom-${{ matrix.service }}.spdx.json
+            sbom-${{ matrix.service }}.cdx.json
+            sbom-${{ matrix.service }}.txt
+            vuln-${{ matrix.service }}.txt
+          retention-days: 90
+
+      - name: Fail if critical CVEs found
+        if: steps.grype.outcome == 'failure'
+        run: |
+          echo "Critical vulnerabilities detected in ${{ matrix.service }}"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Python dependency SBOM (pip-audit)
+  # ──────────────────────────────────────────────────────────────────────────
+  pip-audit:
+    name: Python Dependency Audit
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pip-audit + cyclonedx-bom
+        run: pip install pip-audit cyclonedx-bom
+
+      - name: Audit main package
+        run: pip-audit . -f json -o pip-audit-main.json || true
+
+      - name: Generate Python SBOM (CycloneDX)
+        run: |
+          pip install -e ".[dev]"
+          cyclonedx-py environment \
+            --of json \
+            -o sbom-python-env.cdx.json
+
+      - name: Audit each service requirements.txt
+        run: |
+          for req in docker/*/requirements.txt; do
+            svc=$(basename "$(dirname "$req")")
+            echo "--- $svc ---"
+            pip-audit -r "$req" --output table || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-python
+          path: |
+            pip-audit-main.json
+            sbom-python-env.cdx.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Aggregate SBOM summary job
+  # ──────────────────────────────────────────────────────────────────────────
+  sbom-summary:
+    name: SBOM Summary
+    runs-on: [self-hosted, Linux, X64, docker]
+    timeout-minutes: 5
+    needs: [sbom-scan, pip-audit]
+    if: always()
+    steps:
+      - name: Download all SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sbom-*
+          merge-multiple: true
+          path: sboms/
+
+      - name: Print summary
+        run: |
+          echo "## SBOM Generation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          find sboms/ -type f | sort | while read f; do
+            size=$(du -sh "$f" | cut -f1)
+            echo "| $f | $size |" >> $GITHUB_STEP_SUMMARY
+          done

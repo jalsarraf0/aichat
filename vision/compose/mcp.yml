@@ -1,0 +1,82 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Local CPU-mode CompreFace — fallback when RTX host is unreachable.
+  # Shares the same API key as the primary.  Face enrollment data is stored
+  # in the local volume; it is NOT synced with the primary instance.
+  # ---------------------------------------------------------------------------
+  aichat-compreface-local-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: frs
+      POSTGRES_USER: compreface
+      POSTGRES_PASSWORD: ${LOCAL_COMPREFACE_DB_PASSWORD:-compreface_local_secret}
+    volumes:
+      - compreface_local_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compreface -d frs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aichat_default
+
+  aichat-compreface-local:
+    image: exadel/compreface:1.2.0
+    depends_on:
+      aichat-compreface-local-db:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: jdbc:postgresql://aichat-compreface-local-db:5432/frs
+      POSTGRES_USERNAME: compreface
+      POSTGRES_PASSWORD: ${LOCAL_COMPREFACE_DB_PASSWORD:-compreface_local_secret}
+      SPRING_PROFILES_ACTIVE: dev
+    volumes:
+      - compreface_local_data:/app/data
+    # No external port — only reachable within the Docker network.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    networks:
+      - aichat_default
+
+  aichat-vision-mcp:
+    build:
+      context: ../mcp-server
+      dockerfile: Dockerfile
+    environment:
+      VISION_COMPREFACE__URL: http://${RTX_HOST:-192.168.50.2}:8080
+      VISION_COMPREFACE__API_KEY: ${COMPREFACE_API_KEY:-}
+      VISION_ROUTER__URL: http://${RTX_HOST:-192.168.50.2}:8090
+      VISION_ROUTER__API_KEY: ${VISION_ROUTER_API_KEY:-}
+      VISION_SERVER__LOG_LEVEL: INFO
+      # Fallback: local CPU-mode CompreFace (same container network, no port needed)
+      VISION_FALLBACK__ENABLED: "true"
+      VISION_FALLBACK__COMPREFACE_URL: http://aichat-compreface-local:8080
+      VISION_FALLBACK__COMPREFACE_API_KEY: ${COMPREFACE_API_KEY:-}
+      VISION_FALLBACK__HEALTH_CHECK_INTERVAL_S: "30"
+    ports:
+      - "8097:8097"
+    depends_on:
+      aichat-compreface-local:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8097/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - aichat_default
+
+volumes:
+  compreface_local_db:
+  compreface_local_data:
+
+networks:
+  aichat_default:
+    external: true
+    name: aichat_default
