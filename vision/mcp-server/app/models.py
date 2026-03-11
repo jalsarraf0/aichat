@@ -6,7 +6,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Shared input types
 # ---------------------------------------------------------------------------
@@ -18,7 +17,7 @@ class ImageSource(BaseModel):
     file_path: str | None = Field(None, description="Server-local absolute file path")
 
     @model_validator(mode="after")
-    def exactly_one_source(self) -> "ImageSource":
+    def exactly_one_source(self) -> ImageSource:
         sources = [x for x in (self.url, self.base64, self.file_path) if x]
         if len(sources) != 1:
             raise ValueError("Exactly one of url, base64, or file_path must be provided")

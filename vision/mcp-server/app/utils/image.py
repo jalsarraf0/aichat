@@ -24,7 +24,7 @@ URL_TIMEOUT = 20.0
 MAX_BYTES = 25 * 1024 * 1024
 
 
-async def load_image_bytes(source: "ImageSource", allow_url: bool = True) -> tuple[bytes, str]:
+async def load_image_bytes(source: ImageSource, allow_url: bool = True) -> tuple[bytes, str]:
     """
     Load image bytes from a source (url, base64, or file_path).
 

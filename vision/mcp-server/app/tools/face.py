@@ -130,8 +130,9 @@ async def delete_face_subject(args: dict[str, Any]) -> dict[str, Any]:
 
     client = await _resolve_compreface_client()
     deleted = await client.delete_subject(subject)
-    from ..models import BackendInfo
     from urllib.parse import urlparse
+
+    from ..models import BackendInfo
     result = DeleteSubjectResult(
         subject=subject,
         deleted=deleted,

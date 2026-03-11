@@ -14,8 +14,9 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write    # OIDC for cosign SBOM attestation
+  id-token: write    # OIDC for cosign SBOM attestation + build provenance
   actions: write     # artifact upload/download
+  attestations: write  # actions/attest-build-provenance
 
 concurrency:
   group: release-${{ github.ref }}
@@ -50,6 +51,11 @@ jobs:
           name: python-dist
           path: dist/*
 
+      - name: Attest build provenance (wheel + sdist)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+
   # ──────────────────────────────────────────────────────────────────────────
   # Build standalone binary
   # ──────────────────────────────────────────────────────────────────────────
@@ -76,6 +82,11 @@ jobs:
         with:
           name: binary-linux
           path: "*.tar.gz"
+
+      - name: Attest build provenance (binary)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "aichat-${{ env.RELEASE_TAG }}-linux-x64.tar.gz"
 
   # ──────────────────────────────────────────────────────────────────────────
   # Build + SBOM all Docker service images

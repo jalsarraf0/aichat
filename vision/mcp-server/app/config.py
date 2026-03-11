@@ -89,7 +89,7 @@ class Settings(BaseSettings):
         )
 
     @model_validator(mode="after")
-    def _set_compreface_keys(self) -> "Settings":
+    def _set_compreface_keys(self) -> Settings:
         """If individual API keys are not set, derive from master key."""
         if self.compreface.api_key:
             for field in ("recognition_api_key", "detection_api_key", "verification_api_key"):

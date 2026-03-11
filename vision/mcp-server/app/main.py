@@ -14,11 +14,11 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
-import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -368,7 +368,7 @@ async def _dispatch(method: str, params: dict[str, Any], request_id: str) -> dic
                 "content": [{"type": "text", "text": json.dumps({"error": str(exc), "code": "BACKEND_ERROR"})}],
                 "isError": True,
             }
-        except Exception as exc:
+        except Exception:
             logger.exception("Tool %s unexpected error", tool_name)
             return {
                 "content": [{"type": "text", "text": json.dumps({"error": "Internal server error", "code": "INTERNAL_ERROR"})}],
@@ -451,7 +451,7 @@ async def mcp_http(request: Request) -> Response:
         return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
     except ValueError as exc:
         return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": str(exc)}}, status_code=404)
-    except Exception as exc:
+    except Exception:
         logger.exception("MCP dispatch error for method=%s", method)
         return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Internal error"}}, status_code=500)
 
@@ -477,7 +477,7 @@ async def mcp_sse(request: Request) -> StreamingResponse:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield f"data: {json.dumps(msg)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             _sse_sessions.pop(session_id, None)

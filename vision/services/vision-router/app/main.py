@@ -12,8 +12,9 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
