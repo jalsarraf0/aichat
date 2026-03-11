@@ -20,16 +20,18 @@ jobs:
   # ---------------------------------------------------------------------------
   lint:
     name: Lint (ruff)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
 
       - name: Install linting dependencies
         run: |
-          uv pip install --system \
+          pip install \
             ruff \
             mypy \
             pydantic \
@@ -56,17 +58,19 @@ jobs:
   # ---------------------------------------------------------------------------
   security:
     name: Security scan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # TruffleHog needs full history
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
 
       - name: Install bandit
-        run: uv pip install --system bandit
+        run: pip install bandit
 
       - name: Run bandit on mcp-server
         run: |
@@ -93,21 +97,18 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+          cache: pip
 
       - name: Install test dependencies
         run: |
-          uv pip install --system \
+          pip install \
             pytest \
             pytest-asyncio \
             pydantic \
@@ -134,7 +135,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build Docker images
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     needs: [lint, test-unit]
     steps:
       - uses: actions/checkout@v4
@@ -167,7 +168,7 @@ jobs:
   # ---------------------------------------------------------------------------
   sbom:
     name: Generate SBOMs
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     needs: build
     steps:
       - uses: actions/checkout@v4
