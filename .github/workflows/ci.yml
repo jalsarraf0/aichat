@@ -16,6 +16,7 @@ permissions:
   packages: write
   id-token: write
   actions: write
+  attestations: write
 
 env:
   PYTHONUTF8: "1"
@@ -268,6 +269,11 @@ jobs:
 
       - name: Bundle artifact
         run: tar -czf "aichat-${{ runner.os }}-x64-${{ github.sha }}.tar.gz" -C dist aichat
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "aichat-${{ runner.os }}-x64-${{ github.sha }}.tar.gz"
 
       - uses: actions/upload-artifact@v4
         with:
