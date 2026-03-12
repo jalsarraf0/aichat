@@ -3262,6 +3262,13 @@ async def _execute_job(job_id: str, tool_name: str, tool_args: dict, timeout_s: 
             await _patch({"status": "cancelled", "finished_at": _iso()})
             return
         result_text = next((b["text"] for b in result_blocks if b.get("type") == "text"), "")
+        if _blocks_indicate_error(tool_name, result_blocks):
+            await _patch({
+                "status": "failed",
+                "error": result_text[:2000] or f"{tool_name} failed",
+                "finished_at": _iso(),
+            })
+            return
         await _patch({"status": "succeeded", "result": result_text[:100_000],
                       "progress": 100, "finished_at": _iso()})
     except asyncio.TimeoutError:
@@ -6941,12 +6948,21 @@ async def _call_tool(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
 
                 # ── DB-first: return confirmed images if we have enough cached ───
                 try:
+                    db_limit = max(img_count * 4, (img_count + img_offset) * 3)
                     db_r = await asyncio.wait_for(
                         c.get(f"{DATABASE_URL}/images/search",
-                              params={"subject": _norm_subject, "limit": img_count * 2}),
+                              params={"subject": _norm_subject, "limit": db_limit, "offset": 0}),
                         timeout=3.0,
                     )
-                    db_imgs = db_r.json().get("images", [])
+                    db_imgs: list[dict] = []
+                    db_seen: set[str] = set()
+                    for raw_img in db_r.json().get("images", []):
+                        db_url = _unwrap_thumb(str(raw_img.get("url", "")))
+                        if not db_url or db_url in _seen_urls or db_url in db_seen:
+                            continue
+                        db_imgs.append({**raw_img, "url": db_url})
+                        db_seen.add(db_url)
+                    db_imgs = db_imgs[img_offset:]
                     if len(db_imgs) >= img_count:
                         db_blocks: list[dict] = []
                         for dbi in db_imgs:

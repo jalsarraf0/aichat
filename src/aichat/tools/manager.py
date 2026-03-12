@@ -720,8 +720,17 @@ class ToolManager:
                 return None
 
         try:
-            db_data = await self.db.search_images(_norm_subject, limit=count * 2)
-            db_imgs = db_data.get("images", [])
+            db_limit = max(count * 4, (count + offset) * 3)
+            db_data = await self.db.search_images(_norm_subject, limit=db_limit, offset=0)
+            db_imgs: list[dict] = []
+            db_seen: set[str] = set()
+            for raw_img in db_data.get("images", []):
+                db_url = _unwrap_thumb(str(raw_img.get("url", "")))
+                if not db_url or db_url in _seen_urls or db_url in db_seen:
+                    continue
+                db_imgs.append({**raw_img, "url": db_url})
+                db_seen.add(db_url)
+            db_imgs = db_imgs[offset:]
             if len(db_imgs) >= count:
                 async with _httpx.AsyncClient(timeout=12.0) as hc_db:
                     db_blocks: list[dict] = []

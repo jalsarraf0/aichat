@@ -324,8 +324,11 @@ def article_search(
     q: str = Query(default=""),
     topic: str = Query(default=""),
     limit: int = Query(default=20),
+    offset: int = Query(default=0),
+    summary_only: bool = Query(default=False),
 ) -> dict:
     limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     conditions: list[str] = []
     params: list[Any] = []
     if q:
@@ -335,13 +338,30 @@ def article_search(
         conditions.append("topic ILIKE %s")
         params.append(f"%{topic}%")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(limit)
-    sql_articles = f"SELECT id, url, title, topic, stored_at FROM articles {where} ORDER BY stored_at DESC LIMIT %s"  # nosec B608
+    params += [limit, offset]
+    sql_articles = (
+        f"SELECT id, url, title, content, topic, stored_at FROM articles {where} "
+        "ORDER BY stored_at DESC LIMIT %s OFFSET %s"
+    )  # nosec B608
     with _pg() as pg:
         rows = pg.execute(sql_articles, params).fetchall()
+
+    def _content(raw: Any) -> str:
+        text = str(raw or "")
+        if summary_only and len(text) > 300:
+            return text[:300] + "…"
+        return text
+
     return {
         "results": [
-            {"id": r[0], "url": r[1], "title": r[2], "topic": r[3], "stored_at": str(r[4])}
+            {
+                "id": r[0],
+                "url": r[1],
+                "title": r[2],
+                "content": _content(r[3]),
+                "topic": r[4],
+                "stored_at": str(r[5]),
+            }
             for r in rows
         ],
         "count": len(rows),

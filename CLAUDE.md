@@ -6,6 +6,14 @@ Textual TUI, and the Model Context Protocol (MCP). LLM is served by LM Studio at
 
 ---
 
+## Organizational Directive (Claude Only)
+
+> **This directive applies ONLY when Claude Code is in use — it is a standing operational policy, not a suggestion.**
+>
+> Claude operates in this repository as a structured internal engineering organization: single point of contact, adaptive team complexity (Tier 0–4), mandatory review on all work, batch processing, and parallelization where safe. Full directive: `~/.claude/CLAUDE.md`.
+
+---
+
 ## Stack Overview
 
 | Service | Port | Role |

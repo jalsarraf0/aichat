@@ -36,7 +36,16 @@ class VisionMCPTool:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.post(self._mcp_url, json=payload)
                 resp.raise_for_status()
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    content_type = resp.headers.get("content-type", "unknown")
+                    logger.warning(
+                        "vision-mcp returned non-JSON response (%s): %s",
+                        content_type,
+                        resp.text[:200],
+                    )
+                    return {"error": "vision-mcp returned non-JSON response"}
         except httpx.HTTPStatusError as exc:
             logger.warning("vision-mcp HTTP error %s: %s", exc.response.status_code, exc.response.text[:200])
             return {"error": f"vision-mcp HTTP {exc.response.status_code}"}
@@ -64,8 +73,9 @@ class VisionMCPTool:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(self._health_url)
+                resp.raise_for_status()
                 data = resp.json()
-                return data.get("tools", 0) > 0
+                return isinstance(data, dict) and int(data.get("tools", 0)) > 0
         except Exception:
             return False
 

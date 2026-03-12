@@ -1,8 +1,9 @@
-"""End-to-end vision tool tests (require vision-mcp at localhost:8097)."""
+"""End-to-end vision tool tests against an explicit vision-mcp server."""
 from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import sys
 
@@ -10,20 +11,23 @@ import pytest
 
 sys.path.insert(0, "src")
 
+VISION_URL = os.environ.get("VISION_MCP_URL") or os.environ.get("MCP_SERVER_URL") or ""
+
 
 def _vision_mcp_up() -> bool:
     try:
         import urllib.request
-        urllib.request.urlopen("http://localhost:8097/health", timeout=2)
-        return True
+        with urllib.request.urlopen(f"{VISION_URL}/health", timeout=2) as resp:
+            data = json.load(resp)
+        return isinstance(data, dict) and int(data.get("tools", 0)) > 0
     except Exception:
         return False
 
 
 # Skip entire module if vision-mcp is not reachable or explicitly skipped
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SKIP_VISION_E2E", "0") != "0" or not _vision_mcp_up(),
-    reason="vision-mcp not reachable at localhost:8097",
+    os.environ.get("SKIP_VISION_E2E", "0") != "0" or not VISION_URL or not _vision_mcp_up(),
+    reason="requires VISION_MCP_URL or MCP_SERVER_URL pointing to a healthy vision-mcp server",
 )
 
 
@@ -39,7 +43,7 @@ def _make_test_b64() -> str:
 @pytest.fixture
 def vision_tool():
     from aichat.tools.vision import VisionMCPTool
-    return VisionMCPTool("http://localhost:8097")
+    return VisionMCPTool(VISION_URL)
 
 
 @pytest.fixture

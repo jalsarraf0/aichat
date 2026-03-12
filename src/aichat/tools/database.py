@@ -100,10 +100,12 @@ class DatabaseTool:
             },
         )
 
-    async def search_images(self, subject: str, limit: int = 20) -> dict:
+    async def search_images(self, subject: str, limit: int = 20, offset: int = 0) -> dict:
         """Search previously confirmed images by subject or description text."""
         return await self._request(
-            "GET", "/images/search", params={"subject": subject, "limit": limit}
+            "GET",
+            "/images/search",
+            params={"subject": subject, "limit": limit, "offset": offset},
         )
 
     async def cache_store(self, url: str, content: str, title: Optional[str] = None) -> dict:
