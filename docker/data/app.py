@@ -340,9 +340,9 @@ def article_search(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params += [limit, offset]
     sql_articles = (
-        f"SELECT id, url, title, content, topic, stored_at FROM articles {where} "
+        f"SELECT id, url, title, content, topic, stored_at FROM articles {where} "  # nosec B608
         "ORDER BY stored_at DESC LIMIT %s OFFSET %s"
-    )  # nosec B608
+    )
     with _pg() as pg:
         rows = pg.execute(sql_articles, params).fetchall()
 
