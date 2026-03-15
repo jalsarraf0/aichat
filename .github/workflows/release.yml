@@ -31,7 +31,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   build-python-dist:
     name: Build Python Dist
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   build-binary:
     name: Build Binary
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -93,12 +93,11 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   build-images:
     name: Build Image / ${{ matrix.service }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
         include:
           - service: aichat-data
             context: docker/data
@@ -142,13 +141,12 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   sbom:
     name: SBOM / ${{ matrix.service }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 15
     needs: build-images
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
         service:
           - aichat-data
           - aichat-vision
@@ -196,7 +194,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 15
     needs: [build-python-dist, build-binary, sbom]
     steps:

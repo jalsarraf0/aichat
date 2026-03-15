@@ -13,7 +13,7 @@ permissions:
 jobs:
   regression:
     name: Regression (${{ matrix.batch.name }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
@@ -21,7 +21,6 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
         batch:
           - name: core
             paths: "tests/test_tui.py tests/test_tool_args.py tests/test_tool_scheduler.py tests/test_toolkit.py tests/test_tools_e2e.py tests/test_streaming.py tests/test_thinking.py tests/test_ssh_keys.py tests/test_sanitizer.py tests/test_keybinds.py tests/test_cli_mcp_server.py"

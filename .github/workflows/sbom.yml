@@ -25,12 +25,11 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   build:
     name: Build / ${{ matrix.service }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
         include:
           - service: aichat-data
             context: docker/data
@@ -71,13 +70,12 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   sbom-scan:
     name: SBOM+Scan / ${{ matrix.service }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 20
     needs: build
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
         service:
           - aichat-data
           - aichat-vision
@@ -168,7 +166,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   pip-audit:
     name: Python Dependency Audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -212,7 +210,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   sbom-summary:
     name: SBOM Summary
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 5
     needs: [sbom-scan, pip-audit]
     if: always()

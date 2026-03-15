@@ -23,11 +23,10 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   sast:
     name: SAST / ${{ matrix.layer.name }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
         layer:
           - name: src
             path: src/
@@ -52,12 +51,11 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   dep-audit:
     name: Dep Audit / ${{ matrix.target.name }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 10
     continue-on-error: true    # advisory — upstream CVEs are informational
     strategy:
       fail-fast: false
-      matrix:
         target:
           - name: main
             req: ""
@@ -97,7 +95,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   secrets:
     name: Secret Scan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -121,7 +119,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   shellcheck:
     name: Shellcheck + shfmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gentoo]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
