@@ -34,9 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
           cache: pip
 
       - name: Install deps
@@ -94,9 +91,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
           cache: pip
 
       - name: Install deps
@@ -189,9 +183,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
           cache: pip
 
       - name: Pre-clean any stale containers
@@ -252,9 +243,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
           cache: pip
 
       - name: Build wheel + sdist
