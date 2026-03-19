@@ -1,0 +1,9 @@
+# Gitleaks configuration — allowlisted false positives
+# https://github.com/gitleaks/gitleaks#configuration
+
+[allowlist]
+  description = "Global allowlist for known false positives"
+  regexTarget = "match"
+  regexes = [
+    '''lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj''',
+  ]

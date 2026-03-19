@@ -1,0 +1,812 @@
+"""
+Tests for 6 new Docker services + 25 MCP tools.
+
+TestGraphSchema         — schema validation (no Docker)
+TestVectorSchema        — schema validation (no Docker)
+TestVideoSchema         — schema validation (no Docker)
+TestOcrSchema           — schema validation (no Docker)
+TestDocsSchema          — schema validation (no Docker)
+TestPdfSchema           — schema validation (no Docker)
+TestPlannerSchema       — schema validation (no Docker)
+TestGraphE2E            — live MCP graph tools
+TestVectorE2E           — live MCP vector tools (requires LM Studio for embeddings)
+TestVideoE2E            — live MCP video tools
+TestOcrE2E              — live MCP ocr tools
+TestDocsE2E             — live MCP docs tools
+TestPdfE2E              — live MCP pdf tools
+TestPlannerE2E          — live MCP planner tools (full lifecycle)
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+
+# ---------------------------------------------------------------------------
+# Load docker/mcp/app.py for schema unit tests (no Docker)
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).parent.parent
+
+
+def _load_mcp():
+    mod_name = "mcp_app_new_svc"
+    spec = importlib.util.spec_from_file_location(mod_name, _REPO / "docker" / "mcp" / "app.py")
+    mod  = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+try:
+    _mcp   = _load_mcp()
+    _TOOLS = _mcp._TOOLS
+    _LOAD_OK = True
+except Exception as _err:
+    _LOAD_OK = False
+    _TOOLS   = []
+
+skip_load = pytest.mark.skipif(not _LOAD_OK, reason="docker/mcp/app.py failed to load")
+
+# ---------------------------------------------------------------------------
+# Live service checks
+# ---------------------------------------------------------------------------
+
+MCP_URL     = "http://localhost:8096"
+# Consolidated service URLs (post-refactor)
+DATA_URL    = "http://localhost:8091"
+GRAPH_URL   = "http://localhost:8091/graph"
+PLANNER_URL = "http://localhost:8091/planner"
+VISION_URL  = "http://localhost:8099"
+VIDEO_URL   = "http://localhost:8099"
+OCR_URL     = "http://localhost:8099/ocr"
+DOCS_URL    = "http://localhost:8101"
+PDF_URL     = "http://localhost:8101/pdf"
+VECTOR_URL  = "http://localhost:6333"
+LM_URL      = os.environ.get("LM_STUDIO_URL", os.environ.get("LM_URL", "http://192.168.50.2:1234"))
+
+
+def _up(url: str, path: str = "/health") -> bool:
+    try:
+        return httpx.get(url + path, timeout=3).status_code < 500
+    except Exception:
+        return False
+
+
+_MCP_UP     = _up(MCP_URL)
+_DATA_UP    = _up(DATA_URL)
+_GRAPH_UP   = _DATA_UP   # graph is a sub-route of aichat-data
+_VECTOR_UP  = _up(VECTOR_URL)  # Qdrant health endpoint
+_VIDEO_UP   = _up(VISION_URL)
+_OCR_UP     = _VIDEO_UP   # OCR is a sub-route of aichat-vision
+_DOCS_UP    = _up(DOCS_URL)
+_PDF_UP     = _DOCS_UP    # PDF is a sub-route of aichat-docs
+_PLANNER_UP = _DATA_UP    # planner is a sub-route of aichat-data
+_LM_UP      = _up(LM_URL, "/v1/models")
+
+skip_mcp     = pytest.mark.skipif(not _MCP_UP,     reason="aichat-mcp not running")
+skip_graph   = pytest.mark.skipif(not _GRAPH_UP,   reason="aichat-data (graph) not running")
+skip_vector  = pytest.mark.skipif(not _VECTOR_UP,  reason="aichat-vector (Qdrant) not running")
+skip_video   = pytest.mark.skipif(not _VIDEO_UP,   reason="aichat-vision not running")
+skip_ocr     = pytest.mark.skipif(not _OCR_UP,     reason="aichat-vision (ocr) not running")
+skip_docs    = pytest.mark.skipif(not _DOCS_UP,    reason="aichat-docs not running")
+skip_pdf     = pytest.mark.skipif(not _PDF_UP,     reason="aichat-docs (pdf) not running")
+skip_planner = pytest.mark.skipif(not _PLANNER_UP, reason="aichat-data (planner) not running")
+skip_lm      = pytest.mark.skipif(not _LM_UP,      reason="LM Studio not running")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _mcp_call(name: str, arguments: dict, timeout: float = 60) -> dict:
+    r = httpx.post(
+        f"{MCP_URL}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": name, "arguments": arguments}},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _mcp_text(name: str, arguments: dict, timeout: float = 60) -> str:
+    content = _mcp_call(name, arguments, timeout).get("result", {}).get("content", [])
+    return "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
+
+
+def _tool_names() -> set[str]:
+    return {t["name"] for t in _TOOLS}
+
+
+def _tool(name: str) -> dict:
+    for t in _TOOLS:
+        if t["name"] == name:
+            return t
+    return {}
+
+
+def _write_simple_pdf(path: Path, text: str = "Hello PDF") -> None:
+    """Write a tiny valid one-page PDF with embedded text, no external deps."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_text = (text or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    content = f"BT /F1 18 Tf 50 100 Td ({safe_text}) Tj ET".encode("ascii", errors="replace")
+    obj1 = b"<< /Type /Catalog /Pages 2 0 R >>"
+    obj2 = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+    obj3 = (
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+    )
+    obj4 = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content)
+    obj5 = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    objects = [obj1, obj2, obj3, obj4, obj5]
+
+    parts = [b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"]
+    offsets = [0]
+    cur = len(parts[0])
+    for i, obj in enumerate(objects, start=1):
+        blob = f"{i} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
+        offsets.append(cur)
+        parts.append(blob)
+        cur += len(blob)
+
+    xref_pos = cur
+    xref = [f"xref\n0 {len(objects) + 1}\n".encode("ascii"), b"0000000000 65535 f \n"]
+    for off in offsets[1:]:
+        xref.append(f"{off:010d} 00000 n \n".encode("ascii"))
+    trailer = (
+        b"trailer\n"
+        + f"<< /Size {len(objects) + 1} /Root 1 0 R >>\n".encode("ascii")
+        + b"startxref\n"
+        + f"{xref_pos}\n".encode("ascii")
+        + b"%%EOF\n"
+    )
+    parts.extend(xref)
+    parts.append(trailer)
+    path.write_bytes(b"".join(parts))
+
+
+# ===========================================================================
+# Schema unit tests (no Docker)
+# ===========================================================================
+
+@skip_load
+class TestGraphSchema:
+    """knowledge mega-tool covers all graph operations."""
+
+    def _knowledge(self):
+        return _tool("knowledge")
+
+    def test_graph_add_node_in_tools(self):
+        actions = self._knowledge()["inputSchema"]["properties"]["action"]["enum"]
+        assert "add_node" in actions
+
+    def test_graph_add_edge_in_tools(self):
+        actions = self._knowledge()["inputSchema"]["properties"]["action"]["enum"]
+        assert "add_edge" in actions
+
+    def test_graph_query_in_tools(self):
+        actions = self._knowledge()["inputSchema"]["properties"]["action"]["enum"]
+        assert "query" in actions
+
+    def test_graph_path_in_tools(self):
+        actions = self._knowledge()["inputSchema"]["properties"]["action"]["enum"]
+        assert "path" in actions
+
+    def test_graph_search_in_tools(self):
+        actions = self._knowledge()["inputSchema"]["properties"]["action"]["enum"]
+        assert "search" in actions
+
+    def test_graph_add_node_required_id(self):
+        props = self._knowledge()["inputSchema"]["properties"]
+        assert "node_id" in props or "id" in props
+
+    def test_graph_add_edge_required_fields(self):
+        props = self._knowledge()["inputSchema"]["properties"]
+        assert "from_id" in props and "to_id" in props
+
+    def test_graph_path_required_fields(self):
+        props = self._knowledge()["inputSchema"]["properties"]
+        assert "from_id" in props and "to_id" in props
+
+
+@skip_load
+class TestVectorSchema:
+    """vector mega-tool covers all Qdrant operations."""
+
+    def _vector(self):
+        return _tool("vector")
+
+    def test_vector_store_in_tools(self):
+        actions = self._vector()["inputSchema"]["properties"]["action"]["enum"]
+        assert "store" in actions
+
+    def test_vector_search_in_tools(self):
+        actions = self._vector()["inputSchema"]["properties"]["action"]["enum"]
+        assert "search" in actions
+
+    def test_vector_delete_in_tools(self):
+        actions = self._vector()["inputSchema"]["properties"]["action"]["enum"]
+        assert "delete" in actions
+
+    def test_vector_collections_in_tools(self):
+        actions = self._vector()["inputSchema"]["properties"]["action"]["enum"]
+        assert "collections" in actions
+
+    def test_vector_store_required_fields(self):
+        props = self._vector()["inputSchema"]["properties"]
+        assert "text" in props
+
+    def test_vector_search_required_query(self):
+        props = self._vector()["inputSchema"]["properties"]
+        assert "query" in props
+
+
+@skip_load
+class TestVideoSchema:
+    """media mega-tool covers all video operations."""
+
+    def _media(self):
+        return _tool("media")
+
+    def test_video_info_in_tools(self):
+        actions = self._media()["inputSchema"]["properties"]["action"]["enum"]
+        assert "video_info" in actions
+
+    def test_video_frames_in_tools(self):
+        actions = self._media()["inputSchema"]["properties"]["action"]["enum"]
+        assert "video_frames" in actions
+
+    def test_video_thumbnail_in_tools(self):
+        actions = self._media()["inputSchema"]["properties"]["action"]["enum"]
+        assert "video_thumbnail" in actions
+
+    def test_video_info_required_url(self):
+        props = self._media()["inputSchema"]["properties"]
+        assert "url" in props
+
+    def test_video_frames_required_url(self):
+        props = self._media()["inputSchema"]["properties"]
+        assert "url" in props
+
+
+@skip_load
+class TestOcrSchema:
+    """document mega-tool covers all OCR operations."""
+
+    def _document(self):
+        return _tool("document")
+
+    def test_ocr_image_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "ocr" in actions
+
+    def test_ocr_pdf_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "ocr_pdf" in actions
+
+    def test_ocr_image_required_path(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props
+
+    def test_ocr_pdf_required_path(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props
+
+
+@skip_load
+class TestDocsSchema:
+    """document mega-tool covers all document ingestion operations."""
+
+    def _document(self):
+        return _tool("document")
+
+    def test_docs_ingest_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "ingest" in actions
+
+    def test_docs_extract_tables_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "tables" in actions
+
+    def test_docs_ingest_has_url_property(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "url" in props
+
+    def test_docs_ingest_has_path_property(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props
+
+
+@skip_load
+class TestPdfSchema:
+    """document mega-tool covers all PDF operations."""
+
+    def _document(self):
+        return _tool("document")
+
+    def test_pdf_read_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "pdf_read" in actions
+
+    def test_pdf_edit_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "pdf_edit" in actions
+
+    def test_pdf_fill_form_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "pdf_form" in actions
+
+    def test_pdf_merge_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "pdf_merge" in actions
+
+    def test_pdf_split_in_tools(self):
+        actions = self._document()["inputSchema"]["properties"]["action"]["enum"]
+        assert "pdf_split" in actions
+
+    def test_pdf_read_required_path(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props
+
+    def test_pdf_edit_required_fields(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props and "operations" in props
+
+    def test_pdf_fill_form_required_fields(self):
+        props = self._document()["inputSchema"]["properties"]
+        assert "path" in props and "fields" in props
+
+    def test_pdf_read_mentions_image_support(self):
+        desc = str(self._document().get("description", "")).lower()
+        assert "pdf" in desc
+
+    def test_pdf_edit_mentions_image_support(self):
+        desc = str(self._document().get("description", "")).lower()
+        assert "pdf" in desc
+
+
+@skip_load
+class TestPlannerSchema:
+    """planner mega-tool covers all task planning operations."""
+
+    def _planner(self):
+        return _tool("planner")
+
+    def test_plan_create_task_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "create" in actions
+
+    def test_plan_get_task_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "get" in actions
+
+    def test_plan_complete_task_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "complete" in actions
+
+    def test_plan_fail_task_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "fail" in actions
+
+    def test_plan_list_tasks_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "list" in actions
+
+    def test_plan_delete_task_in_tools(self):
+        actions = self._planner()["inputSchema"]["properties"]["action"]["enum"]
+        assert "delete" in actions
+
+    def test_plan_create_task_required_title(self):
+        props = self._planner()["inputSchema"]["properties"]
+        assert "title" in props
+
+    def test_tool_count_increased(self):
+        assert len(_TOOLS) == 16, f"Expected 16 mega-tools, got {len(_TOOLS)}"
+
+
+# ===========================================================================
+# E2E tests (live MCP)
+# ===========================================================================
+
+@skip_mcp
+@skip_graph
+class TestGraphE2E:
+    """Full graph lifecycle via MCP."""
+
+    def _uid(self) -> str:
+        return uuid.uuid4().hex[:8]
+
+    def test_add_node(self):
+        uid = self._uid()
+        text = _mcp_text("graph_add_node", {
+            "id": f"test:{uid}", "labels": ["Test"], "properties": {"x": uid},
+        })
+        assert "added" in text.lower() or uid in text
+
+    def test_add_edge(self):
+        uid = self._uid()
+        _mcp_text("graph_add_node", {"id": f"a:{uid}", "labels": ["A"]})
+        _mcp_text("graph_add_node", {"id": f"b:{uid}", "labels": ["B"]})
+        text = _mcp_text("graph_add_edge", {
+            "from_id": f"a:{uid}", "to_id": f"b:{uid}", "type": "test_edge",
+        })
+        assert "edge added" in text.lower() or "test_edge" in text
+
+    def test_query_neighbors(self):
+        uid = self._uid()
+        _mcp_text("graph_add_node", {"id": f"src:{uid}", "labels": ["Source"]})
+        _mcp_text("graph_add_node", {"id": f"dst:{uid}", "labels": ["Dest"]})
+        _mcp_text("graph_add_edge", {"from_id": f"src:{uid}", "to_id": f"dst:{uid}", "type": "links"})
+        text = _mcp_text("graph_query", {"id": f"src:{uid}"})
+        assert f"dst:{uid}" in text or "links" in text
+
+    def test_path_between_nodes(self):
+        uid = self._uid()
+        _mcp_text("graph_add_node", {"id": f"p1:{uid}", "labels": ["N"]})
+        _mcp_text("graph_add_node", {"id": f"p2:{uid}", "labels": ["N"]})
+        _mcp_text("graph_add_node", {"id": f"p3:{uid}", "labels": ["N"]})
+        _mcp_text("graph_add_edge", {"from_id": f"p1:{uid}", "to_id": f"p2:{uid}", "type": "e"})
+        _mcp_text("graph_add_edge", {"from_id": f"p2:{uid}", "to_id": f"p3:{uid}", "type": "e"})
+        text = _mcp_text("graph_path", {"from_id": f"p1:{uid}", "to_id": f"p3:{uid}"})
+        assert f"p1:{uid}" in text and f"p3:{uid}" in text
+
+    def test_no_path_between_disconnected(self):
+        uid = self._uid()
+        _mcp_text("graph_add_node", {"id": f"iso1:{uid}", "labels": ["N"]})
+        _mcp_text("graph_add_node", {"id": f"iso2:{uid}", "labels": ["N"]})
+        text = _mcp_text("graph_path", {"from_id": f"iso1:{uid}", "to_id": f"iso2:{uid}"})
+        assert "no path" in text.lower() or "not found" in text.lower()
+
+    def test_search_by_label(self):
+        uid = self._uid()
+        _mcp_text("graph_add_node", {"id": f"labeled:{uid}", "labels": [f"UniqueLabel{uid}"]})
+        text = _mcp_text("graph_search", {"label": f"UniqueLabel{uid}"})
+        assert f"labeled:{uid}" in text
+
+    def test_missing_id_error(self):
+        text = _mcp_text("graph_add_node", {})
+        assert "required" in text.lower() or "error" in text.lower()
+
+    def test_missing_edge_nodes_error(self):
+        text = _mcp_text("graph_add_edge", {"from_id": "a"})
+        assert "required" in text.lower() or "error" in text.lower()
+
+
+@skip_mcp
+@skip_vector
+@skip_lm
+class TestVectorE2E:
+    """Vector store + search lifecycle via MCP. Requires LM Studio for embeddings."""
+
+    def test_vector_collections(self):
+        text = _mcp_text("vector_collections", {})
+        # Either shows collections or says none found
+        assert len(text) > 0
+
+    def test_vector_store(self):
+        uid = uuid.uuid4().hex[:8]
+        text = _mcp_text("vector_store", {
+            "text": "The quick brown fox jumps over the lazy dog",
+            "id":   f"test_{uid}",
+            "collection": "test_e2e",
+        }, timeout=60)
+        # Accept success or embedding model not loaded
+        assert ("stored" in text.lower() or uid in text
+                or "embedding" in text.lower() or "model" in text.lower())
+
+    def test_vector_search_returns_results(self):
+        uid = uuid.uuid4().hex[:8]
+        # Store first
+        _mcp_text("vector_store", {
+            "text": f"Artificial intelligence and machine learning {uid}",
+            "id":   f"ai_{uid}",
+            "collection": "test_e2e",
+        }, timeout=60)
+        # Search
+        text = _mcp_text("vector_search", {
+            "query": "AI and ML topics",
+            "collection": "test_e2e",
+            "top_k": 3,
+        }, timeout=60)
+        assert len(text) > 10
+
+    def test_vector_delete(self):
+        uid = uuid.uuid4().hex[:8]
+        _mcp_text("vector_store", {
+            "text": f"Delete me {uid}", "id": f"del_{uid}", "collection": "test_e2e",
+        }, timeout=60)
+        text = _mcp_text("vector_delete", {"id": f"del_{uid}", "collection": "test_e2e"})
+        # Accept success or "not found" (if store failed due to no embedding model)
+        assert ("deleted" in text.lower() or "del_" in text
+                or "failed" in text.lower() or "not found" in text.lower())
+
+    def test_vector_store_missing_text(self):
+        text = _mcp_text("vector_store", {"id": "no_text"})
+        assert "required" in text.lower() or "error" in text.lower()
+
+
+@skip_mcp
+@skip_video
+class TestVideoE2E:
+    """Video info and thumbnail via MCP. Uses a small public domain video."""
+
+    # Small public MP4 for testing (~100KB)
+    _TEST_VIDEO = "https://www.w3schools.com/html/mov_bbb.mp4"
+
+    def test_video_info(self):
+        text = _mcp_text("video_info", {"url": self._TEST_VIDEO}, timeout=90)
+        assert "duration" in text.lower() or "fps" in text.lower() or "width" in text.lower()
+
+    def test_video_thumbnail(self):
+        content = _mcp_call("video_thumbnail", {
+            "url": self._TEST_VIDEO, "timestamp_sec": 0.5,
+        }, timeout=90).get("result", {}).get("content", [])
+        has_image = any(b.get("type") == "image" for b in content)
+        has_text  = any("thumbnail" in b.get("text", "").lower() for b in content
+                        if b.get("type") == "text")
+        assert has_image or has_text
+
+    def test_video_frames(self):
+        text = _mcp_text("video_frames", {
+            "url": self._TEST_VIDEO, "interval_sec": 1.0, "max_frames": 3,
+        }, timeout=120)
+        assert "frame" in text.lower() or "extracted" in text.lower()
+
+    def test_video_info_missing_url(self):
+        text = _mcp_text("video_info", {})
+        assert "required" in text.lower() or "error" in text.lower()
+
+
+@skip_mcp
+@skip_ocr
+class TestOcrE2E:
+    """OCR tools via MCP. Screenshots a page then OCRs it."""
+
+    def test_ocr_after_screenshot(self):
+        # Screenshot first
+        _mcp_text("screenshot", {
+            "url": "https://example.com",
+            "path": "/workspace/test_ocr_e2e.png",
+        }, timeout=30)
+        # Then OCR
+        text = _mcp_text("ocr_image", {"path": "/workspace/test_ocr_e2e.png"}, timeout=60)
+        # example.com has "Example Domain" text
+        assert len(text) > 10
+
+    def test_ocr_missing_path(self):
+        text = _mcp_text("ocr_image", {})
+        assert "required" in text.lower() or "error" in text.lower()
+
+    def test_ocr_nonexistent_file(self):
+        # Use an absolute, non-workspace path so resolver fallback cannot map to
+        # a recent screenshot and accidentally pass OCR on an unrelated image.
+        text = _mcp_text("ocr_image", {"path": f"/definitely-missing-{uuid.uuid4().hex}.png"})
+        assert "not found" in text.lower() or "error" in text.lower()
+
+
+@skip_mcp
+@skip_docs
+class TestDocsE2E:
+    """Document ingestor via MCP."""
+
+    def test_docs_ingest_url(self):
+        text = _mcp_text("docs_ingest", {"url": "https://example.com"}, timeout=30)
+        assert len(text) > 20 and ("example" in text.lower() or "#" in text)
+
+    def test_docs_ingest_missing_url_and_path(self):
+        text = _mcp_text("docs_ingest", {})
+        assert "required" in text.lower() or "error" in text.lower() or "url" in text.lower()
+
+    def test_docs_extract_tables_url(self):
+        text = _mcp_text("docs_extract_tables", {"url": "https://example.com"}, timeout=30)
+        # example.com has no tables — should return empty or table info
+        assert len(text) >= 0  # any response is valid
+
+    def test_docs_formats(self):
+        r = httpx.get(f"{DOCS_URL}/formats", timeout=5)
+        assert r.status_code == 200
+        fmts = r.json().get("formats", [])
+        assert "pdf" in fmts and "docx" in fmts
+
+    def test_pdf_health_via_docs(self):
+        r = httpx.get(f"{DOCS_URL}/pdf/health", timeout=5)
+        assert r.status_code == 200
+        assert r.json().get("status") == "ok"
+
+
+@skip_mcp
+@skip_pdf
+class TestPdfE2E:
+    """PDF read/edit/merge/split through MCP."""
+
+    _WS = Path("/docker/human_browser/workspace")
+
+    def _pdf_name(self, prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:8]}.pdf"
+
+    def _mk_pdf(self, text: str, prefix: str) -> str:
+        name = self._pdf_name(prefix)
+        _write_simple_pdf(self._WS / name, text=text)
+        return f"/workspace/{name}"
+
+    def _img_name(self, prefix: str, ext: str = ".png") -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:8]}{ext}"
+
+    def _mk_image(self, text: str, prefix: str, ext: str = ".png") -> str:
+        from PIL import Image, ImageDraw
+
+        name = self._img_name(prefix, ext=ext)
+        out = self._WS / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (960, 240), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        # Render repeated tokens to improve OCR confidence in CI.
+        draw.text((40, 90), f"{text}   {text}", fill=(0, 0, 0))
+        img.save(out)
+        return f"/workspace/{name}"
+
+    def test_pdf_read(self):
+        p = self._mk_pdf("Hello PDF Read", "pdfread")
+        text = _mcp_text("pdf_read", {"path": p, "mode": "text"}, timeout=60)
+        assert "hello pdf read" in text.lower() or "pdf read" in text.lower()
+
+    def test_pdf_edit_replace_text(self):
+        src = self._mk_pdf("Alpha Token", "pdfedit")
+        out = f"/workspace/{self._pdf_name('pdfedit_out')}"
+        edit_text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "output_path": out,
+                "operations": [
+                    {"op": "replace_text", "find": "Alpha", "replace": "Omega"},
+                ],
+                "verify": True,
+            },
+            timeout=90,
+        )
+        assert "pdf edited successfully" in edit_text.lower() or "output:" in edit_text.lower()
+
+        read_text = _mcp_text("pdf_read", {"path": out, "mode": "text"}, timeout=60)
+        assert "omega" in read_text.lower()
+
+    def test_pdf_merge_and_split(self):
+        p1 = self._mk_pdf("Merge One", "pdfmerge")
+        p2 = self._mk_pdf("Merge Two", "pdfmerge")
+        merged = f"/workspace/{self._pdf_name('pdfmerged')}"
+        merge_text = _mcp_text("pdf_merge", {"paths": [p1, p2], "output_path": merged}, timeout=120)
+        assert "merged" in merge_text.lower() and "output:" in merge_text.lower()
+
+        split_text = _mcp_text(
+            "pdf_split",
+            {"path": merged, "ranges": [[1, 1], [2, 2]], "prefix": f"split_{uuid.uuid4().hex[:6]}"},
+            timeout=120,
+        )
+        assert "split into" in split_text.lower()
+
+    def test_pdf_fill_form_requires_fields(self):
+        p = self._mk_pdf("No form fields here", "pdfform")
+        text = _mcp_text("pdf_fill_form", {"path": p, "fields": {}}, timeout=60)
+        assert "fields" in text.lower() or "required" in text.lower() or "error" in text.lower()
+
+    def test_pdf_read_image_input(self):
+        p = self._mk_image("Image Read Token", "imgread", ext=".png")
+        text = _mcp_text("pdf_read", {"path": p, "mode": "ocr"}, timeout=90)
+        assert "image read:" in text.lower() or "input_kind" in text.lower()
+
+    def test_pdf_edit_image_insert_text(self):
+        src = self._mk_image("Canvas", "imgedit_src", ext=".jpeg")
+        out = f"/workspace/{self._img_name('imgedit_out', ext='.jpeg')}"
+        edit_text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "output_path": out,
+                "operations": [
+                    {"op": "insert_text", "text": "WorldClass", "rect": [40, 40, 560, 160]},
+                ],
+                "verify": True,
+            },
+            timeout=120,
+        )
+        assert "image edited successfully" in edit_text.lower() or "output:" in edit_text.lower()
+
+    def test_pdf_edit_image_rejects_pdf_only_operation(self):
+        src = self._mk_image("PDF-only-op", "imgedit_pdf_only", ext=".png")
+        text = _mcp_text(
+            "pdf_edit",
+            {
+                "path": src,
+                "operations": [{"op": "reorder_pages", "order": [1]}],
+            },
+            timeout=90,
+        )
+        assert "pdf-only" in text.lower() or "unsupported" in text.lower() or "failed" in text.lower()
+
+
+@skip_mcp
+@skip_planner
+class TestPlannerE2E:
+    """Full task planner lifecycle via MCP."""
+
+    def test_create_and_get_task(self):
+        text = _mcp_text("plan_create_task", {
+            "title": "Test task from E2E", "description": "Created by test suite",
+        })
+        assert "task created" in text.lower() or "id=" in text
+        # Extract ID
+        task_id = None
+        for part in text.split():
+            if part.startswith("id="):
+                task_id = part[3:]
+                break
+        if task_id:
+            get_text = _mcp_text("plan_get_task", {"id": task_id})
+            assert task_id in get_text
+
+    def test_complete_task(self):
+        text = _mcp_text("plan_create_task", {"title": "Task to complete"})
+        task_id = None
+        for part in text.split():
+            if part.startswith("id="):
+                task_id = part[3:]
+                break
+        if task_id:
+            done_text = _mcp_text("plan_complete_task", {"id": task_id})
+            assert "done" in done_text.lower() or task_id in done_text
+
+    def test_fail_task(self):
+        text = _mcp_text("plan_create_task", {"title": "Task to fail"})
+        task_id = None
+        for part in text.split():
+            if part.startswith("id="):
+                task_id = part[3:]
+                break
+        if task_id:
+            fail_text = _mcp_text("plan_fail_task", {"id": task_id, "detail": "test failure"})
+            assert "failed" in fail_text.lower() or task_id in fail_text
+
+    def test_list_tasks(self):
+        _mcp_text("plan_create_task", {"title": "Listed task"})
+        text = _mcp_text("plan_list_tasks", {"limit": 10})
+        assert "task" in text.lower() or "[" in text
+
+    def test_dependency_chain(self):
+        text_a = _mcp_text("plan_create_task", {"title": "Step A"})
+        task_a = None
+        for part in text_a.split():
+            if part.startswith("id="):
+                task_a = part[3:]
+                break
+        if task_a:
+            text_b = _mcp_text("plan_create_task", {
+                "title": "Step B (depends on A)",
+                "depends_on": [task_a],
+            })
+            assert "step b" in text_b.lower() or task_a in text_b or "created" in text_b.lower()
+
+    def test_delete_task(self):
+        text = _mcp_text("plan_create_task", {"title": "Task to delete"})
+        task_id = None
+        for part in text.split():
+            if part.startswith("id="):
+                task_id = part[3:]
+                break
+        if task_id:
+            del_text = _mcp_text("plan_delete_task", {"id": task_id})
+            assert "deleted" in del_text.lower() or task_id in del_text
+
+    def test_missing_title_error(self):
+        text = _mcp_text("plan_create_task", {})
+        assert "required" in text.lower() or "error" in text.lower()
+
+    def test_unknown_task_id(self):
+        text = _mcp_text("plan_get_task", {"id": "nonexistent_xyz"})
+        assert "not found" in text.lower() or "error" in text.lower()

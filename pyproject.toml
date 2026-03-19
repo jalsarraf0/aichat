@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aichat"
+version = "0.2.0"
+description = "Codex-like Textual TUI with research and operator tooling"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "textual>=0.71.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.7.0",
+  "pyyaml>=6.0.1"
+]
+
+[project.scripts]
+aichat = "aichat.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "Pillow>=12.1.1",
+  "fastapi>=0.116.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[tool.setuptools.package-data]
+"aichat" = ["assets/*.tcss", "assets/themes/*.tcss"]
+
+[tool.pytest.ini_options]
+markers = [
+  "smoke: smoke tests that require all Docker services to be running",
+  "regression: full regression suite covering every MCP tool and service endpoint",
+  "mega_tools: tests for the mega-tool consolidation layer",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Ignore pre-existing style choices that are consistent across the codebase
+ignore = [
+    "E401",   # multiple imports on one line
+    "E402",   # module import not at top (intentional lazy imports throughout)
+    "E701",   # multiple statements on one line (colon) — style choice
+    "E702",   # multiple statements on one line (semicolon) — style choice
+    "E741",   # ambiguous variable name — pre-existing
+    "F401",   # unused import (many are conditional/type-checking imports)
+    "F541",   # f-string without any placeholders — pre-existing style
+    "F811",   # redefinition of unused name
+    "F821",   # undefined name (forward references in string annotations)
+    "F841",   # local variable assigned but never used — pre-existing
+]

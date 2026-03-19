@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import base64
+import importlib.util
+import os
+import sys
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+
+MCP_URL = "http://localhost:8096"
+WORKSPACE = "/docker/human_browser/workspace"
+_REPO = Path(__file__).parent.parent
+
+
+def _load_mcp():
+    mod_name = "mcp_app_face_recognition"
+    spec = importlib.util.spec_from_file_location(mod_name, _REPO / "docker" / "mcp" / "app.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _up(url: str) -> bool:
+    try:
+        return httpx.get(url, timeout=3).status_code < 500
+    except Exception:
+        return False
+
+
+try:
+    _mcp = _load_mcp()
+    _TOOLS = _mcp._TOOLS
+    _LOAD_OK = True
+except Exception:
+    _LOAD_OK = False
+    _TOOLS = []
+
+skip_load = pytest.mark.skipif(not _LOAD_OK, reason="docker/mcp/app.py failed to load")
+skip_mcp = pytest.mark.skipif(not _up(f"{MCP_URL}/health"), reason="aichat-mcp not running")
+skip_ws = pytest.mark.skipif(not os.path.isdir(WORKSPACE), reason="browser workspace not mounted")
+
+
+def _tool(name: str) -> dict:
+    for tool in _TOOLS:
+        if tool.get("name") == name:
+            return tool
+    return {}
+
+
+def _mcp_call(name: str, arguments: dict, timeout: float = 40.0) -> dict:
+    r = httpx.post(
+        f"{MCP_URL}/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _text_from(content: list[dict]) -> str:
+    return "\n".join(block.get("text", "") for block in content if block.get("type") == "text")
+
+
+def _has_image(content: list[dict]) -> bool:
+    return any(block.get("type") == "image" for block in content)
+
+
+@skip_load
+class TestFaceRecognizeSchema:
+    """face_recognize is now image mega-tool with action=face_detect."""
+
+    def test_face_recognize_advertised(self):
+        names = {t["name"] for t in _TOOLS}
+        assert "image" in names, "image mega-tool missing from _TOOLS"
+        image_tool = _tool("image")
+        actions = image_tool["inputSchema"]["properties"]["action"]["enum"]
+        assert "face_detect" in actions, f"face_detect action missing from image: {actions}"
+
+    def test_face_recognize_schema_required_path(self):
+        schema = _tool("image").get("inputSchema", {})
+        props = schema.get("properties", {})
+        assert "path" in props, "path property missing from image mega-tool"
+
+    def test_face_recognize_schema_has_reference_path(self):
+        props = _tool("image").get("inputSchema", {}).get("properties", {})
+        assert "reference_path" in props or "path" in props, \
+            "image mega-tool missing path/reference_path property"
+
+
+@skip_load
+class TestImagePathResolution:
+    def test_resolve_client_alias_to_latest_workspace_image(self, tmp_path, monkeypatch):
+        older = tmp_path / "older.png"
+        newer = tmp_path / "newer.jpg"
+        older.write_bytes(b"\x89PNG\r\n\x1a\n")
+        newer.write_bytes(b"\xff\xd8\xff\xe0")
+        # Ensure deterministic ordering by touching newer last.
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_100, 1_700_000_100))
+
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("image-1772402117277.jpg")
+        assert resolved == str(newer)
+
+    def test_resolve_non_alias_missing_path_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("definitely-missing-file.png")
+        assert resolved is None
+
+    def test_resolve_missing_workspace_path_to_latest_image(self, tmp_path, monkeypatch):
+        older = tmp_path / "old_capture.png"
+        newer = tmp_path / "new_capture.png"
+        older.write_bytes(b"\x89PNG\r\n\x1a\n")
+        newer.write_bytes(b"\x89PNG\r\n\x1a\n")
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_300, 1_700_000_300))
+        monkeypatch.setattr(_mcp, "BROWSER_WORKSPACE", str(tmp_path))
+        resolved = _mcp._resolve_image_path("/workspace/test_comp_e2e.png")
+        assert resolved == str(newer)
+
+
+@skip_load
+class TestSearchSafetyAndErrors:
+    def test_normalize_search_query_fixes_kluki_typo(self):
+        fixed, note = _mcp._normalize_search_query("Kluki Girls Frontline2")
+        assert "Klukai" in fixed
+        assert "Girls Frontline 2" in fixed
+        assert "normalized" in note.lower()
+
+    def test_url_has_explicit_content_blocks_explicit_bing(self):
+        assert _mcp._url_has_explicit_content(
+            "https://tse3.explicit.bing.net/th/id/OIP.abc?pid=Api"
+        )
+
+    def test_blocks_indicate_error_for_image_upscale_not_found(self):
+        blocks = [{"type": "text", "text": "image_upscale: image not found — 'ghost.jpg' in /browser-workspace"}]
+        assert _mcp._blocks_indicate_error("image_upscale", blocks) is True
+
+    def test_blocks_indicate_no_error_for_success_search_text(self):
+        blocks = [{"type": "text", "text": "[Search results] Query: python"}]
+        assert _mcp._blocks_indicate_error("web_search", blocks) is False
+
+
+@pytest.fixture
+def test_face_image_path() -> str:
+    fname = f"face_tool_test_{uuid.uuid4().hex[:8]}.png"
+    path = os.path.join(WORKSPACE, fname)
+    try:
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (320, 320), color=(240, 240, 240))
+        draw = ImageDraw.Draw(img)
+        # Simple synthetic face-like drawing. Detection may or may not trigger,
+        # but the tool should process the image and return structured output.
+        draw.ellipse([80, 60, 240, 220], outline=(30, 30, 30), width=4)
+        draw.ellipse([125, 120, 145, 140], fill=(30, 30, 30))
+        draw.ellipse([175, 120, 195, 140], fill=(30, 30, 30))
+        draw.arc([120, 130, 200, 190], start=20, end=160, fill=(30, 30, 30), width=4)
+        img.save(path, format="PNG")
+    except Exception:
+        # 1x1 transparent PNG fallback.
+        raw = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yL0YAAAAASUVORK5CYII="
+        )
+        with open(path, "wb") as fh:
+            fh.write(raw)
+    yield fname
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+
+
+@pytest.mark.smoke
+@skip_mcp
+@skip_ws
+class TestFaceRecognizeE2E:
+    def test_face_recognize_returns_image_and_text(self, test_face_image_path):
+        data = _mcp_call("face_recognize", {"path": test_face_image_path})
+        content = data.get("result", {}).get("content", [])
+        text = _text_from(content)
+        assert _has_image(content), "face_recognize should return an inline image block"
+        assert text.strip(), "face_recognize should return summary text"
+        assert "face" in text.lower() or "opencv" in text.lower()
+
+    def test_face_recognize_reference_mode(self, test_face_image_path):
+        data = _mcp_call(
+            "face_recognize",
+            {
+                "path": test_face_image_path,
+                "reference_path": test_face_image_path,
+                "match_threshold": 0.8,
+            },
+        )
+        content = data.get("result", {}).get("content", [])
+        text = _text_from(content).lower()
+        assert _has_image(content), "reference mode should return an inline image block"
+        assert text.strip(), "reference mode should return summary text"

@@ -1,0 +1,62 @@
+/* Dark theme — aligned with dartboard web UI palette */
+/* bg-main: #212121, accent: #7c6bf5, accent-hover: #9585ff */
+
+Screen {
+    background: #212121;
+    color: #ececec;
+}
+
+Header,
+Footer,
+#keybind-bar {
+    background: #171717;
+    color: #b4b4b4;
+}
+
+#topbar,
+#status {
+    background: #1a1a1a;
+    color: #9585ff;
+    border: round #7c6bf5;
+}
+
+#transcript,
+#toolpane {
+    background: #1a1a1a;
+    border: round #383838;
+}
+
+#prompt {
+    background: #2f2f2f;
+    border: round #7c6bf5;
+}
+
+.chat-assistant {
+    background: #1a1a1a;
+    border: round #383838;
+}
+
+.chat-user {
+    background: #303030;
+    border: round #7c6bf5;
+}
+
+.msg-speaker {
+    color: #9585ff;
+}
+
+/* Tool execution cards */
+.tool-call {
+    background: #1e1e2a;
+    border: round #383838;
+}
+
+/* Status indicators */
+.status-ok { color: #4caf50; }
+.status-err { color: #ef5350; }
+.status-warn { color: #ff9800; }
+
+/* Thinking/reasoning */
+.thinking-text {
+    color: #767676;
+}

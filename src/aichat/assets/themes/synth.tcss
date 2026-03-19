@@ -1,0 +1,43 @@
+Screen {
+    background: #10071d;
+    color: #f2e7ff;
+}
+
+Header,
+Footer,
+#keybind-bar {
+    background: #250d40;
+    color: #e8a8ff;
+}
+
+#topbar,
+#status {
+    background: #1b0f2f;
+    color: #6bf6ff;
+    border: round #6bf6ff;
+}
+
+#transcript,
+#toolpane {
+    background: #170f2b;
+    border: round #6bf6ff;
+}
+
+#prompt {
+    background: #21123a;
+    border: round #bc6dff;
+}
+
+.chat-assistant {
+    background: #1a1030;
+    border: round #6bf6ff;
+}
+
+.chat-user {
+    background: #210f3a;
+    border: round #bc6dff;
+}
+
+.msg-speaker {
+    color: #6bf6ff;
+}

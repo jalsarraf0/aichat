@@ -1,0 +1,15 @@
+fastapi>=0.116.0
+uvicorn==0.30.6
+httpx==0.27.2
+pydantic==2.9.2
+Pillow>=10.0.0
+brotlicffi>=1.0.9
+numpy>=1.24.0
+scipy>=1.11.0
+opencv-python-headless>=4.8.0
+starlette>=0.49.1  # CVE-2025-54121 CVE-2025-62727 fix
+defusedxml>=0.7.1  # CVE-2013-1664 safe XML parsing
+yfinance>=0.2.40
+feedparser>=6.0.11
+youtube-transcript-api>=0.6.3
+minio>=7.2.0

@@ -1,0 +1,65 @@
+# Dart web server CI — complementary to the haskell-ci-orchestrator-generated ci.yml
+name: Dart CI
+on:
+  push:
+    branches: [main]
+    paths: ['lib/**', 'bin/**', 'test/dart/**', 'pubspec.*', 'docker/web/**', 'docker/auth/**']
+  pull_request:
+    paths: ['lib/**', 'bin/**', 'test/dart/**', 'pubspec.*', 'docker/web/**', 'docker/auth/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+  security-events: write
+concurrency:
+  group: dart-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    name: Dart Lint
+    runs-on: [self-hosted, unified-all]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dart SDK
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          wget -qO /tmp/dart.zip "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-x64-release.zip"
+          unzip -qo /tmp/dart.zip -d "$HOME"
+          rm -f /tmp/dart.zip
+          echo "$HOME/dart-sdk/bin" >> "$GITHUB_PATH"
+      - run: dart pub get
+      - run: dart format --set-exit-if-changed lib/ bin/
+        continue-on-error: true
+      - run: dart analyze
+
+  test:
+    name: Dart Test
+    runs-on: [self-hosted, unified-all]
+    needs: lint
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dart SDK
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          wget -qO /tmp/dart.zip "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-x64-release.zip"
+          unzip -qo /tmp/dart.zip -d "$HOME"
+          rm -f /tmp/dart.zip
+          echo "$HOME/dart-sdk/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-pub-cache-${{ hashFiles('**/pubspec.lock') }}
+          path: ~/.pub-cache
+          restore-keys: ${{ runner.os }}-pub-cache-
+      - run: dart pub get
+      - run: dart test test/dart/
+
+  frontend-check:
+    name: Frontend Syntax
+    runs-on: [self-hosted, unified-all]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: node -c docker/web/web/app.js

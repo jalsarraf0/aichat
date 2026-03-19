@@ -1,0 +1,3 @@
+# Root requirements for CI lint/test (app deps are per-service in docker/)
+httpx>=0.27
+Pillow>=10.0
